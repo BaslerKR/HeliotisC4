@@ -148,8 +148,12 @@ void QHeliotisC4Widget::setDiscoveredDevices(const std::vector<heliotis::DeviceD
     _deviceSelector->clear();
     for (int index = 0; index < static_cast<int>(_devices.size()); ++index) {
         const auto& device = _devices[static_cast<std::size_t>(index)];
-        const QString name = QString::fromStdString(device.deviceName);
-        const QString interfaceName = QString::fromStdString(device.interfaceName);
+        QString name = QString::fromStdString(device.deviceName);
+        QString interfaceName = QString::fromStdString(device.interfaceName);
+        if (!interfaceName.isEmpty()) {
+            name += QStringLiteral(" / ") + interfaceName;
+            interfaceName.clear();
+        }
         _deviceSelector->addItem(
             interfaceName.isEmpty() ? name : QStringLiteral("%1 — %2").arg(name, interfaceName),
             index);
