@@ -41,6 +41,12 @@ if(HELIOTISC4_ENABLE_SDK)
         PATHS "${HELIOTISC4_C4UTILITY_ROOT}/c4hdl/win64-x64/c"
         NO_DEFAULT_PATH
     )
+    set_property(TARGET C4Hdl::C4HdlC PROPERTY IMPORTED_GLOBAL TRUE)
+    target_sources(heliotis_c4_core PRIVATE
+        HeliotisC4System.cpp
+        HeliotisC4System.h
+    )
+    target_compile_definitions(heliotis_c4_core PUBLIC HELIOTISC4_HAS_SDK)
     target_link_libraries(heliotis_c4_core PUBLIC C4Hdl::C4HdlC)
 endif()
 

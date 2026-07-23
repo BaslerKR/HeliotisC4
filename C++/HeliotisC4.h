@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,13 @@ enum class FeatureAccess {
 enum class FeatureSection {
     Device,
     Motion
+};
+
+struct DeviceDescriptor {
+    std::int64_t interfaceIndex = -1;
+    std::int64_t deviceIndex = -1;
+    std::string interfaceName;
+    std::string deviceName;
 };
 
 // A deep-owned, SDK-neutral view of C4 feature metadata for the Qt control tree.

@@ -24,10 +24,18 @@ The development machine has C4Utility 1.12.0 installed at
 The installed package exposes a Windows x64 Release import target only. SDK
 discovery must therefore be optional and Windows-gated until supported packages
 for other host platforms are supplied. No SDK binary is copied into this module.
+Playground development builds copy only the C4HdlC and delayed GenICam DLLs to
+the generated plugin runtime directory so the local plugin can load; this is
+not a bundle or redistribution contract.
 
 `Internal/C4UtilitySdkRuntime` is the first implementation unit. It verifies the
 known installation layout without loading a DLL or discovering hardware. Its
 standalone CTest is the precondition for the later C4HdlC lifecycle layer.
+
+`HeliotisC4System` now owns one C4 handler and discovers interfaces/devices.
+`HeliotisC4Device` owns one selected interface/device pair. This first host
+milestone is limited to discovery, selection, connection, and disconnect; it
+does not start acquisition, write a feature, or issue a motion command.
 
 ## Acquisition boundary
 
