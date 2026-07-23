@@ -12,6 +12,7 @@
 
 class QComboBox;
 class QLabel;
+class QStatusBar;
 class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -47,6 +48,8 @@ private:
     QToolButton* _refreshButton = nullptr;
     QToolButton* _connectButton = nullptr;
     QLabel* _connectionStatus = nullptr;
+    QLabel* _messageLabel = nullptr;
+    QStatusBar* _statusBar = nullptr;
     QTreeWidget* _deviceFeatureTree = nullptr;
     QTreeWidget* _motionFeatureTree = nullptr;
     QHash<QString, QTreeWidgetItem*> _deviceCategories;
