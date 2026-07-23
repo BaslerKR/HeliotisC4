@@ -11,3 +11,7 @@ inside this module. Host-specific plugin wiring belongs in Playground.
 
 See [the architecture note](docs/ARCHITECTURE.md) for the validated SDK layout
 and phased implementation contract.
+
+`C++/Utility/Qt/QHeliotisC4Widget` is an optional, Resources-independent Qt
+feature-tree scaffold. It uses the shared `DeviceFeatureTree` semantic role when
+a host installs Resources, while remaining a functional plain Qt tree otherwise.

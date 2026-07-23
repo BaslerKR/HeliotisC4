@@ -63,6 +63,11 @@ trigger, stage initialization/position/speed, scan configuration, and
 illumination. Do not expose an unrestricted raw-feature editor in the first
 plugin milestone.
 
+`C++/Utility/Qt/QHeliotisC4Widget` owns the plain Qt feature-tree presentation.
+It accepts only SDK-neutral `FeatureDescriptor` values and exposes the existing
+`treeRole="DeviceFeatureTree"` contract; Resources may theme it, but this module
+must remain usable without Resources. The tree is read-only at skeleton stage.
+
 ## Runtime and deployment gate
 
 The future Windows plugin runtime belongs below
