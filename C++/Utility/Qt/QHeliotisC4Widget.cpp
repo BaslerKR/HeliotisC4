@@ -94,14 +94,14 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
 
     auto* devicePage = new QWidget(_tabs);
     auto* deviceLayout = new QVBoxLayout(devicePage);
-    deviceLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
+    deviceLayout->setObjectName(QStringLiteral("DeviceTabbedTreePanelLayout"));
     _deviceFeatureTree = createFeatureTree(devicePage, QStringLiteral("HeliotisC4DeviceFeatureTree"));
     deviceLayout->addWidget(_deviceFeatureTree);
     _tabs->addTab(devicePage, tr("Device"));
 
     auto* motionPage = new QWidget(_tabs);
     auto* motionLayout = new QVBoxLayout(motionPage);
-    motionLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
+    motionLayout->setObjectName(QStringLiteral("DeviceTabbedTreePanelLayout"));
     _motionFeatureTree = createFeatureTree(motionPage, QStringLiteral("HeliotisC4MotionFeatureTree"));
     motionLayout->addWidget(_motionFeatureTree);
     _tabs->addTab(motionPage, tr("Motion"));
