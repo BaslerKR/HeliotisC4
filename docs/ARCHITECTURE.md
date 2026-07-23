@@ -25,6 +25,10 @@ The installed package exposes a Windows x64 Release import target only. SDK
 discovery must therefore be optional and Windows-gated until supported packages
 for other host platforms are supplied. No SDK binary is copied into this module.
 
+`Internal/C4UtilitySdkRuntime` is the first implementation unit. It verifies the
+known installation layout without loading a DLL or discovering hardware. Its
+standalone CTest is the precondition for the later C4HdlC lifecycle layer.
+
 ## Acquisition boundary
 
 The C API expresses the lifecycle as:

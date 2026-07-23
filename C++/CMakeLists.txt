@@ -1,5 +1,7 @@
 add_library(heliotis_c4_core STATIC
     HeliotisC4.cpp
+    Internal/C4UtilitySdkRuntime.cpp
+    Internal/C4UtilitySdkRuntime.h
 )
 add_library(HeliotisC4::Core ALIAS heliotis_c4_core)
 
@@ -13,6 +15,7 @@ set(HELIOTISC4_C4UTILITY_ROOT "C:/Program Files/C4Utility" CACHE PATH
     "C4Utility installation root used by the future HeliotisC4 implementation")
 option(HELIOTISC4_ENABLE_SDK "Resolve C4HdlC for implementation work" OFF)
 option(HELIOTISC4_BUILD_QT_UI "Build the optional Qt HeliotisC4 feature-tree widget" ON)
+option(HELIOTISC4_BUILD_TESTS "Build the standalone HeliotisC4 module tests" OFF)
 
 if(HELIOTISC4_BUILD_QT_UI)
     find_package(Qt6 QUIET COMPONENTS Widgets)
@@ -39,4 +42,15 @@ if(HELIOTISC4_ENABLE_SDK)
         NO_DEFAULT_PATH
     )
     target_link_libraries(heliotis_c4_core PUBLIC C4Hdl::C4HdlC)
+endif()
+
+if(HELIOTISC4_BUILD_TESTS)
+    add_executable(heliotis_c4_sdk_layout_test
+        Tests/C4UtilitySdkRuntimeTest.cpp
+    )
+    target_link_libraries(heliotis_c4_sdk_layout_test PRIVATE HeliotisC4::Core)
+    add_test(
+        NAME heliotis_c4_sdk_layout
+        COMMAND heliotis_c4_sdk_layout_test "${HELIOTISC4_C4UTILITY_ROOT}"
+    )
 endif()
