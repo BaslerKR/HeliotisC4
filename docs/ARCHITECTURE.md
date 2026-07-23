@@ -32,9 +32,10 @@ known installation layout without loading a DLL or discovering hardware. Its
 standalone CTest is the precondition for the later C4HdlC lifecycle layer.
 
 `HeliotisC4System` now owns one C4 handler and discovers interfaces/devices.
-`HeliotisC4Device` owns one selected interface/device pair. This first host
-milestone is limited to discovery, selection, connection, and disconnect; it
-does not start acquisition, write a feature, or issue a motion command.
+`HeliotisC4Device` owns one selected interface/device pair. After connection it
+builds a deep-owned, read-only feature snapshot from C4Utility metadata and
+current readable values. Stage/scan/motion/encoder categories remain in the
+Motion tab; no write, command, acquisition, or motion action is exposed.
 
 ## Acquisition boundary
 

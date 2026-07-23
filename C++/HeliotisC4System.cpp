@@ -2,6 +2,9 @@
 #include "Internal/C4UtilitySdkRuntime.h"
 
 #include <algorithm>
+#include <cctype>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -39,6 +42,70 @@ std::string readSdkString(Reader&& reader, std::string* errorMessage)
     }
     if (errorMessage) *errorMessage = "C4Utility returned an invalid string buffer size.";
     return {};
+}
+
+FeatureType featureType(const Type_e value)
+{
+    switch (value) {
+    case C4FTR_TYPE_INTEGER: return FeatureType::Integer;
+    case C4FTR_TYPE_FLOAT: return FeatureType::Float;
+    case C4FTR_TYPE_STRING: return FeatureType::String;
+    case C4FTR_TYPE_ENUMERATION: return FeatureType::Enumeration;
+    case C4FTR_TYPE_COMMAND: return FeatureType::Command;
+    case C4FTR_TYPE_BOOLEAN: return FeatureType::Boolean;
+    default: return FeatureType::Unknown;
+    }
+}
+
+FeatureAccess featureAccess(const AccessMode_e value)
+{
+    switch (value) {
+    case C4FTR_ACCESSMODE_NI: return FeatureAccess::NotImplemented;
+    case C4FTR_ACCESSMODE_NA: return FeatureAccess::NotAvailable;
+    case C4FTR_ACCESSMODE_RO: return FeatureAccess::ReadOnly;
+    case C4FTR_ACCESSMODE_WO: return FeatureAccess::WriteOnly;
+    case C4FTR_ACCESSMODE_RW: return FeatureAccess::ReadWrite;
+    default: return FeatureAccess::Unknown;
+    }
+}
+
+bool isMotionFeature(const std::string& category, const std::string& name)
+{
+    std::string value = category + "/" + name;
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value.find("stage") != std::string::npos
+        || value.find("scan") != std::string::npos
+        || value.find("motion") != std::string::npos
+        || value.find("encoder") != std::string::npos;
+}
+
+std::string readFeatureValue(const C4_FEATUREINFO feature, const FeatureType type)
+{
+    if (type == FeatureType::Command || type == FeatureType::Unknown) return {};
+    if (type == FeatureType::Integer || type == FeatureType::Boolean) {
+        std::int64_t value = 0;
+        return C4Ftr_readInteger(feature, &value) == C4HDL_ERR_SUCCESS
+            ? std::to_string(value)
+            : std::string("<unavailable>");
+    }
+    if (type == FeatureType::Float) {
+        double value = 0.0;
+        if (C4Ftr_readFloat(feature, &value) != C4HDL_ERR_SUCCESS) return "<unavailable>";
+        std::ostringstream stream;
+        stream << std::setprecision(12) << value;
+        return stream.str();
+    }
+    std::string error;
+    const std::string value = readSdkString(
+        [feature, type](char* buffer, std::size_t* size) {
+            return type == FeatureType::Enumeration
+                ? C4Ftr_readString(feature, buffer, size)
+                : C4Ftr_readString(feature, buffer, size);
+        },
+        &error);
+    return error.empty() ? value : std::string("<unavailable>");
 }
 
 } // namespace
@@ -188,6 +255,56 @@ std::string HeliotisC4Device::connectedDeviceName() const
 {
     std::lock_guard<std::mutex> lock(_stateMutex);
     return _connectedDeviceName;
+}
+
+HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage) const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    HeliotisC4::FeatureList features;
+    if (!_device) {
+        if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+        return features;
+    }
+
+    C4_FEATUREINFO* featureList = nullptr;
+    if (!check(C4Dev_getFeatureList(_device, &featureList), errorMessage)) return features;
+    if (!featureList) return features;
+
+    constexpr std::size_t maximumFeatureCount = 4096;
+    for (std::size_t index = 0; index < maximumFeatureCount && featureList[index] != nullptr; ++index) {
+        const C4_FEATUREINFO feature = featureList[index];
+        std::string metadataError;
+        const std::string name = readSdkString(
+            [feature](char* buffer, std::size_t* size) { return C4Ftr_getName(feature, buffer, size); },
+            &metadataError);
+        if (!metadataError.empty() || name.empty()) continue;
+
+        const std::string category = readSdkString(
+            [feature](char* buffer, std::size_t* size) { return C4Ftr_getCategory(feature, buffer, size); },
+            &metadataError);
+        const std::string description = readSdkString(
+            [feature](char* buffer, std::size_t* size) { return C4Ftr_getDescription(feature, buffer, size); },
+            &metadataError);
+        Type_e sdkType = C4FTR_TYPE_UNKNOWN;
+        AccessMode_e sdkAccess = C4FTR_ACCESSMODE_UNKNOWN;
+        C4Ftr_getType(feature, &sdkType);
+        C4Ftr_getAccessMode(feature, &sdkAccess);
+        const FeatureType type = featureType(sdkType);
+        const FeatureAccess access = featureAccess(sdkAccess);
+        features.push_back({
+            isMotionFeature(category, name) ? FeatureSection::Motion : FeatureSection::Device,
+            category,
+            name,
+            access == FeatureAccess::ReadOnly || access == FeatureAccess::ReadWrite
+                ? readFeatureValue(feature, type)
+                : std::string(),
+            description,
+            type,
+            access,
+        });
+    }
+    C4Ftr_release(featureList);
+    return features;
 }
 
 HeliotisC4Device::CallbackId HeliotisC4Device::registerStatusCallback(StatusCallback callback)

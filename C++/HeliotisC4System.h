@@ -51,6 +51,7 @@ public:
     void close();
     [[nodiscard]] bool isOpened() const;
     [[nodiscard]] std::string connectedDeviceName() const;
+    [[nodiscard]] HeliotisC4::FeatureList readFeatures(std::string* errorMessage = nullptr) const;
 
     CallbackId registerStatusCallback(StatusCallback callback);
     bool deregisterStatusCallback(CallbackId id);
