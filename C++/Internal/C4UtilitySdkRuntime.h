@@ -19,6 +19,9 @@ struct C4UtilitySdkLayout {
     [[nodiscard]] bool isComplete() const;
     [[nodiscard]] std::vector<std::filesystem::path> missingPaths() const;
     [[nodiscard]] std::string diagnostic() const;
+    [[nodiscard]] bool isRuntimeComplete() const;
+    [[nodiscard]] std::vector<std::filesystem::path> missingRuntimePaths() const;
+    [[nodiscard]] std::string runtimeDiagnostic() const;
 };
 
 class C4UtilitySdkRuntime final {

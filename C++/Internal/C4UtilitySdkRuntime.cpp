@@ -63,4 +63,36 @@ std::string C4UtilitySdkLayout::diagnostic() const
     return stream.str();
 }
 
+bool C4UtilitySdkLayout::isRuntimeComplete() const
+{
+    return missingRuntimePaths().empty();
+}
+
+std::vector<std::filesystem::path> C4UtilitySdkLayout::missingRuntimePaths() const
+{
+    const std::vector<std::filesystem::path> requiredPaths {
+        c4HdlRuntime,
+        genApiRuntime,
+        gcBaseRuntime,
+        diaphusProducer,
+    };
+
+    std::vector<std::filesystem::path> missing;
+    for (const auto& path : requiredPaths) {
+        if (!std::filesystem::is_regular_file(path)) missing.push_back(path);
+    }
+    return missing;
+}
+
+std::string C4UtilitySdkLayout::runtimeDiagnostic() const
+{
+    const auto missing = missingRuntimePaths();
+    if (missing.empty()) return "C4Utility runtime layout is complete.";
+
+    std::ostringstream stream;
+    stream << "C4Utility runtime layout is incomplete:";
+    for (const auto& path : missing) stream << "\n- " << path.string();
+    return stream.str();
+}
+
 } // namespace heliotis::internal

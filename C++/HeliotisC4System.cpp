@@ -47,7 +47,7 @@ HeliotisC4System::HeliotisC4System(const std::string& sdkRoot)
 {
     if (sdkRoot.empty()) throw std::runtime_error("C4Utility SDK root is empty.");
     const auto layout = internal::C4UtilitySdkRuntime::fromRoot(sdkRoot);
-    if (!layout.isComplete()) throw std::runtime_error(layout.diagnostic());
+    if (!layout.isRuntimeComplete()) throw std::runtime_error(layout.runtimeDiagnostic());
 
     std::string error;
     if (!check(C4Hdl_open(&_handler), &error)) {

@@ -24,9 +24,8 @@ The development machine has C4Utility 1.12.0 installed at
 The installed package exposes a Windows x64 Release import target only. SDK
 discovery must therefore be optional and Windows-gated until supported packages
 for other host platforms are supplied. No SDK binary is copied into this module.
-Playground development builds copy only the C4HdlC and delayed GenICam DLLs to
-the generated plugin runtime directory so the local plugin can load; this is
-not a bundle or redistribution contract.
+Playground stages the required runtime subset in its private plugin runtime;
+distribution remains subject to the C4Utility license terms.
 
 `Internal/C4UtilitySdkRuntime` is the first implementation unit. It verifies the
 known installation layout without loading a DLL or discovering hardware. Its
@@ -94,17 +93,18 @@ section so `QHeliotisC4Widget` renders them only on its Motion tab.
 
 ## Runtime and deployment gate
 
-The future Windows plugin runtime belongs below
-`plugins/heliotis-c4/runtime`, preserving the C4Utility-relative layout above.
-`C4HdlC.dll` delay-loads GenApi and GCBase; `diaphus.cti` has its own CRT and
-OpenMP dependency set. Before packaging, validate a clean staged copy with the
-SDK license/distribution terms confirmed, direct plugin loading, H8 discovery,
-and a capture/stop cycle. Do not add Heliotis paths to the host-wide GenTL
-environment without proving they do not change ownership of existing devices.
+The Windows plugin runtime belongs below `plugins/heliotis-c4/runtime`,
+preserving the C4Utility-relative layout above. It stages `C4HdlC.dll`, its
+delayed GenApi/GCBase dependencies, and `diaphus.cti`; `PluginManager` registers
+only their private DLL directories and sets the private Diaphus producer path.
+Before release, validate a clean staged copy with the SDK license/distribution
+terms confirmed, direct plugin loading, H8 discovery, and a capture/stop cycle.
+Do not add Heliotis paths to the host-wide GenTL environment without proving
+they do not change ownership of existing devices.
 
 ## Implementation sequence
 
 1. Add a Windows-only C4Utility discovery and runtime-layout test.
 2. Implement the module lifecycle and deep-owned multipart frame without Qt UI.
 3. Add the parent `HeliotisC4Plugin`, controller, and minimal H8 control widget.
-4. Add bundle staging only after the clean staging and hardware gates pass.
+4. Stage and verify the bundle before enabling acquisition or motion controls.
