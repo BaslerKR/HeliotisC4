@@ -15,3 +15,5 @@ and phased implementation contract.
 `C++/Utility/Qt/QHeliotisC4Widget` is an optional, Resources-independent Qt
 feature-tree scaffold. It uses the shared `DeviceFeatureTree` semantic role when
 a host installs Resources, while remaining a functional plain Qt tree otherwise.
+The widget separates normal device features from H8 internal-motion features in
+Device and Motion tabs; it does not issue motion commands by itself.

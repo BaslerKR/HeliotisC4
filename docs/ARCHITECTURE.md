@@ -70,7 +70,19 @@ plugin milestone.
 `C++/Utility/Qt/QHeliotisC4Widget` owns the plain Qt feature-tree presentation.
 It accepts only SDK-neutral `FeatureDescriptor` values and exposes the existing
 `treeRole="DeviceFeatureTree"` contract; Resources may theme it, but this module
-must remain usable without Resources. The tree is read-only at skeleton stage.
+must remain usable without Resources. Device and Motion tabs keep internal H8
+stage features separate from normal device configuration. The trees are
+read-only at skeleton stage.
+
+## H8 internal motion contract
+
+H8 motion is controlled through C4 feature reads, writes, and commands, not by
+an external motion-controller integration. The module must never run
+`StageInit`, change position, or start a stage-triggered scan while discovering
+or connecting a device. A future motion API must require an open, idle device;
+validate writable feature access and limits; apply one explicit user request;
+then read the affected features back. Motion feature descriptors use the Motion
+section so `QHeliotisC4Widget` renders them only on its Motion tab.
 
 ## Runtime and deployment gate
 

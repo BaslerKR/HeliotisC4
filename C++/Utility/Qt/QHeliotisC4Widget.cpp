@@ -2,6 +2,7 @@
 
 #ifdef HELIOTISC4_HAS_QT_UI
 
+#include <QTabWidget>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -21,6 +22,15 @@ QString accessText(heliotis::FeatureAccess access)
     return QStringLiteral("Unknown");
 }
 
+QTreeWidget* createFeatureTree(QWidget* parent, const QString& objectName)
+{
+    auto* tree = new QTreeWidget(parent);
+    tree->setObjectName(objectName);
+    tree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
+    tree->setHeaderLabels({QStringLiteral("Feature"), QStringLiteral("Value"), QStringLiteral("Access")});
+    return tree;
+}
+
 } // namespace
 
 QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
@@ -31,33 +41,63 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     auto* rootLayout = new QVBoxLayout(this);
     rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
 
-    _featureTree = new QTreeWidget(this);
-    _featureTree->setObjectName(QStringLiteral("HeliotisC4FeatureTree"));
-    _featureTree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
-    _featureTree->setHeaderLabels({QStringLiteral("Feature"), QStringLiteral("Value"), QStringLiteral("Access")});
+    _tabs = new QTabWidget(this);
+    _tabs->setObjectName(QStringLiteral("HeliotisC4ControlTabs"));
 
-    auto* treePanelLayout = new QVBoxLayout;
-    treePanelLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
-    treePanelLayout->addWidget(_featureTree);
-    rootLayout->addLayout(treePanelLayout);
+    auto* devicePage = new QWidget(_tabs);
+    auto* deviceLayout = new QVBoxLayout(devicePage);
+    deviceLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
+    _deviceFeatureTree = createFeatureTree(devicePage, QStringLiteral("HeliotisC4DeviceFeatureTree"));
+    deviceLayout->addWidget(_deviceFeatureTree);
+    _tabs->addTab(devicePage, tr("Device"));
+
+    auto* motionPage = new QWidget(_tabs);
+    auto* motionLayout = new QVBoxLayout(motionPage);
+    motionLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
+    _motionFeatureTree = createFeatureTree(motionPage, QStringLiteral("HeliotisC4MotionFeatureTree"));
+    motionLayout->addWidget(_motionFeatureTree);
+    _tabs->addTab(motionPage, tr("Motion"));
+
+    rootLayout->addWidget(_tabs);
 }
 
 void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& features)
 {
-    _featureTree->clear();
-    _categories.clear();
+    heliotis::HeliotisC4::FeatureList deviceFeatures;
+    heliotis::HeliotisC4::FeatureList motionFeatures;
     for (const auto& feature : features) {
-        auto* parent = ensureCategory(QString::fromStdString(feature.categoryPath));
-        auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(_featureTree);
+        if (feature.section == heliotis::FeatureSection::Motion) {
+            motionFeatures.push_back(feature);
+        } else {
+            deviceFeatures.push_back(feature);
+        }
+    }
+    populateTree(_deviceFeatureTree, _deviceCategories, deviceFeatures);
+    populateTree(_motionFeatureTree, _motionCategories, motionFeatures);
+}
+
+void QHeliotisC4Widget::populateTree(
+    QTreeWidget* tree,
+    QHash<QString, QTreeWidgetItem*>& categories,
+    const heliotis::HeliotisC4::FeatureList& features)
+{
+    tree->clear();
+    categories.clear();
+    for (const auto& feature : features) {
+        auto* parent = ensureCategory(tree, categories, QString::fromStdString(feature.categoryPath));
+        auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
         item->setText(0, QString::fromStdString(feature.displayName));
         item->setText(1, QString::fromStdString(feature.valueText));
         item->setText(2, accessText(feature.access));
         item->setToolTip(0, QString::fromStdString(feature.description));
     }
-    _featureTree->expandToDepth(0);
+    tree->expandToDepth(0);
 }
 
-QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(const QString& categoryPath)
+QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(
+    QTreeWidget* tree,
+    QHash<QString, QTreeWidgetItem*>& categories,
+    const QString& categoryPath)
 {
     if (categoryPath.isEmpty()) return nullptr;
 
@@ -65,12 +105,12 @@ QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(const QString& categoryPath)
     QString currentPath;
     for (const auto& segment : categoryPath.split('/', Qt::SkipEmptyParts)) {
         currentPath += currentPath.isEmpty() ? segment : QStringLiteral("/") + segment;
-        auto* category = _categories.value(currentPath);
+        auto* category = categories.value(currentPath);
         if (!category) {
-            category = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(_featureTree);
+            category = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
             category->setText(0, segment);
             category->setFlags(Qt::ItemIsEnabled);
-            _categories.insert(currentPath, category);
+            categories.insert(currentPath, category);
         }
         parent = category;
     }
