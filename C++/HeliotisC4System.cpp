@@ -291,13 +291,15 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
         C4Ftr_getAccessMode(feature, &sdkAccess);
         const FeatureType type = featureType(sdkType);
         const FeatureAccess access = featureAccess(sdkAccess);
+        if ((access != FeatureAccess::ReadOnly && access != FeatureAccess::ReadWrite)
+            || type == FeatureType::Command) {
+            continue;
+        }
         features.push_back({
             isMotionFeature(category, name) ? FeatureSection::Motion : FeatureSection::Device,
             category,
             name,
-            access == FeatureAccess::ReadOnly || access == FeatureAccess::ReadWrite
-                ? readFeatureValue(feature, type)
-                : std::string(),
+            readFeatureValue(feature, type),
             description,
             type,
             access,

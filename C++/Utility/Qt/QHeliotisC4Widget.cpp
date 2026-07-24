@@ -18,25 +18,12 @@
 
 namespace {
 
-QString accessText(heliotis::FeatureAccess access)
-{
-    switch (access) {
-    case heliotis::FeatureAccess::NotImplemented: return QStringLiteral("Not implemented");
-    case heliotis::FeatureAccess::NotAvailable: return QStringLiteral("Not available");
-    case heliotis::FeatureAccess::ReadOnly: return QStringLiteral("Read only");
-    case heliotis::FeatureAccess::WriteOnly: return QStringLiteral("Write only");
-    case heliotis::FeatureAccess::ReadWrite: return QStringLiteral("Read/write");
-    case heliotis::FeatureAccess::Unknown: return QStringLiteral("Unknown");
-    }
-    return QStringLiteral("Unknown");
-}
-
 QTreeWidget* createFeatureTree(QWidget* parent, const QString& objectName)
 {
     auto* tree = new QTreeWidget(parent);
     tree->setObjectName(objectName);
     tree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
-    tree->setHeaderLabels({QStringLiteral("Feature"), QStringLiteral("Value"), QStringLiteral("Access")});
+    tree->setHeaderLabels({QStringLiteral("Feature"), QStringLiteral("Value")});
     return tree;
 }
 
@@ -208,8 +195,10 @@ void QHeliotisC4Widget::populateTree(
         auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
         item->setText(0, QString::fromStdString(feature.displayName));
         item->setText(1, QString::fromStdString(feature.valueText));
-        item->setText(2, accessText(feature.access));
         item->setToolTip(0, QString::fromStdString(feature.description));
+        if (feature.access == heliotis::FeatureAccess::ReadOnly) {
+            item->setDisabled(true);
+        }
     }
     tree->expandToDepth(0);
 }
