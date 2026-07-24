@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace heliotis {
@@ -35,6 +37,69 @@ struct DeviceDescriptor {
     std::int64_t deviceIndex = -1;
     std::string interfaceName;
     std::string deviceName;
+};
+
+// SDK-neutral, deep-owned payload types. C4 buffers must be copied into this
+// contract before C4Buf_release(), so hosts can consume a frame independently
+// of the C4Utility lifetime.
+enum class FramePartKind {
+    Unknown,
+    Range,
+    Intensity,
+    Confidence
+};
+
+struct FramePart {
+    FramePartKind kind = FramePartKind::Unknown;
+    std::string name;
+    std::string pixelFormat;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint8_t bitsPerSample = 0;
+    std::variant<std::vector<std::uint16_t>, std::vector<double>> samples;
+
+    [[nodiscard]] bool isValid() const noexcept
+    {
+        if (width == 0 || height == 0)
+        {
+            return false;
+        }
+
+        const auto unsignedWidth = static_cast<std::size_t>(width);
+        const auto unsignedHeight = static_cast<std::size_t>(height);
+        if (unsignedHeight > (std::numeric_limits<std::size_t>::max)() / unsignedWidth)
+        {
+            return false;
+        }
+
+        const std::size_t expectedSampleCount = unsignedWidth * unsignedHeight;
+        return std::visit([expectedSampleCount](const auto& values) {
+            return values.size() == expectedSampleCount;
+        }, samples);
+    }
+};
+
+struct Frame {
+    std::uint64_t sequence = 0;
+    std::string frameId;
+    std::vector<FramePart> parts;
+
+    [[nodiscard]] bool isValid() const noexcept
+    {
+        if (parts.empty())
+        {
+            return false;
+        }
+
+        for (const auto& part : parts)
+        {
+            if (!part.isValid())
+            {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 // A deep-owned, SDK-neutral view of C4 feature metadata for the Qt control tree.

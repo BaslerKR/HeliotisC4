@@ -61,16 +61,17 @@ C4Hdl_open
 
 H8 data is multipart. The vendor examples configure `Range`/surface and
 reflectance-style components, identify parts through chunk metadata, and expose
-both `uint16` and floating-point payload access. The module must publish a
-device-neutral, deep-owned frame containing: part identity, pixel format,
-dimensions, calibration/chunk metadata, and samples. It must not expose an SDK
-buffer after `C4Buf_release`.
+both `uint16` and floating-point payload access. The module publishes that data
+as a deep-owned `heliotis::Frame`: each part has an explicit H8 semantic,
+identity, pixel format, dimensions, bit depth, and `uint16` or `double`
+samples. It must not expose an SDK buffer after `C4Buf_release`.
 
-For the first Playground integration, map the height/surface part to the 3D
-path and intensity/reflectance parts to auxiliary images. Keep the module's
-payload independent of `GraphicsEngine`; perform UI/GraphicsEngine conversion
-in the parent plugin/controller. Measure the cost of the SDK floating-point
-conversion and any down-conversion before choosing the long-lived frame type.
+`HeliotisC4::Core` has no GraphicsEngine dependency. Hosts may opt into the
+module-owned static `HeliotisC4::GraphicsEngineAdapter`, which maps an organized
+Range part and compatible Intensity/Confidence parts to `GraphicsScene3D` and
+`RangeFrame`. The adapter is not required for discovery, control, or
+acquisition-only hosts. The C4 reader must classify parts before invoking it;
+the exact H8 chunk-to-semantic mapping remains hardware validation work.
 
 ## Control boundary
 
@@ -113,5 +114,6 @@ they do not change ownership of existing devices.
 
 1. Add a Windows-only C4Utility discovery and runtime-layout test.
 2. Implement the module lifecycle and deep-owned multipart frame without Qt UI.
-3. Add the parent `HeliotisC4Plugin`, controller, and minimal H8 control widget.
+3. Add optional module-owned GraphicsEngine conversion and the parent
+   `HeliotisC4Plugin`, controller, and minimal H8 control widget.
 4. Stage and verify the bundle before enabling acquisition or motion controls.

@@ -15,6 +15,8 @@ set(HELIOTISC4_C4UTILITY_ROOT "C:/Program Files/C4Utility" CACHE PATH
     "C4Utility installation root used by the future HeliotisC4 implementation")
 option(HELIOTISC4_ENABLE_SDK "Resolve C4HdlC for implementation work" OFF)
 option(HELIOTISC4_BUILD_QT_UI "Build the optional Qt HeliotisC4 feature-tree widget" ON)
+option(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER
+    "Build the optional HeliotisC4-to-GraphicsEngine adapter target." OFF)
 option(HELIOTISC4_BUILD_TESTS "Build the standalone HeliotisC4 module tests" OFF)
 
 if(HELIOTISC4_BUILD_QT_UI)
@@ -50,6 +52,32 @@ if(HELIOTISC4_ENABLE_SDK)
     target_link_libraries(heliotis_c4_core PUBLIC C4Hdl::C4HdlC)
 endif()
 
+if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
+    if(NOT TARGET GraphicsEngine::GraphicsEngine)
+        message(FATAL_ERROR
+            "[HeliotisC4] HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER=ON requires "
+            "GraphicsEngine::GraphicsEngine. Add GraphicsEngine first or disable the adapter."
+        )
+    endif()
+
+    add_library(HeliotisC4GraphicsEngineAdapter STATIC
+        Utility/GraphicsEngine/HeliotisC4GraphicsSceneAdapter.h
+        Utility/GraphicsEngine/HeliotisC4GraphicsSceneAdapter.cpp
+    )
+    add_library(HeliotisC4::GraphicsEngineAdapter ALIAS HeliotisC4GraphicsEngineAdapter)
+    target_compile_features(HeliotisC4GraphicsEngineAdapter PUBLIC cxx_std_17)
+    target_include_directories(HeliotisC4GraphicsEngineAdapter
+        PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/GraphicsEngine"
+    )
+    target_link_libraries(HeliotisC4GraphicsEngineAdapter
+        PUBLIC
+            HeliotisC4::Core
+            GraphicsEngine::GraphicsEngine
+    )
+    message(STATUS "[HeliotisC4] HeliotisC4::GraphicsEngineAdapter enabled.")
+endif()
+
 if(HELIOTISC4_BUILD_TESTS)
     add_executable(heliotis_c4_sdk_layout_test
         Tests/C4UtilitySdkRuntimeTest.cpp
@@ -59,4 +87,27 @@ if(HELIOTISC4_BUILD_TESTS)
         NAME heliotis_c4_sdk_layout
         COMMAND heliotis_c4_sdk_layout_test "${HELIOTISC4_C4UTILITY_ROOT}"
     )
+
+    add_executable(heliotis_c4_frame_contract_test
+        Tests/FrameContractTest.cpp
+    )
+    target_link_libraries(heliotis_c4_frame_contract_test PRIVATE HeliotisC4::Core)
+    add_test(
+        NAME heliotis_c4_frame_contract
+        COMMAND heliotis_c4_frame_contract_test
+    )
+
+    if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
+        add_executable(heliotis_c4_graphics_adapter_test
+            Tests/GraphicsSceneAdapterTest.cpp
+        )
+        target_link_libraries(heliotis_c4_graphics_adapter_test
+            PRIVATE
+                HeliotisC4::GraphicsEngineAdapter
+        )
+        add_test(
+            NAME heliotis_c4_graphics_adapter
+            COMMAND heliotis_c4_graphics_adapter_test
+        )
+    endif()
 endif()
