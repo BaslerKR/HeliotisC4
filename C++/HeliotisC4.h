@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -58,10 +59,11 @@ struct FramePart {
     std::uint32_t height = 0;
     std::uint8_t bitsPerSample = 0;
     std::variant<std::vector<std::uint16_t>, std::vector<double>> samples;
+    double sampleScale = 1.0;
 
     [[nodiscard]] bool isValid() const noexcept
     {
-        if (width == 0 || height == 0)
+        if (width == 0 || height == 0 || !std::isfinite(sampleScale))
         {
             return false;
         }
@@ -99,6 +101,7 @@ struct Frame {
     std::string frameId;
     std::vector<FramePart> parts;
     std::optional<Scan3dGeometry> scan3dGeometry;
+    std::optional<std::uint64_t> timestampNs;
 
     [[nodiscard]] bool isValid() const noexcept
     {

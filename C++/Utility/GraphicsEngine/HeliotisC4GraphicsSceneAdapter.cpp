@@ -27,12 +27,12 @@ namespace {
 
 [[nodiscard]] std::vector<float> toFloatSamples(const heliotis::FramePart& part)
 {
-    return std::visit([](const auto& values) {
+    return std::visit([&part](const auto& values) {
         std::vector<float> converted;
         converted.reserve(values.size());
         for (const auto value : values)
         {
-            converted.push_back(static_cast<float>(value));
+            converted.push_back(static_cast<float>(static_cast<double>(value) * part.sampleScale));
         }
         return converted;
     }, part.samples);
@@ -97,7 +97,9 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
     }
     const Scan3dGeometry& geometry = *frame.scan3dGeometry;
     const double unitToMillimeters = distanceUnitToMillimeters(geometry.distanceUnit);
-    if (!std::isfinite(unitToMillimeters))
+    if (!std::isfinite(unitToMillimeters)
+        || !std::isfinite(geometry.zScale)
+        || !std::isfinite(geometry.zOffset))
     {
         return std::nullopt;
     }
@@ -106,10 +108,21 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
     range.width = static_cast<int>(rangePart->width);
     range.height = static_cast<int>(rangePart->height);
     range.zValues = toFloatSamples(*rangePart);
-    range.zScaleMm = geometry.zScale * unitToMillimeters;
-    range.zOffsetMm = geometry.zOffset * unitToMillimeters;
+    const double zScaleMm = geometry.zScale * unitToMillimeters;
+    const double zOffsetMm = geometry.zOffset * unitToMillimeters;
+    for (float& value : range.zValues)
+    {
+        if (std::isfinite(value)) value = static_cast<float>(static_cast<double>(value) * zScaleMm + zOffsetMm);
+    }
+    range.zScaleMm = 1.0;
+    range.zOffsetMm = 0.0;
     if (isRectifiedOutput(geometry.outputMode))
     {
+        if (!std::isfinite(geometry.xScale) || !std::isfinite(geometry.yScale)
+            || !std::isfinite(geometry.xOffset) || !std::isfinite(geometry.yOffset))
+        {
+            return std::nullopt;
+        }
         range.xScaleMm = geometry.xScale * unitToMillimeters;
         range.yScaleMm = geometry.yScale * unitToMillimeters;
         range.xOffsetMm = geometry.xOffset * unitToMillimeters;

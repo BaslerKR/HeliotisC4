@@ -83,11 +83,15 @@ feature. Hosts may opt into the module-owned static
 Range part and compatible Intensity/Confidence parts to `GraphicsScene3D` and
 `RangeFrame`. The adapter is not required for discovery, control, or
 acquisition-only hosts. The C4 reader must classify parts before invoking it.
-It converts Scan3d units (`nm`, `um`, or `mm`) to the GraphicsEngine millimeter
-contract and applies the selected A/B/C scales and offsets. `RectifiedC`
+It converts Scan3d units (`nm`, `um`, or `mm`) plus the C scale/offset to
+physical millimeter Z values before the RangeFrame reaches Range2D, analysis,
+or 3D consumers. `RectifiedC`
 provides a uniform A/B grid and can therefore derive PointCloud/Surface views;
 `CalibratedC` remains Range2D-only because its 2.5D Surface payload contains no
-X/Y axes.
+X/Y axes. `ChunkFrameID` and `ChunkTimestamp` are captured when configured;
+they remain optional metadata so an existing read-only configuration without
+them can still acquire frames. `ChunkPartFixpointScaling` is preserved per part
+and applied by the GraphicsEngine adapter.
 
 ## Control boundary
 

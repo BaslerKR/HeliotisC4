@@ -5,6 +5,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -109,9 +110,12 @@ FramePartKind framePartKind(const std::string& partType)
     return FramePartKind::Unknown;
 }
 
-bool usesFloatingPointSamples(const FramePartKind kind)
+bool usesFloatingPointSamples(const std::string& pixelFormat)
 {
-    return kind == FramePartKind::Range;
+    const std::string value = lowerCase(pixelFormat);
+    return value.find("float") != std::string::npos
+        || value.find("32f") != std::string::npos
+        || value.find("64f") != std::string::npos;
 }
 
 bool isLikelyTimeoutError(
@@ -182,12 +186,7 @@ bool readScan3dGeometry(const C4_BUFFER buffer, Scan3dGeometry* geometry, std::s
         double* scale;
         double* offset;
     };
-    const std::array<AxisValues, 3> axes{{
-        {"CoordinateA", &copied.xScale, &copied.xOffset},
-        {"CoordinateB", &copied.yScale, &copied.yOffset},
-        {"CoordinateC", &copied.zScale, &copied.zOffset},
-    }};
-    for (const auto& axis : axes) {
+    const auto readAxis = [buffer, errorMessage](const AxisValues& axis) {
         if (C4Buf_writeString(buffer, "ChunkScan3dCoordinateSelector", axis.selector) != C4HDL_ERR_SUCCESS
             || C4Buf_readFloat(buffer, "ChunkScan3dCoordinateScale", axis.scale) != C4HDL_ERR_SUCCESS
             || C4Buf_readFloat(buffer, "ChunkScan3dCoordinateOffset", axis.offset) != C4HDL_ERR_SUCCESS) {
@@ -197,6 +196,25 @@ bool readScan3dGeometry(const C4_BUFFER buffer, Scan3dGeometry* geometry, std::s
             }
             return false;
         }
+        if (!std::isfinite(*axis.scale) || !std::isfinite(*axis.offset)) {
+            if (errorMessage) *errorMessage = "C4Utility returned invalid Scan3d chunk geometry for "
+                + std::string(axis.selector) + ".";
+            return false;
+        }
+        return true;
+    };
+
+    const AxisValues coordinateC{"CoordinateC", &copied.zScale, &copied.zOffset};
+    if (!readAxis(coordinateC)) return false;
+
+    const std::string outputMode = lowerCase(copied.outputMode);
+    if (outputMode == "rectifiedc") {
+        const AxisValues coordinateA{"CoordinateA", &copied.xScale, &copied.xOffset};
+        const AxisValues coordinateB{"CoordinateB", &copied.yScale, &copied.yOffset};
+        if (!readAxis(coordinateA) || !readAxis(coordinateB)) return false;
+    } else if (outputMode != "calibratedc") {
+        if (errorMessage) *errorMessage = "C4Utility returned an unsupported Scan3d output mode: " + copied.outputMode;
+        return false;
     }
 
     *geometry = std::move(copied);
@@ -549,6 +567,14 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
     if (!readScan3dGeometry(buffer, &scan3dGeometry, errorMessage)) return false;
 
     Frame copied;
+    std::int64_t chunkFrameId = 0;
+    if (C4Buf_readInteger(buffer, "ChunkFrameID", &chunkFrameId) == C4HDL_ERR_SUCCESS && chunkFrameId >= 0) {
+        copied.frameId = std::to_string(chunkFrameId);
+    }
+    std::int64_t chunkTimestamp = 0;
+    if (C4Buf_readInteger(buffer, "ChunkTimestamp", &chunkTimestamp) == C4HDL_ERR_SUCCESS && chunkTimestamp >= 0) {
+        copied.timestampNs = static_cast<std::uint64_t>(chunkTimestamp);
+    }
     copied.parts.reserve(static_cast<std::size_t>(partCount));
     for (std::int64_t partIndex = 0; partIndex < partCount; ++partIndex) {
         std::array<std::int64_t, 2> dimensions{};
@@ -614,8 +640,18 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
         part.pixelFormat = pixelFormatName;
         part.width = width;
         part.height = height;
+        double fixedPointScale = 1.0;
+        const bool floatingPointSamples = usesFloatingPointSamples(pixelFormatName);
+        if (!floatingPointSamples
+            && C4Buf_readFloat(buffer, "ChunkPartFixpointScaling", &fixedPointScale) == C4HDL_ERR_SUCCESS) {
+            if (!std::isfinite(fixedPointScale)) {
+                if (errorMessage) *errorMessage = "C4Utility returned an invalid ChunkPartFixpointScaling value.";
+                return false;
+            }
+            part.sampleScale = fixedPointScale;
+        }
         std::uint32_t sampleCount = static_cast<std::uint32_t>(expectedSamples);
-        if (usesFloatingPointSamples(part.kind)) {
+        if (floatingPointSamples) {
             std::vector<double> samples(sampleCount);
             if (!check(C4Buf_getDataPartFloat(buffer, partIndex, samples.data(), &sampleCount), errorMessage)
                 || sampleCount != expectedSamples) {

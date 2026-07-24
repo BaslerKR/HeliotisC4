@@ -40,6 +40,7 @@ int main()
         200.0,
         -10.0
     };
+    frame.parts.at(1).sampleScale = 0.5;
 
     heliotis::HeliotisC4GraphicsSceneAdapter adapter;
     const auto scene = adapter.convert(frame, {});
@@ -52,15 +53,15 @@ int main()
     const auto& range = *scene->rangeFrame;
     if (range.width != 2 || range.height != 2
         || range.zValues.size() != 4U || range.intensity.size() != 4U
-        || std::fabs(range.zValues.at(3) - 4.5F) > 0.0001F
-        || std::fabs(range.intensity.at(1) - 20.0F) > 0.0001F
+        || std::fabs(range.zValues.at(3) + 0.00775F) > 0.0000001F
+        || std::fabs(range.intensity.at(1) - 10.0F) > 0.0001F
         || range.intensityBits != 16U
         || std::fabs(range.xScaleMm - 0.002) > 0.0000001
         || std::fabs(range.yScaleMm - 0.003) > 0.0000001
-        || std::fabs(range.zScaleMm - 0.0005) > 0.0000001
+        || std::fabs(range.zScaleMm - 1.0) > 0.0000001
         || std::fabs(range.xOffsetMm - 0.1) > 0.0000001
         || std::fabs(range.yOffsetMm - 0.2) > 0.0000001
-        || std::fabs(range.zOffsetMm + 0.01) > 0.0000001
+        || std::fabs(range.zOffsetMm) > 0.0000001
         || scene->meta.frameIndex != 7U)
     {
         std::cerr << "The GraphicsEngine scene must preserve H8 frame geometry, values, and metadata.\n";
