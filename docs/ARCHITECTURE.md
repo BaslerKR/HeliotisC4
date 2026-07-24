@@ -35,7 +35,7 @@ standalone CTest is the precondition for the later C4HdlC lifecycle layer.
 `HeliotisC4Device` owns one selected interface/device pair. After connection it
 builds a deep-owned, read-only feature snapshot from C4Utility metadata and
 current readable values. Stage/scan/motion/encoder categories remain in the
-Motion tab; no write, command, acquisition, or motion action is exposed.
+Motion tab; no device-feature write, command, or motion action is exposed.
 Readable nodes and execution-only command nodes appear in the tree: read-only
 and command nodes are disabled, while read/write nodes remain enabled for a
 future editor. The host refreshes this snapshot after connection and explicit
@@ -66,8 +66,13 @@ as a deep-owned `heliotis::Frame`: each part has an explicit H8 semantic,
 identity, pixel format, dimensions, bit depth, and `uint16` or `double`
 samples. It must not expose an SDK buffer after `C4Buf_release`.
 
-`HeliotisC4::Core` has no GraphicsEngine dependency. Hosts may opt into the
-module-owned static `HeliotisC4::GraphicsEngineAdapter`, which maps an organized
+`HeliotisC4::Core` has no GraphicsEngine dependency. Its acquisition worker
+arms the current device configuration, waits for buffers, deep-copies every
+part, releases the C4 buffer, and stops cleanly. It never changes trigger,
+output-component, stage, or scan features. `ChunkPartSelector` is written only
+on a received C4 buffer to read that buffer's metadata; it does not write a
+device feature. Hosts may opt into the module-owned static
+`HeliotisC4::GraphicsEngineAdapter`, which maps an organized
 Range part and compatible Intensity/Confidence parts to `GraphicsScene3D` and
 `RangeFrame`. The adapter is not required for discovery, control, or
 acquisition-only hosts. The C4 reader must classify parts before invoking it;
@@ -115,5 +120,7 @@ they do not change ownership of existing devices.
 1. Add a Windows-only C4Utility discovery and runtime-layout test.
 2. Implement the module lifecycle and deep-owned multipart frame without Qt UI.
 3. Add optional module-owned GraphicsEngine conversion and the parent
-   `HeliotisC4Plugin`, controller, and minimal H8 control widget.
-4. Stage and verify the bundle before enabling acquisition or motion controls.
+   `HeliotisC4Plugin`, controller, and minimal H8 control widget. Completed.
+4. Validate discovery plus a capture/stop cycle on an H8 before treating the
+   current buffer-part classification as hardware-complete. Motion remains
+   disabled.

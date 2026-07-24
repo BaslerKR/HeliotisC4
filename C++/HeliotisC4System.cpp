@@ -2,8 +2,10 @@
 #include "Internal/C4UtilitySdkRuntime.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -79,6 +81,47 @@ bool isMotionFeature(const std::string& category, const std::string& name)
         || value.find("scan") != std::string::npos
         || value.find("motion") != std::string::npos
         || value.find("encoder") != std::string::npos;
+}
+
+std::string lowerCase(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+FramePartKind framePartKind(const std::string& partType)
+{
+    const std::string value = lowerCase(partType);
+    if (value.find("surface") != std::string::npos || value.find("range") != std::string::npos) {
+        return FramePartKind::Range;
+    }
+    if (value.find("amplitude") != std::string::npos
+        || value.find("intensity") != std::string::npos
+        || value.find("reflectance") != std::string::npos) {
+        return FramePartKind::Intensity;
+    }
+    if (value.find("confidence") != std::string::npos) {
+        return FramePartKind::Confidence;
+    }
+    return FramePartKind::Unknown;
+}
+
+bool usesFloatingPointSamples(const FramePartKind kind, const std::string& pixelFormat)
+{
+    if (kind == FramePartKind::Range) return true;
+    const std::string value = lowerCase(pixelFormat);
+    return value.find("float") != std::string::npos
+        || value.find("coord3d") != std::string::npos
+        || (!value.empty() && value.back() == 'f');
+}
+
+bool isLikelyTimeoutError(const std::string& message)
+{
+    const std::string value = lowerCase(message);
+    return value.find("timeout") != std::string::npos
+        || value.find("timed out") != std::string::npos;
 }
 
 std::string readFeatureValue(const C4_FEATUREINFO feature, const FeatureType type)
@@ -228,11 +271,13 @@ bool HeliotisC4Device::open(const DeviceDescriptor& descriptor, std::string* err
 
 void HeliotisC4Device::close()
 {
+    stopAcquisition();
+
     C4_INTERFACE interfaceHandle = nullptr;
     C4_DEVICE deviceHandle = nullptr;
     bool wasOpen = false;
     {
-        std::lock_guard<std::mutex> stateLock(_stateMutex);
+        std::scoped_lock lock(_stateMutex, _sdkMutex);
         wasOpen = _device != nullptr;
         interfaceHandle = _interface;
         deviceHandle = _device;
@@ -259,7 +304,7 @@ std::string HeliotisC4Device::connectedDeviceName() const
 
 HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage) const
 {
-    std::lock_guard<std::mutex> lock(_stateMutex);
+    std::scoped_lock lock(_stateMutex, _sdkMutex);
     HeliotisC4::FeatureList features;
     if (!_device) {
         if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
@@ -309,6 +354,276 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
     return features;
 }
 
+bool HeliotisC4Device::startAcquisition(
+    const AcquisitionMode mode,
+    FrameCallback frameCallback,
+    std::string* errorMessage)
+{
+    if (!frameCallback) {
+        if (errorMessage) *errorMessage = "Heliotis acquisition requires a frame callback.";
+        return false;
+    }
+
+    stopAcquisition();
+
+    C4_DEVICE device = nullptr;
+    {
+        std::scoped_lock lock(_stateMutex, _sdkMutex);
+        if (!_device) {
+            if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+            return false;
+        }
+
+        device = _device;
+        const std::int64_t bufferCount = mode == AcquisitionMode::SingleFrame ? 1 : 4;
+        if (!check(C4Dev_startAcquisition(device, bufferCount), errorMessage)) return false;
+
+        _stopAcquisitionRequested.store(false);
+        _acquiring = true;
+        _lastAcquisitionError.clear();
+    }
+    dispatchStatus(Status::Acquisition, true);
+
+    try {
+        std::thread worker(&HeliotisC4Device::acquisitionLoop, this, device, mode, std::move(frameCallback));
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        _acquisitionThread = std::move(worker);
+    } catch (const std::exception& exception) {
+        {
+            std::lock_guard<std::mutex> lock(_sdkMutex);
+            C4Dev_stopAcquisition(device);
+        }
+        setAcquisitionError(exception.what());
+        finishAcquisition();
+        if (errorMessage) *errorMessage = exception.what();
+        return false;
+    }
+
+    return true;
+}
+
+void HeliotisC4Device::stopAcquisition()
+{
+    std::thread worker;
+    C4_DEVICE device = nullptr;
+    bool wasAcquiring = false;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (!_acquisitionThread.joinable() && !_acquiring) return;
+        _stopAcquisitionRequested.store(true);
+        device = _device;
+        wasAcquiring = _acquiring;
+        worker = std::move(_acquisitionThread);
+    }
+
+    if (wasAcquiring && device) {
+        std::lock_guard<std::mutex> lock(_sdkMutex);
+        C4Dev_stopAcquisition(device);
+    }
+    if (worker.joinable() && worker.get_id() == std::this_thread::get_id()) {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        _acquisitionThread = std::move(worker);
+        return;
+    }
+    if (worker.joinable()) worker.join();
+
+    finishAcquisition();
+}
+
+bool HeliotisC4Device::isAcquiring() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _acquiring;
+}
+
+std::string HeliotisC4Device::lastAcquisitionError() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _lastAcquisitionError;
+}
+
+bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::string* errorMessage) const
+{
+    if (!buffer || !frame) {
+        if (errorMessage) *errorMessage = "C4Utility returned an invalid acquisition buffer.";
+        return false;
+    }
+
+    std::int64_t partCount = 0;
+    if (!check(C4Buf_getNumParts(buffer, &partCount), errorMessage) || partCount <= 0) {
+        if (errorMessage && errorMessage->empty()) *errorMessage = "C4Utility buffer has no data parts.";
+        return false;
+    }
+
+    std::int64_t chunkPartCount = 0;
+    const bool hasChunkPartMetadata = C4Buf_readInteger(buffer, "ChunkPartCount", &chunkPartCount) == C4HDL_ERR_SUCCESS
+        && chunkPartCount == partCount;
+
+    Frame copied;
+    copied.parts.reserve(static_cast<std::size_t>(partCount));
+    for (std::int64_t partIndex = 0; partIndex < partCount; ++partIndex) {
+        std::array<std::int64_t, 2> dimensions{};
+        std::uint32_t dimensionCount = static_cast<std::uint32_t>(dimensions.size());
+        if (!check(C4Buf_getPartDimension(buffer, partIndex, dimensions.data(), &dimensionCount), errorMessage)
+            || dimensionCount != dimensions.size()
+            || dimensions[0] <= 0 || dimensions[1] <= 0
+            || dimensions[0] > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())
+            || dimensions[1] > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())) {
+            if (errorMessage && errorMessage->empty()) *errorMessage = "C4Utility returned unsupported buffer dimensions.";
+            return false;
+        }
+
+        const auto width = static_cast<std::uint32_t>(dimensions[0]);
+        const auto height = static_cast<std::uint32_t>(dimensions[1]);
+        const auto expectedSamples = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+        if (expectedSamples == 0 || expectedSamples > (std::numeric_limits<std::uint32_t>::max)()) {
+            if (errorMessage) *errorMessage = "C4Utility buffer part exceeds the supported sample count.";
+            return false;
+        }
+
+        std::int64_t pixelFormat = 0;
+        if (!check(C4Buf_getPartPixelformat(buffer, partIndex, &pixelFormat), errorMessage)) return false;
+        std::string pixelFormatError;
+        const std::string pixelFormatName = readSdkString(
+            [buffer, pixelFormat](char* text, std::size_t* size) {
+                return C4Buf_getPixelformatName(buffer, pixelFormat, text, size);
+            },
+            &pixelFormatError);
+        if (!pixelFormatError.empty()) {
+            if (errorMessage) *errorMessage = pixelFormatError;
+            return false;
+        }
+
+        std::string partName = "Part " + std::to_string(partIndex);
+        if (hasChunkPartMetadata) {
+            std::string metadataError;
+            if (C4Buf_writeInteger(buffer, "ChunkPartSelector", partIndex) == C4HDL_ERR_SUCCESS) {
+                const std::string selectedPartName = readSdkString(
+                    [buffer](char* text, std::size_t* size) {
+                        return C4Buf_readString(buffer, "ChunkPartType", text, size);
+                    },
+                    &metadataError);
+                if (metadataError.empty() && !selectedPartName.empty()) partName = selectedPartName;
+            }
+        }
+
+        FramePart part;
+        part.kind = framePartKind(partName);
+        part.name = partName;
+        part.pixelFormat = pixelFormatName;
+        part.width = width;
+        part.height = height;
+        std::uint32_t sampleCount = static_cast<std::uint32_t>(expectedSamples);
+        if (usesFloatingPointSamples(part.kind, pixelFormatName)) {
+            std::vector<double> samples(sampleCount);
+            if (!check(C4Buf_getDataPartFloat(buffer, partIndex, samples.data(), &sampleCount), errorMessage)
+                || sampleCount != expectedSamples) {
+                if (errorMessage && errorMessage->empty()) *errorMessage = "C4Utility returned an invalid floating-point part size.";
+                return false;
+            }
+            part.bitsPerSample = 64;
+            part.samples = std::move(samples);
+        } else {
+            std::vector<std::uint16_t> samples(sampleCount);
+            if (!check(C4Buf_getDataPartUint16(buffer, partIndex, samples.data(), &sampleCount), errorMessage)
+                || sampleCount != expectedSamples) {
+                if (errorMessage && errorMessage->empty()) *errorMessage = "C4Utility returned an invalid uint16 part size.";
+                return false;
+            }
+            part.bitsPerSample = 16;
+            part.samples = std::move(samples);
+        }
+        copied.parts.push_back(std::move(part));
+    }
+
+    if (!copied.isValid()) {
+        if (errorMessage) *errorMessage = "C4Utility produced an invalid frame payload.";
+        return false;
+    }
+    *frame = std::move(copied);
+    return true;
+}
+
+void HeliotisC4Device::acquisitionLoop(
+    const C4_DEVICE device,
+    const AcquisitionMode mode,
+    FrameCallback frameCallback)
+{
+    constexpr std::int64_t bufferTimeoutMs = 250;
+    while (!_stopAcquisitionRequested.load()) {
+        C4_BUFFER buffer = nullptr;
+        Frame frame;
+        std::string error;
+        C4HDL_ERROR result = C4HDL_ERR_ERROR;
+        {
+            std::lock_guard<std::mutex> lock(_sdkMutex);
+            result = C4Dev_getBuffer(device, &buffer, bufferTimeoutMs);
+            if (result == C4HDL_ERR_SUCCESS) {
+                bool copied = false;
+                try {
+                    copied = copyFrame(buffer, &frame, &error);
+                } catch (const std::exception& exception) {
+                    error = exception.what();
+                } catch (...) {
+                    error = "An unknown exception occurred while copying a C4Utility buffer.";
+                }
+                const C4HDL_ERROR releaseResult = C4Buf_release(buffer);
+                buffer = nullptr;
+                if (!copied && error.empty()) error = "C4Utility could not copy an acquisition buffer.";
+                if (releaseResult != C4HDL_ERR_SUCCESS && error.empty()) error = lastSdkError();
+                if (!error.empty()) result = C4HDL_ERR_ERROR;
+            } else {
+                error = lastSdkError();
+            }
+        }
+
+        if (result != C4HDL_ERR_SUCCESS) {
+            if (_stopAcquisitionRequested.load()) break;
+            if (isLikelyTimeoutError(error)) continue;
+            setAcquisitionError(error.empty() ? "C4Utility acquisition failed." : error);
+            break;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(_stateMutex);
+            frame.sequence = _nextFrameSequence++;
+        }
+        try {
+            frameCallback(std::move(frame));
+        } catch (const std::exception& exception) {
+            setAcquisitionError(exception.what());
+            break;
+        } catch (...) {
+            setAcquisitionError("An unknown exception occurred in the Heliotis frame callback.");
+            break;
+        }
+        if (mode == AcquisitionMode::SingleFrame) break;
+    }
+
+    if (!_stopAcquisitionRequested.load()) {
+        std::lock_guard<std::mutex> lock(_sdkMutex);
+        C4Dev_stopAcquisition(device);
+    }
+    finishAcquisition();
+}
+
+void HeliotisC4Device::finishAcquisition()
+{
+    bool wasAcquiring = false;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        wasAcquiring = _acquiring;
+        _acquiring = false;
+    }
+    if (wasAcquiring) dispatchStatus(Status::Acquisition, false);
+}
+
+void HeliotisC4Device::setAcquisitionError(std::string message)
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    _lastAcquisitionError = std::move(message);
+}
+
 HeliotisC4Device::CallbackId HeliotisC4Device::registerStatusCallback(StatusCallback callback)
 {
     if (!callback) return 0;
@@ -326,13 +641,18 @@ bool HeliotisC4Device::deregisterStatusCallback(const CallbackId id)
 
 void HeliotisC4Device::dispatchConnectionStatus(const bool connected)
 {
+    dispatchStatus(Status::Connection, connected);
+}
+
+void HeliotisC4Device::dispatchStatus(const Status status, const bool active)
+{
     std::vector<StatusCallback> callbacks;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         callbacks.reserve(_statusCallbacks.size());
         for (const auto& [id, callback] : _statusCallbacks) callbacks.push_back(callback);
     }
-    for (const auto& callback : callbacks) callback(Status::Connection, connected);
+    for (const auto& callback : callbacks) callback(status, active);
 }
 
 } // namespace heliotis

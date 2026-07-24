@@ -192,6 +192,9 @@ void QHeliotisC4Widget::setDiscoveryError(const QString& message)
 {
     _refreshButton->setEnabled(true);
     setIdleState(message);
+    _messageLabel->setProperty("messageState", QStringLiteral("error"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
 }
 
 void QHeliotisC4Widget::setConnectionState(const bool connected)
@@ -222,18 +225,53 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
     _messageLabel->setText(connected
         ? tr("Heliotis device connected.")
         : tr("Heliotis device disconnected."));
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
 }
 
 void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
 {
     _acquisitionAvailable = available;
-    const bool enabled = _connectionStatus->property("status") == QStringLiteral("connected") && available;
+    const QString status = _connectionStatus->property("status").toString();
+    const bool enabled = (status == QStringLiteral("connected") || status == QStringLiteral("grabbing")) && available;
     _grabOneButton->setEnabled(enabled && !_grabLiveButton->isChecked());
     _grabLiveButton->setEnabled(enabled);
     if (!enabled) {
         const QSignalBlocker blocker(_grabLiveButton);
         _grabLiveButton->setChecked(false);
     }
+}
+
+void QHeliotisC4Widget::setAcquisitionState(const bool acquiring)
+{
+    if (!_acquisitionAvailable) return;
+
+    {
+        const QSignalBlocker blocker(_grabLiveButton);
+        _grabLiveButton->setChecked(acquiring);
+    }
+    _grabOneButton->setEnabled(!acquiring);
+    _grabLiveButton->setEnabled(true);
+    _connectionStatus->setText(acquiring ? tr("Grabbing") : tr("Connected"));
+    _connectionStatus->setProperty("status", acquiring ? QStringLiteral("grabbing") : QStringLiteral("connected"));
+    _connectionStatus->style()->unpolish(_connectionStatus);
+    _connectionStatus->style()->polish(_connectionStatus);
+    _messageLabel->setText(acquiring
+        ? tr("Waiting for frames from the current Heliotis trigger configuration.")
+        : tr("Heliotis acquisition stopped."));
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setAcquisitionError(const QString& message)
+{
+    setAcquisitionState(false);
+    _messageLabel->setText(message);
+    _messageLabel->setProperty("messageState", QStringLiteral("error"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
 }
 
 void QHeliotisC4Widget::setIdleState(const QString& message)
@@ -243,6 +281,9 @@ void QHeliotisC4Widget::setIdleState(const QString& message)
     _connectionStatus->style()->unpolish(_connectionStatus);
     _connectionStatus->style()->polish(_connectionStatus);
     _messageLabel->setText(message);
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
 }
 
 void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& features)

@@ -28,6 +28,8 @@ public:
     void setDiscoveryError(const QString& message);
     void setConnectionState(bool connected);
     void setAcquisitionAvailable(bool available);
+    void setAcquisitionState(bool acquiring);
+    void setAcquisitionError(const QString& message);
     void setFeatures(const heliotis::HeliotisC4::FeatureList& features);
 
 signals:
