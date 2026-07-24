@@ -253,7 +253,7 @@ void QHeliotisC4Widget::setAcquisitionState(const bool acquiring)
     }
     _grabOneButton->setEnabled(!acquiring);
     _grabLiveButton->setEnabled(true);
-    _connectionStatus->setText(acquiring ? tr("Grabbing") : tr("Connected"));
+    _connectionStatus->setText(acquiring ? tr("Armed") : tr("Connected"));
     _connectionStatus->setProperty("status", acquiring ? QStringLiteral("grabbing") : QStringLiteral("connected"));
     _connectionStatus->style()->unpolish(_connectionStatus);
     _connectionStatus->style()->polish(_connectionStatus);

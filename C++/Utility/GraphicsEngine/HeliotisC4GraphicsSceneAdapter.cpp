@@ -72,6 +72,15 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
     range.width = static_cast<int>(rangePart->width);
     range.height = static_cast<int>(rangePart->height);
     range.zValues = toFloatSamples(*rangePart);
+    // H8 calibration/coordinate chunks are not part of the validated read
+    // contract yet.  Keep Range2D available, but prevent GraphicsEngine from
+    // deriving uncalibrated point-cloud or surface geometry.
+    range.xScaleMm = std::numeric_limits<double>::quiet_NaN();
+    range.yScaleMm = std::numeric_limits<double>::quiet_NaN();
+    range.zScaleMm = std::numeric_limits<double>::quiet_NaN();
+    range.xOffsetMm = std::numeric_limits<double>::quiet_NaN();
+    range.yOffsetMm = std::numeric_limits<double>::quiet_NaN();
+    range.zOffsetMm = std::numeric_limits<double>::quiet_NaN();
     range.sensorType = "Heliotis H8";
     range.frameId = frame.frameId;
     if (!range.isValid())

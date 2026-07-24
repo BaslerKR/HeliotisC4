@@ -1,4 +1,5 @@
 #include "HeliotisC4GraphicsSceneAdapter.h"
+#include "engine/range/RangeFramePointCloudBuilder.h"
 
 #include <cmath>
 #include <cstdint>
@@ -44,9 +45,18 @@ int main()
         || std::fabs(range.zValues.at(3) - 4.5F) > 0.0001F
         || std::fabs(range.intensity.at(1) - 20.0F) > 0.0001F
         || range.intensityBits != 16U
+        || std::isfinite(range.xScaleMm)
+        || std::isfinite(range.yScaleMm)
+        || std::isfinite(range.zScaleMm)
         || scene->meta.frameIndex != 7U)
     {
         std::cerr << "The GraphicsEngine scene must preserve H8 frame geometry, values, and metadata.\n";
+        return 1;
+    }
+
+    if (RangeFramePointCloudBuilder::canBuild(range))
+    {
+        std::cerr << "Uncalibrated H8 range data must not produce inferred 3D geometry.\n";
         return 1;
     }
 

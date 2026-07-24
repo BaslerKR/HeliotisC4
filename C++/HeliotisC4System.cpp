@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -108,20 +109,44 @@ FramePartKind framePartKind(const std::string& partType)
     return FramePartKind::Unknown;
 }
 
-bool usesFloatingPointSamples(const FramePartKind kind, const std::string& pixelFormat)
+bool usesFloatingPointSamples(const FramePartKind kind)
 {
-    if (kind == FramePartKind::Range) return true;
-    const std::string value = lowerCase(pixelFormat);
-    return value.find("float") != std::string::npos
-        || value.find("coord3d") != std::string::npos
-        || (!value.empty() && value.back() == 'f');
+    return kind == FramePartKind::Range;
 }
 
-bool isLikelyTimeoutError(const std::string& message)
+bool isLikelyTimeoutError(
+    const std::string& message,
+    const std::chrono::milliseconds elapsed,
+    const std::chrono::milliseconds requestedTimeout)
 {
     const std::string value = lowerCase(message);
-    return value.find("timeout") != std::string::npos
-        || value.find("timed out") != std::string::npos;
+    if (value.find("timeout") != std::string::npos
+        || value.find("timed out") != std::string::npos) {
+        return true;
+    }
+
+    // The C API exposes only a generic error code for getBuffer().  Treat a
+    // generic error that consumed the requested wait as a timeout so an armed
+    // external/stage trigger remains armed instead of ending acquisition.
+    const bool genericError = value.empty()
+        || value == "unknown c4utility error."
+        || value == "error";
+    constexpr auto tolerance = std::chrono::milliseconds(25);
+    return genericError && elapsed + tolerance >= requestedTimeout;
+}
+
+bool validateChunkMetadataConfiguration(const C4_DEVICE device, std::string* errorMessage)
+{
+    std::int64_t chunkModeActive = 0;
+    if (C4Dev_readInteger(device, "ChunkModeActive", &chunkModeActive) != C4HDL_ERR_SUCCESS
+        || chunkModeActive != 1) {
+        if (errorMessage) {
+            *errorMessage = "Heliotis acquisition requires the existing device configuration to enable "
+                "ChunkModeActive, ChunkPartCount, and ChunkPartType. The plugin does not change device features.";
+        }
+        return false;
+    }
+    return true;
 }
 
 std::string readFeatureValue(const C4_FEATUREINFO feature, const FeatureType type)
@@ -375,6 +400,7 @@ bool HeliotisC4Device::startAcquisition(
         }
 
         device = _device;
+        if (!validateChunkMetadataConfiguration(device, errorMessage)) return false;
         const std::int64_t bufferCount = mode == AcquisitionMode::SingleFrame ? 1 : 4;
         if (!check(C4Dev_startAcquisition(device, bufferCount), errorMessage)) return false;
 
@@ -456,8 +482,14 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
     }
 
     std::int64_t chunkPartCount = 0;
-    const bool hasChunkPartMetadata = C4Buf_readInteger(buffer, "ChunkPartCount", &chunkPartCount) == C4HDL_ERR_SUCCESS
-        && chunkPartCount == partCount;
+    if (C4Buf_readInteger(buffer, "ChunkPartCount", &chunkPartCount) != C4HDL_ERR_SUCCESS
+        || chunkPartCount != partCount) {
+        if (errorMessage) {
+            *errorMessage = "C4Utility buffer is missing complete ChunkPartCount metadata. "
+                "Enable ChunkPartCount and ChunkPartType in the H8 configuration before acquisition.";
+        }
+        return false;
+    }
 
     Frame copied;
     copied.parts.reserve(static_cast<std::size_t>(partCount));
@@ -494,27 +526,39 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
             return false;
         }
 
-        std::string partName = "Part " + std::to_string(partIndex);
-        if (hasChunkPartMetadata) {
-            std::string metadataError;
-            if (C4Buf_writeInteger(buffer, "ChunkPartSelector", partIndex) == C4HDL_ERR_SUCCESS) {
-                const std::string selectedPartName = readSdkString(
-                    [buffer](char* text, std::size_t* size) {
-                        return C4Buf_readString(buffer, "ChunkPartType", text, size);
-                    },
-                    &metadataError);
-                if (metadataError.empty() && !selectedPartName.empty()) partName = selectedPartName;
+        if (C4Buf_writeInteger(buffer, "ChunkPartSelector", partIndex) != C4HDL_ERR_SUCCESS) {
+            if (errorMessage) {
+                *errorMessage = "C4Utility buffer cannot select ChunkPartSelector. "
+                    "Enable ChunkPartType in the H8 configuration before acquisition.";
             }
+            return false;
+        }
+        std::string metadataError;
+        const std::string partName = readSdkString(
+            [buffer](char* text, std::size_t* size) {
+                return C4Buf_readString(buffer, "ChunkPartType", text, size);
+            },
+            &metadataError);
+        if (!metadataError.empty() || partName.empty()) {
+            if (errorMessage) {
+                *errorMessage = "C4Utility buffer is missing ChunkPartType metadata. "
+                    "Enable ChunkPartType in the H8 configuration before acquisition.";
+            }
+            return false;
         }
 
         FramePart part;
         part.kind = framePartKind(partName);
+        if (part.kind == FramePartKind::Unknown) {
+            if (errorMessage) *errorMessage = "C4Utility returned an unsupported H8 chunk part type: " + partName;
+            return false;
+        }
         part.name = partName;
         part.pixelFormat = pixelFormatName;
         part.width = width;
         part.height = height;
         std::uint32_t sampleCount = static_cast<std::uint32_t>(expectedSamples);
-        if (usesFloatingPointSamples(part.kind, pixelFormatName)) {
+        if (usesFloatingPointSamples(part.kind)) {
             std::vector<double> samples(sampleCount);
             if (!check(C4Buf_getDataPartFloat(buffer, partIndex, samples.data(), &sampleCount), errorMessage)
                 || sampleCount != expectedSamples) {
@@ -549,15 +593,19 @@ void HeliotisC4Device::acquisitionLoop(
     const AcquisitionMode mode,
     FrameCallback frameCallback)
 {
-    constexpr std::int64_t bufferTimeoutMs = 250;
+    constexpr auto bufferTimeout = std::chrono::milliseconds(250);
     while (!_stopAcquisitionRequested.load()) {
         C4_BUFFER buffer = nullptr;
         Frame frame;
         std::string error;
         C4HDL_ERROR result = C4HDL_ERR_ERROR;
+        std::chrono::milliseconds bufferWait{};
         {
             std::lock_guard<std::mutex> lock(_sdkMutex);
-            result = C4Dev_getBuffer(device, &buffer, bufferTimeoutMs);
+            const auto waitStarted = std::chrono::steady_clock::now();
+            result = C4Dev_getBuffer(device, &buffer, bufferTimeout.count());
+            bufferWait = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - waitStarted);
             if (result == C4HDL_ERR_SUCCESS) {
                 bool copied = false;
                 try {
@@ -579,7 +627,7 @@ void HeliotisC4Device::acquisitionLoop(
 
         if (result != C4HDL_ERR_SUCCESS) {
             if (_stopAcquisitionRequested.load()) break;
-            if (isLikelyTimeoutError(error)) continue;
+            if (isLikelyTimeoutError(error, bufferWait, bufferTimeout)) continue;
             setAcquisitionError(error.empty() ? "C4Utility acquisition failed." : error);
             break;
         }
