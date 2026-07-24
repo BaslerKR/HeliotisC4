@@ -27,12 +27,15 @@ public:
     void setDiscoveredDevices(const std::vector<heliotis::DeviceDescriptor>& devices);
     void setDiscoveryError(const QString& message);
     void setConnectionState(bool connected);
+    void setAcquisitionAvailable(bool available);
     void setFeatures(const heliotis::HeliotisC4::FeatureList& features);
 
 signals:
     void refreshRequested();
     void connectRequested(int deviceIndex);
     void disconnectRequested();
+    void grabOneRequested();
+    void liveGrabToggled(bool enabled);
 
 private:
     void populateTree(
@@ -49,6 +52,8 @@ private:
     QComboBox* _deviceSelector = nullptr;
     QToolButton* _refreshButton = nullptr;
     QToolButton* _connectButton = nullptr;
+    QToolButton* _grabOneButton = nullptr;
+    QToolButton* _grabLiveButton = nullptr;
     QLabel* _connectionStatus = nullptr;
     QLabel* _messageLabel = nullptr;
     QStatusBar* _statusBar = nullptr;
@@ -57,6 +62,7 @@ private:
     QHash<QString, QTreeWidgetItem*> _deviceCategories;
     QHash<QString, QTreeWidgetItem*> _motionCategories;
     std::vector<heliotis::DeviceDescriptor> _devices;
+    bool _acquisitionAvailable = false;
 };
 
 #endif // HELIOTISC4_HAS_QT_UI

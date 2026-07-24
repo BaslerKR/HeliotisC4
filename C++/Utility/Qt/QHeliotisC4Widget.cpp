@@ -64,6 +64,26 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     _connectButton->setIcon(connectIcon);
     _connectButton->setEnabled(false);
 
+    _grabOneButton = new QToolButton(this);
+    _grabOneButton->setObjectName(QStringLiteral("HeliotisC4GrabOneButton"));
+    _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
+    _grabOneButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    _grabOneButton->setIconSize(QSize(16, 16));
+    _grabOneButton->setToolTip(tr("Acquire one Heliotis frame"));
+    _grabOneButton->setEnabled(false);
+
+    _grabLiveButton = new QToolButton(this);
+    _grabLiveButton->setObjectName(QStringLiteral("HeliotisC4GrabLiveButton"));
+    _grabLiveButton->setCheckable(true);
+    _grabLiveButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    _grabLiveButton->setIconSize(QSize(16, 16));
+    _grabLiveButton->setToolTip(tr("Start or stop live Heliotis acquisition"));
+    QIcon liveIcon;
+    liveIcon.addFile(QStringLiteral(":/Resources/Icons/icons8-cameras-48.png"), QSize(), QIcon::Normal, QIcon::Off);
+    liveIcon.addFile(QStringLiteral(":/Resources/Icons/icons8-pause-48.png"), QSize(), QIcon::Normal, QIcon::On);
+    _grabLiveButton->setIcon(liveIcon);
+    _grabLiveButton->setEnabled(false);
+
     auto* selectorLayout = new QHBoxLayout;
     selectorLayout->setObjectName(QStringLiteral("DeviceSelectorLayout"));
     selectorLayout->addWidget(_deviceSelector);
@@ -72,6 +92,8 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     auto* toolLayout = new QHBoxLayout;
     toolLayout->setObjectName(QStringLiteral("DeviceToolLayout"));
     toolLayout->addWidget(_connectButton);
+    toolLayout->addWidget(_grabOneButton);
+    toolLayout->addWidget(_grabLiveButton);
 
     topLayout->addLayout(selectorLayout);
     topLayout->addLayout(toolLayout);
@@ -134,6 +156,8 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
         const QSignalBlocker blocker(_connectButton);
         _connectButton->setChecked(false);
     });
+    connect(_grabOneButton, &QToolButton::clicked, this, &QHeliotisC4Widget::grabOneRequested);
+    connect(_grabLiveButton, &QToolButton::toggled, this, &QHeliotisC4Widget::liveGrabToggled);
     setConnectionState(false);
 }
 
@@ -179,6 +203,7 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
             : tr("Select a Heliotis device to connect."));
         _connectButton->setEnabled(!_devices.empty());
         _deviceSelector->setEnabled(!_devices.empty());
+        setAcquisitionAvailable(false);
         return;
     }
     _connectionStatus->setText(connected ? tr("Connected") : tr("Disconnected"));
@@ -193,9 +218,22 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
         : tr("Connect the selected device"));
     _connectButton->setEnabled(connected || !_devices.empty());
     _deviceSelector->setEnabled(!connected && !_devices.empty());
+    setAcquisitionAvailable(connected && _acquisitionAvailable);
     _messageLabel->setText(connected
         ? tr("Heliotis device connected.")
         : tr("Heliotis device disconnected."));
+}
+
+void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
+{
+    _acquisitionAvailable = available;
+    const bool enabled = _connectionStatus->property("status") == QStringLiteral("connected") && available;
+    _grabOneButton->setEnabled(enabled && !_grabLiveButton->isChecked());
+    _grabLiveButton->setEnabled(enabled);
+    if (!enabled) {
+        const QSignalBlocker blocker(_grabLiveButton);
+        _grabLiveButton->setChecked(false);
+    }
 }
 
 void QHeliotisC4Widget::setIdleState(const QString& message)
