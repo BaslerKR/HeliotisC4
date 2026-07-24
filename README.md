@@ -3,8 +3,9 @@
 Reusable Heliotis heliInspect H8 device-runtime module for Playground hosts.
 
 The current milestone uses the C4Utility `C4HdlC` C API for SDK-layout
-validation, device discovery, selected-device connection, and disconnect. It
-does not start acquisition, write a feature, or issue a motion command.
+validation, device discovery, connection-time H8 motion readiness, feature
+reads/writes, and trigger-policy-neutral buffer acquisition. A successful H8
+connection verifies `StageInitialized` and runs `StageInit` only when needed.
 
 The module keeps SDK discovery, device lifecycle, feature access, acquisition,
 and payload ownership inside this repository. `heliotis::Frame` is its

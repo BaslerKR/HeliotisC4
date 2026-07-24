@@ -3,9 +3,12 @@
 #ifdef HELIOTISC4_HAS_QT_UI
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
 #include <QSize>
 #include <QSignalBlocker>
 #include <QStatusBar>
@@ -250,7 +253,7 @@ void QHeliotisC4Widget::setConnectionPending(const bool pending)
     _deviceSelector->setEnabled(false);
     _refreshButton->setEnabled(false);
     setAcquisitionAvailable(false);
-    _messageLabel->setText(tr("Connecting to the selected Heliotis device..."));
+    _messageLabel->setText(tr("Connecting and initializing the selected Heliotis device..."));
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
     _messageLabel->style()->unpolish(_messageLabel);
     _messageLabel->style()->polish(_messageLabel);
@@ -268,6 +271,7 @@ void QHeliotisC4Widget::setConnectionError(const QString& message)
 void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
 {
     _acquisitionAvailable = available;
+    if (!available) _acquisitionActive = false;
     const QString status = _connectionStatus->property("status").toString();
     const bool enabled = (status == QStringLiteral("connected") || status == QStringLiteral("grabbing")) && available;
     _grabOneButton->setEnabled(enabled && !_grabLiveButton->isChecked());
@@ -276,24 +280,30 @@ void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
         const QSignalBlocker blocker(_grabLiveButton);
         _grabLiveButton->setChecked(false);
     }
+    setSoftwareTriggerAvailable(_acquisitionActive && enabled);
 }
 
-void QHeliotisC4Widget::setAcquisitionState(const bool acquiring)
+void QHeliotisC4Widget::setAcquisitionState(const bool acquiring, const bool continuous)
 {
     if (!_acquisitionAvailable) return;
 
+    _acquisitionActive = acquiring;
+
     {
         const QSignalBlocker blocker(_grabLiveButton);
-        _grabLiveButton->setChecked(acquiring);
+        _grabLiveButton->setChecked(acquiring && continuous);
     }
     _grabOneButton->setEnabled(!acquiring);
-    _grabLiveButton->setEnabled(true);
+    _grabLiveButton->setEnabled(!acquiring || continuous);
+    setSoftwareTriggerAvailable(acquiring);
     _connectionStatus->setText(acquiring ? tr("Armed") : tr("Connected"));
     _connectionStatus->setProperty("status", acquiring ? QStringLiteral("grabbing") : QStringLiteral("connected"));
     _connectionStatus->style()->unpolish(_connectionStatus);
     _connectionStatus->style()->polish(_connectionStatus);
     _messageLabel->setText(acquiring
-        ? tr("Waiting for frames from the current Heliotis trigger configuration.")
+        ? (continuous
+            ? tr("Armed for frames from the current Heliotis trigger configuration.")
+            : tr("Armed for one Heliotis frame from the current trigger configuration."))
         : tr("Heliotis acquisition stopped."));
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
     _messageLabel->style()->unpolish(_messageLabel);
@@ -302,7 +312,34 @@ void QHeliotisC4Widget::setAcquisitionState(const bool acquiring)
 
 void QHeliotisC4Widget::setAcquisitionError(const QString& message)
 {
-    setAcquisitionState(false);
+    setAcquisitionState(false, false);
+    _messageLabel->setText(message);
+    _messageLabel->setProperty("messageState", QStringLiteral("error"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setSoftwareTriggerAvailable(const bool available)
+{
+    for (auto* button : _softwareTriggerButtons) {
+        if (button) button->setEnabled(available && !_featureOperationPending);
+    }
+}
+
+void QHeliotisC4Widget::setFeatureOperationPending(const bool pending)
+{
+    _featureOperationPending = pending;
+    _tabs->setEnabled(!pending);
+    if (!pending) return;
+
+    _messageLabel->setText(tr("Applying Heliotis feature change..."));
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setFeatureError(const QString& message)
+{
     _messageLabel->setText(message);
     _messageLabel->setProperty("messageState", QStringLiteral("error"));
     _messageLabel->style()->unpolish(_messageLabel);
@@ -343,16 +380,71 @@ void QHeliotisC4Widget::populateTree(
 {
     tree->clear();
     categories.clear();
+    if (tree == _deviceFeatureTree) _softwareTriggerButtons.clear();
     for (const auto& feature : features) {
         auto* parent = ensureCategory(tree, categories, QString::fromStdString(feature.categoryPath));
         auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
         item->setText(0, QString::fromStdString(feature.displayName));
-        item->setText(1, QString::fromStdString(feature.valueText));
         item->setToolTip(0, QString::fromStdString(feature.description));
-        if (feature.access != heliotis::FeatureAccess::ReadWrite
-            || feature.type == heliotis::FeatureType::Command) {
-            item->setDisabled(true);
+        const QString featureName = QString::fromStdString(feature.displayName);
+        const bool writable = feature.access == heliotis::FeatureAccess::ReadWrite
+            || feature.access == heliotis::FeatureAccess::WriteOnly;
+
+        if (feature.type == heliotis::FeatureType::Command) {
+            auto* executeButton = new QPushButton(tr("Execute"), tree);
+            const bool isSoftwareTrigger = featureName == QStringLiteral("TriggerSoftware");
+            executeButton->setEnabled(writable && !_featureOperationPending
+                && (!isSoftwareTrigger || _acquisitionActive));
+            connect(executeButton, &QPushButton::clicked, this, [this, featureName] {
+                emit featureCommandRequested(featureName);
+            });
+            tree->setItemWidget(item, 1, executeButton);
+            if (isSoftwareTrigger) _softwareTriggerButtons.push_back(executeButton);
+            continue;
         }
+
+        if (!writable) {
+            item->setText(1, QString::fromStdString(feature.valueText));
+            item->setDisabled(true);
+            continue;
+        }
+
+        if (feature.type == heliotis::FeatureType::Boolean) {
+            auto* checkBox = new QCheckBox(tree);
+            checkBox->setChecked(feature.valueText == "1" || feature.valueText == "true");
+            checkBox->setEnabled(!_featureOperationPending);
+            connect(checkBox, &QCheckBox::toggled, this, [this, featureName](const bool checked) {
+                emit featureWriteRequested(featureName, checked ? QStringLiteral("1") : QStringLiteral("0"));
+            });
+            tree->setItemWidget(item, 1, checkBox);
+            continue;
+        }
+
+        if (feature.type == heliotis::FeatureType::Enumeration && !feature.enumEntries.empty()) {
+            auto* comboBox = new QComboBox(tree);
+            for (const auto& entry : feature.enumEntries) {
+                comboBox->addItem(QString::fromStdString(entry));
+            }
+            comboBox->setCurrentText(QString::fromStdString(feature.valueText));
+            comboBox->setEnabled(!_featureOperationPending);
+            connect(comboBox, &QComboBox::textActivated, this, [this, featureName](const QString& value) {
+                emit featureWriteRequested(featureName, value);
+            });
+            tree->setItemWidget(item, 1, comboBox);
+            continue;
+        }
+
+        auto* lineEdit = new QLineEdit(tree);
+        if (feature.access == heliotis::FeatureAccess::WriteOnly) {
+            lineEdit->setPlaceholderText(tr("Enter value"));
+        } else {
+            lineEdit->setText(QString::fromStdString(feature.valueText));
+        }
+        lineEdit->setEnabled(!_featureOperationPending);
+        connect(lineEdit, &QLineEdit::editingFinished, this, [this, featureName, lineEdit] {
+            emit featureWriteRequested(featureName, lineEdit->text());
+        });
+        tree->setItemWidget(item, 1, lineEdit);
     }
     tree->expandToDepth(0);
 }

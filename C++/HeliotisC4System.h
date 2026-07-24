@@ -60,7 +60,14 @@ public:
     void close();
     [[nodiscard]] bool isOpened() const;
     [[nodiscard]] std::string connectedDeviceName() const;
+    [[nodiscard]] bool initializeMotion(std::string* errorMessage = nullptr);
     [[nodiscard]] HeliotisC4::FeatureList readFeatures(std::string* errorMessage = nullptr) const;
+    [[nodiscard]] bool writeFeature(
+        const std::string& name,
+        const std::string& value,
+        std::string* errorMessage = nullptr);
+    [[nodiscard]] bool executeCommand(const std::string& name, std::string* errorMessage = nullptr);
+    [[nodiscard]] bool triggerSoftware(std::string* errorMessage = nullptr);
     [[nodiscard]] bool startAcquisition(
         AcquisitionMode mode,
         FrameCallback frameCallback,

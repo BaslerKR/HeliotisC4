@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -91,6 +93,76 @@ std::string lowerCase(std::string value)
         return static_cast<char>(std::tolower(character));
     });
     return value;
+}
+
+std::string trim(std::string value)
+{
+    const auto first = std::find_if_not(value.begin(), value.end(), [](const unsigned char character) {
+        return std::isspace(character) != 0;
+    });
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](const unsigned char character) {
+        return std::isspace(character) != 0;
+    }).base();
+    return first < last ? std::string(first, last) : std::string();
+}
+
+std::vector<std::string> splitEnumEntries(const std::string& entries)
+{
+    std::vector<std::string> result;
+    std::istringstream stream(entries);
+    for (std::string entry; std::getline(stream, entry, ';');) {
+        entry = trim(std::move(entry));
+        if (!entry.empty()) result.push_back(std::move(entry));
+    }
+    return result;
+}
+
+bool isWritable(const FeatureAccess access)
+{
+    return access == FeatureAccess::ReadWrite || access == FeatureAccess::WriteOnly;
+}
+
+bool findFeatureMetadata(
+    const C4_DEVICE device,
+    const std::string& requestedName,
+    FeatureType* type,
+    FeatureAccess* access,
+    std::string* errorMessage)
+{
+    C4_FEATUREINFO* featureList = nullptr;
+    if (!check(C4Dev_getFeatureList(device, &featureList), errorMessage)) return false;
+    if (!featureList) {
+        if (errorMessage) *errorMessage = "C4Utility returned an empty feature list.";
+        return false;
+    }
+
+    bool found = false;
+    constexpr std::size_t maximumFeatureCount = 4096;
+    for (std::size_t index = 0; index < maximumFeatureCount && featureList[index] != nullptr; ++index) {
+        const C4_FEATUREINFO feature = featureList[index];
+        std::string metadataError;
+        const std::string name = readSdkString(
+            [feature](char* buffer, std::size_t* size) { return C4Ftr_getName(feature, buffer, size); },
+            &metadataError);
+        if (!metadataError.empty() || name != requestedName) continue;
+
+        Type_e sdkType = C4FTR_TYPE_UNKNOWN;
+        AccessMode_e sdkAccess = C4FTR_ACCESSMODE_UNKNOWN;
+        if (C4Ftr_getType(feature, &sdkType) != C4HDL_ERR_SUCCESS
+            || C4Ftr_getAccessMode(feature, &sdkAccess) != C4HDL_ERR_SUCCESS) {
+            if (errorMessage) *errorMessage = lastSdkError();
+            break;
+        }
+        if (type) *type = featureType(sdkType);
+        if (access) *access = featureAccess(sdkAccess);
+        found = true;
+        break;
+    }
+    C4Ftr_release(featureList);
+    if (!found && errorMessage && errorMessage->empty()) {
+        *errorMessage = "Heliotis feature is not available: " + requestedName;
+    }
+    return found;
 }
 
 FramePartKind framePartKind(const std::string& partType)
@@ -415,6 +487,59 @@ std::string HeliotisC4Device::connectedDeviceName() const
     return _connectedDeviceName;
 }
 
+bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
+{
+    constexpr auto initializationTimeout = std::chrono::seconds(30);
+    constexpr auto pollInterval = std::chrono::milliseconds(100);
+
+    auto readInitialized = [this, errorMessage](std::int64_t* initialized) {
+        std::scoped_lock lock(_stateMutex, _sdkMutex);
+        if (!_device) {
+            if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+            return false;
+        }
+        if (_acquiring) {
+            if (errorMessage) *errorMessage = "Heliotis motion cannot be initialized during acquisition.";
+            return false;
+        }
+        if (!check(C4Dev_readInteger(_device, "StageInitialized", initialized), errorMessage)) {
+            if (errorMessage && !errorMessage->empty()) {
+                *errorMessage = "Could not read H8 StageInitialized: " + *errorMessage;
+            }
+            return false;
+        }
+        return true;
+    };
+
+    std::int64_t initialized = 0;
+    if (!readInitialized(&initialized)) return false;
+    if (initialized != 0) return true;
+
+    {
+        std::scoped_lock lock(_stateMutex, _sdkMutex);
+        if (!_device) {
+            if (errorMessage) *errorMessage = "Heliotis C4 device disconnected before motion initialization.";
+            return false;
+        }
+        if (!check(C4Dev_executeCommand(_device, "StageInit"), errorMessage)) {
+            if (errorMessage && !errorMessage->empty()) {
+                *errorMessage = "Could not start H8 StageInit: " + *errorMessage;
+            }
+            return false;
+        }
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + initializationTimeout;
+    do {
+        std::this_thread::sleep_for(pollInterval);
+        if (!readInitialized(&initialized)) return false;
+        if (initialized != 0) return true;
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    if (errorMessage) *errorMessage = "H8 StageInit did not finish within 30 seconds.";
+    return false;
+}
+
 HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage) const
 {
     std::scoped_lock lock(_stateMutex, _sdkMutex);
@@ -449,22 +574,156 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
         C4Ftr_getAccessMode(feature, &sdkAccess);
         const FeatureType type = featureType(sdkType);
         const FeatureAccess access = featureAccess(sdkAccess);
-        if ((access != FeatureAccess::ReadOnly && access != FeatureAccess::ReadWrite)
-            && type != FeatureType::Command) {
+        if (access != FeatureAccess::ReadOnly && !isWritable(access)) {
             continue;
+        }
+        std::vector<std::string> enumEntries;
+        if (type == FeatureType::Enumeration) {
+            std::string enumError;
+            enumEntries = splitEnumEntries(readSdkString(
+                [feature](char* buffer, std::size_t* size) {
+                    return C4Ftr_getEnumEntryList(feature, buffer, size);
+                },
+                &enumError));
         }
         features.push_back({
             isMotionFeature(category, name) ? FeatureSection::Motion : FeatureSection::Device,
             category,
             name,
-            type == FeatureType::Command ? std::string("Command") : readFeatureValue(feature, type),
+            type == FeatureType::Command ? std::string("Execute")
+                : (access == FeatureAccess::WriteOnly ? std::string("<write only>") : readFeatureValue(feature, type)),
             description,
             type,
             access,
+            std::move(enumEntries),
         });
     }
     C4Ftr_release(featureList);
     return features;
+}
+
+bool HeliotisC4Device::writeFeature(
+    const std::string& name,
+    const std::string& value,
+    std::string* errorMessage)
+{
+    const std::string trimmedValue = trim(value);
+    if (name.empty() || trimmedValue.empty()) {
+        if (errorMessage) *errorMessage = "Heliotis feature name and value are required.";
+        return false;
+    }
+
+    std::scoped_lock lock(_stateMutex, _sdkMutex);
+    if (!_device) {
+        if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+        return false;
+    }
+    if (_acquiring) {
+        if (errorMessage) *errorMessage = "Heliotis feature writes are unavailable during acquisition.";
+        return false;
+    }
+
+    FeatureType type = FeatureType::Unknown;
+    FeatureAccess access = FeatureAccess::Unknown;
+    if (!findFeatureMetadata(_device, name, &type, &access, errorMessage)) return false;
+    if (!isWritable(access) || type == FeatureType::Command) {
+        if (errorMessage) *errorMessage = "Heliotis feature is not writable: " + name;
+        return false;
+    }
+
+    C4HDL_ERROR result = C4HDL_ERR_ERROR;
+    switch (type) {
+    case FeatureType::Integer:
+    case FeatureType::Boolean: {
+        std::string normalized = lowerCase(trimmedValue);
+        if (type == FeatureType::Boolean) {
+            if (normalized == "true") normalized = "1";
+            if (normalized == "false") normalized = "0";
+        }
+        char* end = nullptr;
+        errno = 0;
+        const long long parsed = std::strtoll(normalized.c_str(), &end, 10);
+        if (errno == ERANGE || end == normalized.c_str() || *end != '\0'
+            || (type == FeatureType::Boolean && parsed != 0 && parsed != 1)) {
+            if (errorMessage) *errorMessage = "Invalid integer value for Heliotis feature " + name + ".";
+            return false;
+        }
+        result = C4Dev_writeInteger(_device, name.c_str(), static_cast<std::int64_t>(parsed));
+        break;
+    }
+    case FeatureType::Float: {
+        char* end = nullptr;
+        errno = 0;
+        const double parsed = std::strtod(trimmedValue.c_str(), &end);
+        if (errno == ERANGE || end == trimmedValue.c_str() || *end != '\0' || !std::isfinite(parsed)) {
+            if (errorMessage) *errorMessage = "Invalid floating-point value for Heliotis feature " + name + ".";
+            return false;
+        }
+        result = C4Dev_writeFloat(_device, name.c_str(), parsed);
+        break;
+    }
+    case FeatureType::String:
+        result = C4Dev_writeString(_device, name.c_str(), trimmedValue.c_str());
+        break;
+    case FeatureType::Enumeration:
+        result = C4Dev_writeEnumeration(_device, name.c_str(), trimmedValue.c_str());
+        break;
+    default:
+        if (errorMessage) *errorMessage = "Heliotis feature type is not writable: " + name;
+        return false;
+    }
+    return check(result, errorMessage);
+}
+
+bool HeliotisC4Device::executeCommand(const std::string& name, std::string* errorMessage)
+{
+    if (name.empty()) {
+        if (errorMessage) *errorMessage = "Heliotis command name is required.";
+        return false;
+    }
+
+    std::scoped_lock lock(_stateMutex, _sdkMutex);
+    if (!_device) {
+        if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+        return false;
+    }
+    if (_acquiring) {
+        if (errorMessage) *errorMessage = "Heliotis commands are unavailable during acquisition.";
+        return false;
+    }
+
+    FeatureType type = FeatureType::Unknown;
+    FeatureAccess access = FeatureAccess::Unknown;
+    if (!findFeatureMetadata(_device, name, &type, &access, errorMessage)) return false;
+    if (type != FeatureType::Command || !isWritable(access)) {
+        if (errorMessage) *errorMessage = "Heliotis command is not executable: " + name;
+        return false;
+    }
+    return check(C4Dev_executeCommand(_device, name.c_str()), errorMessage);
+}
+
+bool HeliotisC4Device::triggerSoftware(std::string* errorMessage)
+{
+    std::scoped_lock lock(_stateMutex, _sdkMutex);
+    if (!_device) {
+        if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+        return false;
+    }
+    if (!_acquiring) {
+        if (errorMessage) *errorMessage = "Software trigger requires an armed Heliotis acquisition.";
+        return false;
+    }
+
+    FeatureType type = FeatureType::Unknown;
+    FeatureAccess access = FeatureAccess::Unknown;
+    if (!findFeatureMetadata(_device, "TriggerSoftware", &type, &access, errorMessage)) return false;
+    if (type != FeatureType::Command || !isWritable(access)) {
+        if (errorMessage) {
+            *errorMessage = "TriggerSoftware is unavailable. Select FrameStart with TriggerMode=On and TriggerSource=Software.";
+        }
+        return false;
+    }
+    return check(C4Dev_executeCommand(_device, "TriggerSoftware"), errorMessage);
 }
 
 bool HeliotisC4Device::startAcquisition(

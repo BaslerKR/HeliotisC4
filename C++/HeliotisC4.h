@@ -130,6 +130,7 @@ struct FeatureDescriptor {
     std::string description;
     FeatureType type = FeatureType::Unknown;
     FeatureAccess access = FeatureAccess::Unknown;
+    std::vector<std::string> enumEntries;
 };
 
 class HeliotisC4 {
