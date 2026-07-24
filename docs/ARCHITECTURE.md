@@ -122,9 +122,10 @@ section so `QHeliotisC4Widget` renders them only on its Motion tab.
 ## Runtime and deployment gate
 
 The Windows plugin runtime belongs below `plugins/heliotis-c4/runtime`,
-preserving the C4Utility-relative layout above. It stages `C4HdlC.dll`, its
-delayed GenApi/GCBase dependencies, and `diaphus.cti`; `PluginManager` registers
-only their private DLL directories and sets the private Diaphus producer path.
+preserving the C4Utility-relative layout above. It stages `C4HdlC.dll`, the
+complete delayed GenICam closure (`GenApi`, `GCBase`, `MathParser`, `XmlParser`,
+`Log`, and `NodeMapData`), and `diaphus.cti`; `PluginManager` registers only
+their private DLL directories and sets the private Diaphus producer path.
 Before release, validate a clean staged copy with the SDK license/distribution
 terms confirmed, direct plugin loading, H8 discovery, and a capture/stop cycle.
 Do not add Heliotis paths to the host-wide GenTL environment without proving
