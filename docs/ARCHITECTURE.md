@@ -43,6 +43,13 @@ device refresh. Future acquisition and feature-write transitions must use the
 same refresh path because C4 access modes can change with selector and
 acquisition state.
 
+Device descriptors are discovery snapshots. `HeliotisC4Device::open()` must
+refresh the newly opened interface list and validate the selected index before
+opening it, because C4Utility does not retain the enumeration performed by a
+previous interface handle. Host connection attempts run off the GUI thread;
+the control widget enters a pending state until a success or failure result
+returns, and a failed attempt always clears the connect toggle.
+
 ## Acquisition boundary
 
 The C API expresses the lifecycle as:

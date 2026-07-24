@@ -340,6 +340,10 @@ bool HeliotisC4Device::open(const DeviceDescriptor& descriptor, std::string* err
         if (errorMessage) *errorMessage = "C4Utility system is unavailable.";
         return false;
     }
+    if (descriptor.interfaceIndex < 0 || descriptor.deviceIndex < 0) {
+        if (errorMessage) *errorMessage = "The selected Heliotis device has an invalid interface or device index.";
+        return false;
+    }
 
     C4_INTERFACE interfaceHandle = nullptr;
     C4_DEVICE deviceHandle = nullptr;
@@ -350,6 +354,18 @@ bool HeliotisC4Device::open(const DeviceDescriptor& descriptor, std::string* err
             return false;
         }
         if (!check(C4Hdl_openInterface(_system->_handler, &interfaceHandle, descriptor.interfaceIndex), errorMessage)) return false;
+        std::int64_t deviceCount = 0;
+        if (!check(C4If_updateDeciveList(interfaceHandle, &deviceCount), errorMessage)) {
+            C4If_release(interfaceHandle);
+            return false;
+        }
+        if (descriptor.deviceIndex >= deviceCount) {
+            if (errorMessage) {
+                *errorMessage = "The selected Heliotis device is no longer present in the refreshed interface device list.";
+            }
+            C4If_release(interfaceHandle);
+            return false;
+        }
         if (!check(C4If_openDevice(interfaceHandle, &deviceHandle, descriptor.deviceIndex), errorMessage)) {
             C4If_release(interfaceHandle);
             return false;

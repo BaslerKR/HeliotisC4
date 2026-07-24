@@ -150,11 +150,11 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
         }
         const int index = _deviceSelector->currentData().toInt();
         if (index >= 0 && index < static_cast<int>(_devices.size())) {
+            setConnectionPending(true);
             emit connectRequested(index);
             return;
         }
-        const QSignalBlocker blocker(_connectButton);
-        _connectButton->setChecked(false);
+        setConnectionError(tr("Select a discovered Heliotis device before connecting."));
     });
     connect(_grabOneButton, &QToolButton::clicked, this, &QHeliotisC4Widget::grabOneRequested);
     connect(_grabLiveButton, &QToolButton::toggled, this, &QHeliotisC4Widget::liveGrabToggled);
@@ -179,7 +179,7 @@ void QHeliotisC4Widget::setDiscoveredDevices(const std::vector<heliotis::DeviceD
             index);
     }
     _deviceSelector->setEnabled(!_devices.empty());
-    _connectButton->setEnabled(!_devices.empty() && !_connectButton->isChecked());
+    _connectButton->setEnabled(!_devices.empty() && !_connectButton->isChecked() && !_connectionPending);
     _refreshButton->setEnabled(true);
     if (!_connectButton->isChecked()) {
         setIdleState(_devices.empty()
@@ -199,13 +199,24 @@ void QHeliotisC4Widget::setDiscoveryError(const QString& message)
 
 void QHeliotisC4Widget::setConnectionState(const bool connected)
 {
-    const bool wasConnected = _connectionStatus->property("status") == QStringLiteral("connected");
+    _connectionPending = false;
+    const QString previousStatus = _connectionStatus->property("status").toString();
+    const bool wasConnected = previousStatus == QStringLiteral("connected")
+        || previousStatus == QStringLiteral("grabbing");
+
+    const QSignalBlocker blocker(_connectButton);
+    _connectButton->setChecked(connected);
+    _connectButton->setToolTip(connected
+        ? tr("Disconnect the selected device")
+        : tr("Connect the selected device"));
+
     if (!connected && !wasConnected) {
         setIdleState(_devices.empty()
             ? tr("Ready to search for Heliotis devices.")
             : tr("Select a Heliotis device to connect."));
         _connectButton->setEnabled(!_devices.empty());
         _deviceSelector->setEnabled(!_devices.empty());
+        _refreshButton->setEnabled(true);
         setAcquisitionAvailable(false);
         return;
     }
@@ -214,18 +225,42 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
     _connectionStatus->style()->unpolish(_connectionStatus);
     _connectionStatus->style()->polish(_connectionStatus);
 
-    const QSignalBlocker blocker(_connectButton);
-    _connectButton->setChecked(connected);
-    _connectButton->setToolTip(connected
-        ? tr("Disconnect the selected device")
-        : tr("Connect the selected device"));
     _connectButton->setEnabled(connected || !_devices.empty());
     _deviceSelector->setEnabled(!connected && !_devices.empty());
+    _refreshButton->setEnabled(!connected);
     setAcquisitionAvailable(connected && _acquisitionAvailable);
     _messageLabel->setText(connected
         ? tr("Heliotis device connected.")
         : tr("Heliotis device disconnected."));
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setConnectionPending(const bool pending)
+{
+    _connectionPending = pending;
+    if (!pending) return;
+
+    _connectionStatus->setText(tr("Connecting"));
+    _connectionStatus->setProperty("status", QStringLiteral("idle"));
+    _connectionStatus->style()->unpolish(_connectionStatus);
+    _connectionStatus->style()->polish(_connectionStatus);
+    _connectButton->setEnabled(false);
+    _deviceSelector->setEnabled(false);
+    _refreshButton->setEnabled(false);
+    setAcquisitionAvailable(false);
+    _messageLabel->setText(tr("Connecting to the selected Heliotis device..."));
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setConnectionError(const QString& message)
+{
+    setConnectionState(false);
+    _messageLabel->setText(message);
+    _messageLabel->setProperty("messageState", QStringLiteral("error"));
     _messageLabel->style()->unpolish(_messageLabel);
     _messageLabel->style()->polish(_messageLabel);
 }

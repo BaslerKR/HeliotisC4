@@ -26,7 +26,9 @@ public:
 
     void setDiscoveredDevices(const std::vector<heliotis::DeviceDescriptor>& devices);
     void setDiscoveryError(const QString& message);
+    void setConnectionPending(bool pending);
     void setConnectionState(bool connected);
+    void setConnectionError(const QString& message);
     void setAcquisitionAvailable(bool available);
     void setAcquisitionState(bool acquiring);
     void setAcquisitionError(const QString& message);
@@ -64,6 +66,7 @@ private:
     QHash<QString, QTreeWidgetItem*> _deviceCategories;
     QHash<QString, QTreeWidgetItem*> _motionCategories;
     std::vector<heliotis::DeviceDescriptor> _devices;
+    bool _connectionPending = false;
     bool _acquisitionAvailable = false;
 };
 
