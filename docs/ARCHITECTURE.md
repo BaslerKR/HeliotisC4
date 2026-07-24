@@ -36,11 +36,12 @@ standalone CTest is the precondition for the later C4HdlC lifecycle layer.
 builds a deep-owned, read-only feature snapshot from C4Utility metadata and
 current readable values. Stage/scan/motion/encoder categories remain in the
 Motion tab; no write, command, acquisition, or motion action is exposed.
-Only readable nodes appear in the tree: read-only nodes are disabled and
-read/write nodes remain enabled for a future editor. The host refreshes this
-snapshot after connection and explicit device refresh. Future acquisition and
-feature-write transitions must use the same refresh path because C4 access
-modes can change with selector and acquisition state.
+Readable nodes and execution-only command nodes appear in the tree: read-only
+and command nodes are disabled, while read/write nodes remain enabled for a
+future editor. The host refreshes this snapshot after connection and explicit
+device refresh. Future acquisition and feature-write transitions must use the
+same refresh path because C4 access modes can change with selector and
+acquisition state.
 
 ## Acquisition boundary
 

@@ -196,7 +196,8 @@ void QHeliotisC4Widget::populateTree(
         item->setText(0, QString::fromStdString(feature.displayName));
         item->setText(1, QString::fromStdString(feature.valueText));
         item->setToolTip(0, QString::fromStdString(feature.description));
-        if (feature.access == heliotis::FeatureAccess::ReadOnly) {
+        if (feature.access != heliotis::FeatureAccess::ReadWrite
+            || feature.type == heliotis::FeatureType::Command) {
             item->setDisabled(true);
         }
     }
