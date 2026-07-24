@@ -142,10 +142,64 @@ bool validateChunkMetadataConfiguration(const C4_DEVICE device, std::string* err
         || chunkModeActive != 1) {
         if (errorMessage) {
             *errorMessage = "Heliotis acquisition requires the existing device configuration to enable "
-                "ChunkModeActive, ChunkPartCount, and ChunkPartType. The plugin does not change device features.";
+                "ChunkModeActive, ChunkPartCount, ChunkPartType, ChunkScan3dDistanceUnit, "
+                "ChunkScan3dOutputMode, ChunkScan3dCoordinateScale, and ChunkScan3dCoordinateOffset. "
+                "The plugin does not change device features.";
         }
         return false;
     }
+    return true;
+}
+
+bool readBufferString(const C4_BUFFER buffer, const char* name, std::string* value, std::string* errorMessage)
+{
+    std::string readError;
+    const std::string result = readSdkString(
+        [buffer, name](char* text, std::size_t* size) {
+            return C4Buf_readString(buffer, name, text, size);
+        },
+        &readError);
+    if (!readError.empty() || result.empty()) {
+        if (errorMessage) *errorMessage = "C4Utility buffer is missing " + std::string(name) + " metadata.";
+        return false;
+    }
+    *value = result;
+    return true;
+}
+
+bool readScan3dGeometry(const C4_BUFFER buffer, Scan3dGeometry* geometry, std::string* errorMessage)
+{
+    if (!buffer || !geometry) return false;
+
+    Scan3dGeometry copied;
+    if (!readBufferString(buffer, "ChunkScan3dDistanceUnit", &copied.distanceUnit, errorMessage)
+        || !readBufferString(buffer, "ChunkScan3dOutputMode", &copied.outputMode, errorMessage)) {
+        return false;
+    }
+
+    struct AxisValues {
+        const char* selector;
+        double* scale;
+        double* offset;
+    };
+    const std::array<AxisValues, 3> axes{{
+        {"CoordinateA", &copied.xScale, &copied.xOffset},
+        {"CoordinateB", &copied.yScale, &copied.yOffset},
+        {"CoordinateC", &copied.zScale, &copied.zOffset},
+    }};
+    for (const auto& axis : axes) {
+        if (C4Buf_writeString(buffer, "ChunkScan3dCoordinateSelector", axis.selector) != C4HDL_ERR_SUCCESS
+            || C4Buf_readFloat(buffer, "ChunkScan3dCoordinateScale", axis.scale) != C4HDL_ERR_SUCCESS
+            || C4Buf_readFloat(buffer, "ChunkScan3dCoordinateOffset", axis.offset) != C4HDL_ERR_SUCCESS) {
+            if (errorMessage) {
+                *errorMessage = "C4Utility buffer is missing Scan3d chunk geometry for "
+                    + std::string(axis.selector) + ".";
+            }
+            return false;
+        }
+    }
+
+    *geometry = std::move(copied);
     return true;
 }
 
@@ -491,6 +545,9 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
         return false;
     }
 
+    Scan3dGeometry scan3dGeometry;
+    if (!readScan3dGeometry(buffer, &scan3dGeometry, errorMessage)) return false;
+
     Frame copied;
     copied.parts.reserve(static_cast<std::size_t>(partCount));
     for (std::int64_t partIndex = 0; partIndex < partCount; ++partIndex) {
@@ -584,6 +641,7 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
         if (errorMessage) *errorMessage = "C4Utility produced an invalid frame payload.";
         return false;
     }
+    copied.scan3dGeometry = std::move(scan3dGeometry);
     *frame = std::move(copied);
     return true;
 }

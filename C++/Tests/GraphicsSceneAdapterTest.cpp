@@ -30,6 +30,16 @@ int main()
             std::vector<std::uint16_t>{10U, 20U, 30U, 40U}
         }
     };
+    frame.scan3dGeometry = heliotis::Scan3dGeometry{
+        "RectifiedC",
+        "um",
+        2.0,
+        3.0,
+        0.5,
+        100.0,
+        200.0,
+        -10.0
+    };
 
     heliotis::HeliotisC4GraphicsSceneAdapter adapter;
     const auto scene = adapter.convert(frame, {});
@@ -45,18 +55,30 @@ int main()
         || std::fabs(range.zValues.at(3) - 4.5F) > 0.0001F
         || std::fabs(range.intensity.at(1) - 20.0F) > 0.0001F
         || range.intensityBits != 16U
-        || std::isfinite(range.xScaleMm)
-        || std::isfinite(range.yScaleMm)
-        || std::isfinite(range.zScaleMm)
+        || std::fabs(range.xScaleMm - 0.002) > 0.0000001
+        || std::fabs(range.yScaleMm - 0.003) > 0.0000001
+        || std::fabs(range.zScaleMm - 0.0005) > 0.0000001
+        || std::fabs(range.xOffsetMm - 0.1) > 0.0000001
+        || std::fabs(range.yOffsetMm - 0.2) > 0.0000001
+        || std::fabs(range.zOffsetMm + 0.01) > 0.0000001
         || scene->meta.frameIndex != 7U)
     {
         std::cerr << "The GraphicsEngine scene must preserve H8 frame geometry, values, and metadata.\n";
         return 1;
     }
 
-    if (RangeFramePointCloudBuilder::canBuild(range))
+    if (!RangeFramePointCloudBuilder::canBuild(range))
     {
-        std::cerr << "Uncalibrated H8 range data must not produce inferred 3D geometry.\n";
+        std::cerr << "Rectified H8 range data must produce calibrated point-cloud geometry.\n";
+        return 1;
+    }
+
+    frame.scan3dGeometry->outputMode = "CalibratedC";
+    const auto calibratedScene = adapter.convert(frame, {});
+    if (!calibratedScene || !calibratedScene->rangeFrame
+        || RangeFramePointCloudBuilder::canBuild(*calibratedScene->rangeFrame))
+    {
+        std::cerr << "CalibratedC without X/Y payload axes must not infer 3D geometry.\n";
         return 1;
     }
 

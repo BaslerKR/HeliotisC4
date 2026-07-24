@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -79,10 +80,25 @@ struct FramePart {
     }
 };
 
+// Deep-owned Scan3d chunk metadata for an H8 Surface part.  The values use
+// the unit named by distanceUnit and transform a sample as value * scale +
+// offset.  RectifiedC supplies a uniform A/B grid; CalibratedC does not.
+struct Scan3dGeometry {
+    std::string outputMode;
+    std::string distanceUnit;
+    double xScale = std::numeric_limits<double>::quiet_NaN();
+    double yScale = std::numeric_limits<double>::quiet_NaN();
+    double zScale = std::numeric_limits<double>::quiet_NaN();
+    double xOffset = std::numeric_limits<double>::quiet_NaN();
+    double yOffset = std::numeric_limits<double>::quiet_NaN();
+    double zOffset = std::numeric_limits<double>::quiet_NaN();
+};
+
 struct Frame {
     std::uint64_t sequence = 0;
     std::string frameId;
     std::vector<FramePart> parts;
+    std::optional<Scan3dGeometry> scan3dGeometry;
 
     [[nodiscard]] bool isValid() const noexcept
     {

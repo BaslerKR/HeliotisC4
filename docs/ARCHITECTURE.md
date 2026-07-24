@@ -71,19 +71,23 @@ arms the current device configuration, waits for buffers, deep-copies every
 part, releases the C4 buffer, and stops cleanly. It never changes trigger,
 output-component, stage, or scan features. Before arming, it reads and requires
 `ChunkModeActive=1`; every delivered buffer must provide matching
-`ChunkPartCount` and a selected `ChunkPartType` for every part. The required H8
-configuration must already enable `ChunkModeActive`, `ChunkPartCount`, and
-`ChunkPartType`; the plugin reports a configuration error instead of guessing a
-part semantic. `ChunkPartSelector` is written only on a received C4 buffer to
-read that buffer's metadata; it does not write a device feature. Hosts may opt
-into the module-owned static
+`ChunkPartCount`, a selected `ChunkPartType` for every part, and Scan3d chunk
+metadata. The required H8 configuration must already enable `ChunkPartCount`,
+`ChunkPartType`, `ChunkScan3dDistanceUnit`, `ChunkScan3dOutputMode`,
+`ChunkScan3dCoordinateScale`, and `ChunkScan3dCoordinateOffset`; the plugin
+reports a configuration error instead of guessing a part semantic or geometry.
+`ChunkPartSelector` and `ChunkScan3dCoordinateSelector` are written only on a
+received C4 buffer to read that buffer's metadata; neither writes a device
+feature. Hosts may opt into the module-owned static
 `HeliotisC4::GraphicsEngineAdapter`, which maps an organized
 Range part and compatible Intensity/Confidence parts to `GraphicsScene3D` and
 `RangeFrame`. The adapter is not required for discovery, control, or
 acquisition-only hosts. The C4 reader must classify parts before invoking it.
-The current adapter deliberately provides Range2D only: it leaves coordinate
-scales and offsets invalid until H8 calibration metadata is validated, so it
-cannot infer point-cloud or surface geometry from uncalibrated range samples.
+It converts Scan3d units (`nm`, `um`, or `mm`) to the GraphicsEngine millimeter
+contract and applies the selected A/B/C scales and offsets. `RectifiedC`
+provides a uniform A/B grid and can therefore derive PointCloud/Surface views;
+`CalibratedC` remains Range2D-only because its 2.5D Surface payload contains no
+X/Y axes.
 
 ## Control boundary
 
@@ -128,6 +132,7 @@ they do not change ownership of existing devices.
 2. Implement the module lifecycle and deep-owned multipart frame without Qt UI.
 3. Add optional module-owned GraphicsEngine conversion and the parent
    `HeliotisC4Plugin`, controller, and minimal H8 control widget. Completed.
-4. Validate discovery plus a capture/stop cycle on an H8 before treating the
-   current buffer-part classification and calibration metadata as
-   hardware-complete. Motion remains disabled.
+4. Validate discovery plus a capture/stop cycle on an H8, including both
+   `RectifiedC` and `CalibratedC` Scan3d chunk values, before treating the
+   current buffer-part classification and geometry mapping as hardware-complete.
+   Motion remains disabled.

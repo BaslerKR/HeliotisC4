@@ -1,6 +1,7 @@
 #include "HeliotisC4GraphicsSceneAdapter.h"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 
 namespace {
@@ -44,6 +45,28 @@ namespace {
         : static_cast<std::uint8_t>(std::min<std::uint16_t>(part.bitsPerSample, 255U));
 }
 
+[[nodiscard]] std::string lowerCase(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+[[nodiscard]] double distanceUnitToMillimeters(const std::string& distanceUnit) noexcept
+{
+    const std::string value = lowerCase(distanceUnit);
+    if (value == "nm") return 0.000001;
+    if (value == "um") return 0.001;
+    if (value == "mm") return 1.0;
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+[[nodiscard]] bool isRectifiedOutput(const std::string& outputMode) noexcept
+{
+    return lowerCase(outputMode) == "rectifiedc";
+}
+
 } // namespace
 
 namespace heliotis {
@@ -68,19 +91,39 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
         return std::nullopt;
     }
 
+    if (!frame.scan3dGeometry)
+    {
+        return std::nullopt;
+    }
+    const Scan3dGeometry& geometry = *frame.scan3dGeometry;
+    const double unitToMillimeters = distanceUnitToMillimeters(geometry.distanceUnit);
+    if (!std::isfinite(unitToMillimeters))
+    {
+        return std::nullopt;
+    }
+
     RangeFrame range;
     range.width = static_cast<int>(rangePart->width);
     range.height = static_cast<int>(rangePart->height);
     range.zValues = toFloatSamples(*rangePart);
-    // H8 calibration/coordinate chunks are not part of the validated read
-    // contract yet.  Keep Range2D available, but prevent GraphicsEngine from
-    // deriving uncalibrated point-cloud or surface geometry.
-    range.xScaleMm = std::numeric_limits<double>::quiet_NaN();
-    range.yScaleMm = std::numeric_limits<double>::quiet_NaN();
-    range.zScaleMm = std::numeric_limits<double>::quiet_NaN();
-    range.xOffsetMm = std::numeric_limits<double>::quiet_NaN();
-    range.yOffsetMm = std::numeric_limits<double>::quiet_NaN();
-    range.zOffsetMm = std::numeric_limits<double>::quiet_NaN();
+    range.zScaleMm = geometry.zScale * unitToMillimeters;
+    range.zOffsetMm = geometry.zOffset * unitToMillimeters;
+    if (isRectifiedOutput(geometry.outputMode))
+    {
+        range.xScaleMm = geometry.xScale * unitToMillimeters;
+        range.yScaleMm = geometry.yScale * unitToMillimeters;
+        range.xOffsetMm = geometry.xOffset * unitToMillimeters;
+        range.yOffsetMm = geometry.yOffset * unitToMillimeters;
+    }
+    else
+    {
+        // CalibratedC does not include X/Y axes in its 2.5D payload.  Do not
+        // infer a uniform grid for a non-rectified surface.
+        range.xScaleMm = std::numeric_limits<double>::quiet_NaN();
+        range.yScaleMm = std::numeric_limits<double>::quiet_NaN();
+        range.xOffsetMm = std::numeric_limits<double>::quiet_NaN();
+        range.yOffsetMm = std::numeric_limits<double>::quiet_NaN();
+    }
     range.sensorType = "Heliotis H8";
     range.frameId = frame.frameId;
     if (!range.isValid())
