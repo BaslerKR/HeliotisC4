@@ -25,6 +25,7 @@ public:
     explicit QHeliotisC4Widget(QWidget* parent = nullptr);
 
     void setDiscoveredDevices(const std::vector<heliotis::DeviceDescriptor>& devices);
+    void setDiscoveryError(const QString& message);
     void setConnectionState(bool connected);
     void setFeatures(const heliotis::HeliotisC4::FeatureList& features);
 
@@ -42,6 +43,7 @@ private:
         QTreeWidget* tree,
         QHash<QString, QTreeWidgetItem*>& categories,
         const QString& categoryPath);
+    void setIdleState(const QString& message);
 
     QTabWidget* _tabs = nullptr;
     QComboBox* _deviceSelector = nullptr;

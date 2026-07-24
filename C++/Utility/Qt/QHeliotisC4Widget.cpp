@@ -11,6 +11,7 @@
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabWidget>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -111,7 +112,15 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     _statusBar->addWidget(_messageLabel, 1);
     rootLayout->addWidget(_statusBar);
 
-    connect(_refreshButton, &QToolButton::clicked, this, &QHeliotisC4Widget::refreshRequested);
+    connect(_refreshButton, &QToolButton::clicked, this, [this] {
+        _refreshButton->setEnabled(false);
+        _connectionStatus->setText(tr("Searching"));
+        _connectionStatus->setProperty("status", QStringLiteral("idle"));
+        _connectionStatus->style()->unpolish(_connectionStatus);
+        _connectionStatus->style()->polish(_connectionStatus);
+        _messageLabel->setText(tr("Searching for Heliotis devices..."));
+        QTimer::singleShot(0, this, &QHeliotisC4Widget::refreshRequested);
+    });
     connect(_connectButton, &QToolButton::toggled, this, [this](const bool connected) {
         if (!connected) {
             emit disconnectRequested();
@@ -147,13 +156,31 @@ void QHeliotisC4Widget::setDiscoveredDevices(const std::vector<heliotis::DeviceD
     }
     _deviceSelector->setEnabled(!_devices.empty());
     _connectButton->setEnabled(!_devices.empty() && !_connectButton->isChecked());
-    _messageLabel->setText(_devices.empty()
+    _refreshButton->setEnabled(true);
+    if (!_connectButton->isChecked()) {
+        setIdleState(_devices.empty()
         ? tr("No Heliotis devices discovered.")
         : tr("%n device(s) discovered.", nullptr, static_cast<int>(_devices.size())));
+    }
+}
+
+void QHeliotisC4Widget::setDiscoveryError(const QString& message)
+{
+    _refreshButton->setEnabled(true);
+    setIdleState(message);
 }
 
 void QHeliotisC4Widget::setConnectionState(const bool connected)
 {
+    const bool wasConnected = _connectionStatus->property("status") == QStringLiteral("connected");
+    if (!connected && !wasConnected) {
+        setIdleState(_devices.empty()
+            ? tr("Ready to search for Heliotis devices.")
+            : tr("Select a Heliotis device to connect."));
+        _connectButton->setEnabled(!_devices.empty());
+        _deviceSelector->setEnabled(!_devices.empty());
+        return;
+    }
     _connectionStatus->setText(connected ? tr("Connected") : tr("Disconnected"));
     _connectionStatus->setProperty("status", connected ? QStringLiteral("connected") : QStringLiteral("disconnected"));
     _connectionStatus->style()->unpolish(_connectionStatus);
@@ -166,6 +193,18 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
         : tr("Connect the selected device"));
     _connectButton->setEnabled(connected || !_devices.empty());
     _deviceSelector->setEnabled(!connected && !_devices.empty());
+    _messageLabel->setText(connected
+        ? tr("Heliotis device connected.")
+        : tr("Heliotis device disconnected."));
+}
+
+void QHeliotisC4Widget::setIdleState(const QString& message)
+{
+    _connectionStatus->setText(tr("Idle"));
+    _connectionStatus->setProperty("status", QStringLiteral("idle"));
+    _connectionStatus->style()->unpolish(_connectionStatus);
+    _connectionStatus->style()->polish(_connectionStatus);
+    _messageLabel->setText(message);
 }
 
 void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& features)
