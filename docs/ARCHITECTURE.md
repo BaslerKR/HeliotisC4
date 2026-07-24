@@ -58,6 +58,15 @@ previous interface handle. Host connection attempts run off the GUI thread;
 the control widget enters a pending state until a success or failure result
 returns, and a failed attempt always clears the connect toggle.
 
+Every lifecycle operation writes a concise `[Heliotis C4]` diagnostic to the
+standard output/error streams: SDK open/discovery, selected-device connection,
+motion readiness, feature writes/commands, acquisition arm/disarm, trigger
+configuration, software-trigger acceptance, buffer waits, received frames, and
+SDK failures. Playground redirects those streams into System Logs; standalone
+hosts retain normal console output. Repeated idle buffer waits are sampled
+(first wait and then every 20 waits) to keep an external-trigger session
+diagnosable without flooding logs.
+
 ## Acquisition boundary
 
 The C API expresses the lifecycle as:
