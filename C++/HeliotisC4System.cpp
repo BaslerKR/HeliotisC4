@@ -542,6 +542,108 @@ std::string HeliotisC4Device::connectedDeviceName() const
     return _connectedDeviceName;
 }
 
+bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
+{
+    if (!isOpened()) {
+        if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+        return false;
+    }
+    if (isAcquiring()) {
+        if (errorMessage) *errorMessage = "The H8 reference profile cannot be applied during acquisition.";
+        return false;
+    }
+
+    struct FeatureWrite final {
+        const char* name;
+        const char* value;
+    };
+    // C4Utility 1.12 h8SurfSimple, plus the Scan3d chunks required by this
+    // module's deep-owned geometry contract.
+    static constexpr std::array<FeatureWrite, 36> preStageInitWrites{{
+        {"ComponentSelector", "Intensity"}, {"ComponentEnable", "0"},
+        {"ComponentSelector", "Range"}, {"ComponentEnable", "1"},
+        {"ComponentSelector", "Reflectance"}, {"ComponentEnable", "1"},
+        {"ComponentSelector", "Phase"}, {"ComponentEnable", "0"},
+        {"ChunkModeActive", "1"},
+        {"ChunkSelector", "PartCount"}, {"ChunkEnable", "1"},
+        {"ChunkSelector", "PartType"}, {"ChunkEnable", "1"},
+        {"ChunkSelector", "Scan3dDistanceUnit"}, {"ChunkEnable", "1"},
+        {"ChunkSelector", "Scan3dOutputMode"}, {"ChunkEnable", "1"},
+        {"ChunkSelector", "Scan3dCoordinateScale"}, {"ChunkEnable", "1"},
+        {"ChunkSelector", "Scan3dCoordinateOffset"}, {"ChunkEnable", "1"},
+        {"TriggerSelector", "RecordingStart"}, {"TriggerMode", "On"}, {"TriggerSource", "Stage"},
+        {"TriggerSelector", "AcquisitionStart"}, {"TriggerMode", "Off"},
+        {"TriggerSelector", "FrameStart"}, {"TriggerMode", "On"}, {"TriggerSource", "Software"},
+        {"EncoderSelector", "Camera"}, {"EncoderInverter", "1"},
+        {"ScanPosition", "-1.4"}, {"ScanRange", "0.5"}, {"ScanSpeed", "5.0"},
+        {"GeneralSpeed", "10.0"}, {"ScanMode", "Down"},
+    }};
+    static constexpr std::array<FeatureWrite, 9> postStageInitWrites{{
+        {"Scan3dExtractionMethod", "AcceleratedCenterOfMassIQCorrection"},
+        {"Scan3dScalingMethod", "zTags"}, {"Scan3dDistanceUnit", "um"},
+        {"TargetVerticalSpacing", "2.5"}, {"ExposureRatio", "1.0"},
+        {"FPNCorrection", "AverageLastFrames"}, {"FPNCorrectionNFrames", "8"},
+        {"ExtSimpMaxHWin", "7"}, {"LightControllerSelector", "LightController0"},
+    }};
+    static constexpr std::array<FeatureWrite, 4> illuminationWrites{{
+        {"LightControllerSource", "UserOutput0"}, {"LightBrightness", "100.0"},
+        {"UserOutputSelector", "UserOutput0"}, {"UserOutputValue", "1"},
+    }};
+
+    const auto applyWrites = [this, errorMessage](const auto& steps, const char* phase) {
+        for (std::size_t index = 0; index < steps.size(); ++index) {
+            const auto& step = steps[index];
+            logInfo(std::string("H8 reference profile [") + phase + " "
+                + std::to_string(index + 1) + "/" + std::to_string(steps.size()) + "]: "
+                + step.name + "=" + step.value + ".");
+            if (!writeFeature(step.name, step.value, errorMessage)) {
+                logWarning(std::string("H8 reference profile failed at ") + step.name + "=" + step.value + ".");
+                return false;
+            }
+        }
+        return true;
+    };
+
+    logInfo("Applying C4Utility h8SurfSimple reference profile to the connected H8.");
+    if (!applyWrites(preStageInitWrites, "pre-stage-init")) return false;
+
+    logInfo("H8 reference profile: executing StageInit after motion configuration.");
+    if (!executeCommand("StageInit", errorMessage)) return false;
+
+    constexpr auto initializationTimeout = std::chrono::seconds(30);
+    constexpr auto pollInterval = std::chrono::milliseconds(100);
+    const auto deadline = std::chrono::steady_clock::now() + initializationTimeout;
+    std::int64_t initialized = 0;
+    std::size_t pollCount = 0;
+    do {
+        std::this_thread::sleep_for(pollInterval);
+        {
+            std::scoped_lock lock(_stateMutex, _sdkMutex);
+            if (!_device) {
+                if (errorMessage) *errorMessage = "Heliotis C4 device disconnected during reference-profile StageInit.";
+                return false;
+            }
+            if (!check(C4Dev_readInteger(_device, "StageInitialized", &initialized), errorMessage)) return false;
+        }
+        ++pollCount;
+        if (pollCount == 1 || initialized != 0 || pollCount % 10 == 0) {
+            logInfo("H8 reference profile: StageInitialized=" + std::to_string(initialized)
+                + " (poll " + std::to_string(pollCount) + ").");
+        }
+        if (initialized != 0) break;
+    } while (std::chrono::steady_clock::now() < deadline);
+    if (initialized == 0) {
+        if (errorMessage) *errorMessage = "H8 reference-profile StageInit did not finish within 30 seconds.";
+        logWarning("H8 reference profile: StageInit timed out after 30 seconds.");
+        return false;
+    }
+
+    if (!applyWrites(postStageInitWrites, "post-stage-init")) return false;
+    if (!applyWrites(illuminationWrites, "illumination")) return false;
+    logInfo("H8 reference profile completed; Range/Reflectance, chunks, triggers, motion, processing, and illumination are configured.");
+    return true;
+}
+
 bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
 {
     constexpr auto initializationTimeout = std::chrono::seconds(30);

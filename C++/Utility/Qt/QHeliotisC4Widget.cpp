@@ -4,6 +4,7 @@
 
 #include <QComboBox>
 #include <QCheckBox>
+#include <QDebug>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
@@ -321,8 +322,15 @@ void QHeliotisC4Widget::setAcquisitionError(const QString& message)
 
 void QHeliotisC4Widget::setSoftwareTriggerAvailable(const bool available)
 {
+    const bool enabled = available && !_featureOperationPending;
+    qInfo().noquote() << "[Heliotis C4] Software trigger UI state:"
+                      << (enabled ? "enabled" : "disabled")
+                      << "buttons=" << _softwareTriggerButtons.size()
+                      << "acquisitionActive=" << _acquisitionActive
+                      << "acquisitionAvailable=" << _acquisitionAvailable
+                      << "featureOperationPending=" << _featureOperationPending;
     for (auto* button : _softwareTriggerButtons) {
-        if (button) button->setEnabled(available && !_featureOperationPending);
+        if (button) button->setEnabled(enabled);
     }
 }
 
@@ -330,7 +338,10 @@ void QHeliotisC4Widget::setFeatureOperationPending(const bool pending)
 {
     _featureOperationPending = pending;
     _tabs->setEnabled(!pending);
-    if (!pending) return;
+    if (!pending) {
+        setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable);
+        return;
+    }
 
     _messageLabel->setText(tr("Applying Heliotis feature change..."));
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
@@ -371,6 +382,7 @@ void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& fea
     }
     populateTree(_deviceFeatureTree, _deviceCategories, deviceFeatures);
     populateTree(_motionFeatureTree, _motionCategories, motionFeatures);
+    setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable);
 }
 
 void QHeliotisC4Widget::populateTree(

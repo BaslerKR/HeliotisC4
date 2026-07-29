@@ -60,6 +60,9 @@ public:
     void close();
     [[nodiscard]] bool isOpened() const;
     [[nodiscard]] std::string connectedDeviceName() const;
+    // Applies the vendor h8SurfSimple setup. It writes motion, trigger,
+    // processing, and illumination features, so the H8 must be known-safe.
+    [[nodiscard]] bool configureH8SurfaceExample(std::string* errorMessage = nullptr);
     [[nodiscard]] bool initializeMotion(std::string* errorMessage = nullptr);
     [[nodiscard]] HeliotisC4::FeatureList readFeatures(std::string* errorMessage = nullptr) const;
     [[nodiscard]] bool writeFeature(

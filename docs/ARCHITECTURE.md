@@ -33,11 +33,13 @@ standalone CTest is the precondition for the later C4HdlC lifecycle layer.
 
 `HeliotisC4System` now owns one C4 handler and discovers interfaces/devices.
 `HeliotisC4Device` owns one selected interface/device pair. A successful H8
-connection includes motion readiness: it reads `StageInitialized`, runs
-`StageInit` only when required, and waits for readiness without changing
-`StageInitMode`, position, speed, scan, or trigger configuration. `StageInit`
-is a motion initialization command and can move hardware; it never runs during
-discovery or acquisition.
+connection applies the C4Utility 1.12 `h8SurfSimple` reference profile: Range
+and Reflectance components, multipart and Scan3d geometry chunks, stage/software
+trigger selectors, example encoder/motion values, `StageInit`, 3D/processing
+values, and `UserOutput0`-controlled illumination. It writes the example
+`ScanPosition=-1.4`, `ScanRange=0.5`, `ScanSpeed=5.0`, and
+`GeneralSpeed=10.0`; this can move hardware, so connection requires a cleared,
+known-safe H8. `StageInit` never runs during discovery or acquisition.
 
 The device builds a deep-owned feature snapshot from C4Utility metadata and
 current readable values. It shows RO, RW, and WO features and command nodes;
@@ -119,14 +121,15 @@ they remain optional metadata so an existing read-only configuration without
 them can still acquire frames. `ChunkPartFixpointScaling` is preserved per part
 and applied by the GraphicsEngine adapter.
 
-The host's **Single** action arms one incoming frame and stops after it is
-copied; **Live** arms continuous reception. They are host grab policies and do
-not write the device's GenICam `AcquisitionMode`. With `FrameStart` configured
-for Software, either armed state accepts one `TriggerSoftware` command per
-requested frame. With FrameStart triggering off or set to a physical input,
-the device supplies frames automatically or from that input. `RecordingStart`
-and `FrameStart` remain distinct H8 trigger selectors; `AcquisitionStart` is
-deprecated for H8 and must not be selected by the controller.
+The host's **Single** action arms one incoming frame, issues one
+`TriggerSoftware` command for the reference profile's `FrameStart=Software`,
+and stops after the frame is copied; **Live** arms continuous reception. They
+are host grab policies and do not write the device's GenICam `AcquisitionMode`.
+Live accepts explicit `TriggerSoftware` commands from the feature tree. With
+FrameStart configured for a physical input, the device instead supplies frames
+from that input. `RecordingStart` and `FrameStart` remain distinct H8 trigger
+selectors; `AcquisitionStart` is configured only as part of the vendor
+reference profile.
 
 ## Control boundary
 
@@ -137,7 +140,7 @@ the authority. The host executes all writes and commands off the GUI thread.
 
 Keep these operation paths separate:
 
-- **Motion:** connection-time readiness (`StageInitialized`/`StageInit`) and
+- **Motion:** connection-time C4Utility `h8SurfSimple` profile plus
   user-requested stage, scan, speed, and encoder changes in the Motion tab.
 - **Acquisition:** only arm, receive, deep-copy, release, and stop buffers.
   It consumes the already configured trigger source and does not create a
@@ -156,12 +159,12 @@ the request to the device boundary.
 
 H8 motion is controlled through C4 feature reads, writes, and commands, not by
 an external motion-controller integration. Discovery never runs `StageInit`,
-changes position, or starts a stage-triggered scan. Connection runs `StageInit`
-only after confirming that `StageInitialized` is false; user motion writes and
-commands require an open, idle device and use the live SDK access check. After
-every successful user operation, the host refreshes the affected feature tree.
-Motion feature descriptors use the Motion section so `QHeliotisC4Widget`
-renders them only on its Motion tab.
+changes position, or starts a stage-triggered scan. Connection runs the vendor
+reference profile, including its `StageInit` command and motion values; user
+motion writes and commands require an open, idle device and use the live SDK
+access check. After every successful user operation, the host refreshes the
+affected feature tree. Motion feature descriptors use the Motion section so
+`QHeliotisC4Widget` renders them only on its Motion tab.
 
 ## Runtime and deployment gate
 
