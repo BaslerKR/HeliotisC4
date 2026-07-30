@@ -77,9 +77,21 @@ int main()
     frame.scan3dGeometry->outputMode = "CalibratedC";
     const auto calibratedScene = adapter.convert(frame, {});
     if (!calibratedScene || !calibratedScene->rangeFrame
-        || RangeFramePointCloudBuilder::canBuild(*calibratedScene->rangeFrame))
+        || calibratedScene->rangeFrame->xyCoordinateMode != RangeFrameXYCoordinateMode::ImagePixels
+        || std::fabs(calibratedScene->rangeFrame->xScaleMm - 0.001) > 0.0000001
+        || std::fabs(calibratedScene->rangeFrame->yScaleMm - 0.001) > 0.0000001
+        || !RangeFramePointCloudBuilder::canBuild(*calibratedScene->rangeFrame))
     {
-        std::cerr << "CalibratedC without X/Y payload axes must not infer 3D geometry.\n";
+        std::cerr << "CalibratedC must use the 1 um pixel-grid preview.\n";
+        return 1;
+    }
+
+    frame.scan3dGeometry.reset();
+    const auto rawScene = adapter.convert(frame, {});
+    if (!rawScene || !rawScene->rangeFrame
+        || RangeFramePointCloudBuilder::canBuild(*rawScene->rangeFrame))
+    {
+        std::cerr << "Range data without Scan3d geometry must remain a 2D-only payload.\n";
         return 1;
     }
 

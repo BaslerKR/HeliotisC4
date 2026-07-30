@@ -101,6 +101,9 @@ struct Frame {
     std::string frameId;
     std::vector<FramePart> parts;
     std::optional<Scan3dGeometry> scan3dGeometry;
+    // Preserves why optional Scan3d geometry could not be decoded while the
+    // SDK buffer was still alive for later diagnostic capture analysis.
+    std::string scan3dGeometryError;
     std::optional<std::uint64_t> timestampNs;
 
     [[nodiscard]] bool isValid() const noexcept

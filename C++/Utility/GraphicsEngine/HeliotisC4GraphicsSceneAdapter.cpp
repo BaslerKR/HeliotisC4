@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -36,6 +37,15 @@ namespace {
         }
         return converted;
     }, part.samples);
+}
+
+[[nodiscard]] std::vector<std::uint16_t> rawUint16Samples(const heliotis::FramePart& part)
+{
+    if (const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples))
+    {
+        return *values;
+    }
+    return {};
 }
 
 [[nodiscard]] std::uint8_t graphicsBitDepth(const heliotis::FramePart& part) noexcept
@@ -91,53 +101,67 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
         return std::nullopt;
     }
 
-    if (!frame.scan3dGeometry)
-    {
-        return std::nullopt;
-    }
-    const Scan3dGeometry& geometry = *frame.scan3dGeometry;
-    const double unitToMillimeters = distanceUnitToMillimeters(geometry.distanceUnit);
-    if (!std::isfinite(unitToMillimeters)
-        || !std::isfinite(geometry.zScale)
-        || !std::isfinite(geometry.zOffset))
-    {
-        return std::nullopt;
-    }
-
     RangeFrame range;
     range.width = static_cast<int>(rangePart->width);
     range.height = static_cast<int>(rangePart->height);
     range.zValues = toFloatSamples(*rangePart);
-    const double zScaleMm = geometry.zScale * unitToMillimeters;
-    const double zOffsetMm = geometry.zOffset * unitToMillimeters;
-    for (float& value : range.zValues)
-    {
-        if (std::isfinite(value)) value = static_cast<float>(static_cast<double>(value) * zScaleMm + zOffsetMm);
-    }
+    range.rangeRaw = rawUint16Samples(*rangePart);
+    range.rangeBits = graphicsBitDepth(*rangePart);
     range.zScaleMm = 1.0;
     range.zOffsetMm = 0.0;
-    if (isRectifiedOutput(geometry.outputMode))
+    range.xScaleMm = std::numeric_limits<double>::quiet_NaN();
+    range.yScaleMm = std::numeric_limits<double>::quiet_NaN();
+    range.xOffsetMm = std::numeric_limits<double>::quiet_NaN();
+    range.yOffsetMm = std::numeric_limits<double>::quiet_NaN();
+    if (frame.scan3dGeometry)
     {
-        if (!std::isfinite(geometry.xScale) || !std::isfinite(geometry.yScale)
-            || !std::isfinite(geometry.xOffset) || !std::isfinite(geometry.yOffset))
+        const Scan3dGeometry& geometry = *frame.scan3dGeometry;
+        const double unitToMillimeters = distanceUnitToMillimeters(geometry.distanceUnit);
+        if (!std::isfinite(unitToMillimeters)
+            || !std::isfinite(geometry.zScale)
+            || !std::isfinite(geometry.zOffset))
         {
             return std::nullopt;
         }
-        range.xScaleMm = geometry.xScale * unitToMillimeters;
-        range.yScaleMm = geometry.yScale * unitToMillimeters;
-        range.xOffsetMm = geometry.xOffset * unitToMillimeters;
-        range.yOffsetMm = geometry.yOffset * unitToMillimeters;
+        const double zScaleMm = geometry.zScale * unitToMillimeters;
+        const double zOffsetMm = geometry.zOffset * unitToMillimeters;
+        for (float& value : range.zValues)
+        {
+            if (std::isfinite(value)) value = static_cast<float>(static_cast<double>(value) * zScaleMm + zOffsetMm);
+        }
+        if (isRectifiedOutput(geometry.outputMode))
+        {
+            if (!std::isfinite(geometry.xScale) || !std::isfinite(geometry.yScale)
+                || !std::isfinite(geometry.xOffset) || !std::isfinite(geometry.yOffset))
+            {
+                return std::nullopt;
+            }
+            range.xScaleMm = geometry.xScale * unitToMillimeters;
+            range.yScaleMm = geometry.yScale * unitToMillimeters;
+            range.xOffsetMm = geometry.xOffset * unitToMillimeters;
+            range.yOffsetMm = geometry.yOffset * unitToMillimeters;
+        }
+        else
+        {
+            // CalibratedC intentionally has no physical X/Y information. Keep
+            // its physical Z values, but expose a pixel-grid preview instead
+            // of inventing a millimetre calibration.
+            // heliViewer's CalibratedC surface convention is a 1 um pixel
+            // grid. It exposes relative relief without claiming calibrated
+            // object-space X/Y coordinates.
+            constexpr double previewPixelPitchMm = 0.001;
+            range.xScaleMm = previewPixelPitchMm;
+            range.yScaleMm = previewPixelPitchMm;
+            range.xOffsetMm = 0.0;
+            range.yOffsetMm = 0.0;
+            range.xyCoordinateMode = RangeFrameXYCoordinateMode::ImagePixels;
+        }
     }
-    else
-    {
-        // CalibratedC does not include X/Y axes in its 2.5D payload.  Do not
-        // infer a uniform grid for a non-rectified surface.
-        range.xScaleMm = std::numeric_limits<double>::quiet_NaN();
-        range.yScaleMm = std::numeric_limits<double>::quiet_NaN();
-        range.xOffsetMm = std::numeric_limits<double>::quiet_NaN();
-        range.yOffsetMm = std::numeric_limits<double>::quiet_NaN();
-    }
-    range.sensorType = "Heliotis H8";
+    range.sensorType = frame.scan3dGeometry
+        ? (range.xyCoordinateMode == RangeFrameXYCoordinateMode::ImagePixels
+            ? "Heliotis H8 (CalibratedC pixel grid)"
+            : "Heliotis H8")
+        : "Heliotis H8 (raw range)";
     range.frameId = frame.frameId;
     if (!range.isValid())
     {
@@ -150,6 +174,7 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
             intensityPart && hasCompatibleDimensions(*intensityPart, range.width, range.height))
         {
             range.intensity = toFloatSamples(*intensityPart);
+            range.intensityRaw = rawUint16Samples(*intensityPart);
             range.intensityBits = graphicsBitDepth(*intensityPart);
         }
 
@@ -157,6 +182,7 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
             confidencePart && hasCompatibleDimensions(*confidencePart, range.width, range.height))
         {
             range.confidence = toFloatSamples(*confidencePart);
+            range.confidenceRaw = rawUint16Samples(*confidencePart);
             range.confidenceBits = graphicsBitDepth(*confidencePart);
         }
     }

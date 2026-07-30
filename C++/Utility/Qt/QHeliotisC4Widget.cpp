@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QSize>
 #include <QSignalBlocker>
+#include <QScrollBar>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabWidget>
@@ -160,7 +161,13 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
         }
         setConnectionError(tr("Select a discovered Heliotis device before connecting."));
     });
-    connect(_grabOneButton, &QToolButton::clicked, this, &QHeliotisC4Widget::grabOneRequested);
+    connect(_grabOneButton, &QToolButton::clicked, this, [this] {
+        if (_acquisitionActive) {
+            emit stopRequested();
+            return;
+        }
+        emit grabOneRequested();
+    });
     connect(_grabLiveButton, &QToolButton::toggled, this, &QHeliotisC4Widget::liveGrabToggled);
     setConnectionState(false);
 }
@@ -281,22 +288,40 @@ void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
         const QSignalBlocker blocker(_grabLiveButton);
         _grabLiveButton->setChecked(false);
     }
-    setSoftwareTriggerAvailable(_acquisitionActive && enabled);
+    setSoftwareTriggerAvailable(_acquisitionActive && enabled && _softwareTriggerAvailable);
 }
 
-void QHeliotisC4Widget::setAcquisitionState(const bool acquiring, const bool continuous)
+void QHeliotisC4Widget::setAcquisitionState(
+    const bool acquiring,
+    const bool continuous,
+    const bool softwareTriggerAvailable)
 {
     if (!_acquisitionAvailable) return;
 
     _acquisitionActive = acquiring;
+    _softwareTriggerAvailable = acquiring && softwareTriggerAvailable;
+    // Keep the feature tree available so an armed TriggerSoftware command can
+    // be delivered to the SDK. All other editors remain locked below.
+    _featureAccessCurrent = acquiring;
+    _deviceFeatureTree->setEnabled(acquiring);
+    _motionFeatureTree->setEnabled(false);
+    for (auto* editor : _deviceFeatureEditors) {
+        if (editor) editor->setEnabled(false);
+    }
 
     {
         const QSignalBlocker blocker(_grabLiveButton);
         _grabLiveButton->setChecked(acquiring && continuous);
     }
-    _grabOneButton->setEnabled(!acquiring);
+    _grabOneButton->setEnabled(true);
+    _grabOneButton->setIcon(acquiring && !continuous
+        ? QIcon(QStringLiteral(":/Resources/Icons/icons8-stop-48.png"))
+        : QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
+    _grabOneButton->setToolTip(acquiring && !continuous
+        ? tr("Stop the armed single Heliotis acquisition")
+        : tr("Acquire one Heliotis frame"));
     _grabLiveButton->setEnabled(!acquiring || continuous);
-    setSoftwareTriggerAvailable(acquiring);
+    setSoftwareTriggerAvailable(_softwareTriggerAvailable);
     _connectionStatus->setText(acquiring ? tr("Armed") : tr("Connected"));
     _connectionStatus->setProperty("status", acquiring ? QStringLiteral("grabbing") : QStringLiteral("connected"));
     _connectionStatus->style()->unpolish(_connectionStatus);
@@ -313,7 +338,7 @@ void QHeliotisC4Widget::setAcquisitionState(const bool acquiring, const bool con
 
 void QHeliotisC4Widget::setAcquisitionError(const QString& message)
 {
-    setAcquisitionState(false, false);
+    setAcquisitionState(false, false, false);
     _messageLabel->setText(message);
     _messageLabel->setProperty("messageState", QStringLiteral("error"));
     _messageLabel->style()->unpolish(_messageLabel);
@@ -322,7 +347,7 @@ void QHeliotisC4Widget::setAcquisitionError(const QString& message)
 
 void QHeliotisC4Widget::setSoftwareTriggerAvailable(const bool available)
 {
-    const bool enabled = available && !_featureOperationPending;
+    const bool enabled = available && _featureAccessCurrent && !_featureOperationPending;
     qInfo().noquote() << "[Heliotis C4] Software trigger UI state:"
                       << (enabled ? "enabled" : "disabled")
                       << "buttons=" << _softwareTriggerButtons.size()
@@ -339,7 +364,7 @@ void QHeliotisC4Widget::setFeatureOperationPending(const bool pending)
     _featureOperationPending = pending;
     _tabs->setEnabled(!pending);
     if (!pending) {
-        setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable);
+        setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable && _softwareTriggerAvailable);
         return;
     }
 
@@ -371,6 +396,9 @@ void QHeliotisC4Widget::setIdleState(const QString& message)
 
 void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& features)
 {
+    _featureAccessCurrent = true;
+    _deviceFeatureTree->setEnabled(true);
+    _motionFeatureTree->setEnabled(true);
     heliotis::HeliotisC4::FeatureList deviceFeatures;
     heliotis::HeliotisC4::FeatureList motionFeatures;
     for (const auto& feature : features) {
@@ -382,7 +410,7 @@ void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& fea
     }
     populateTree(_deviceFeatureTree, _deviceCategories, deviceFeatures);
     populateTree(_motionFeatureTree, _motionCategories, motionFeatures);
-    setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable);
+    setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable && _softwareTriggerAvailable);
 }
 
 void QHeliotisC4Widget::populateTree(
@@ -390,9 +418,19 @@ void QHeliotisC4Widget::populateTree(
     QHash<QString, QTreeWidgetItem*>& categories,
     const heliotis::HeliotisC4::FeatureList& features)
 {
+    const int verticalScrollValue = tree->verticalScrollBar()->value();
+    const int horizontalScrollValue = tree->horizontalScrollBar()->value();
+    QHash<QString, bool> expandedCategories;
+    for (auto iterator = categories.cbegin(); iterator != categories.cend(); ++iterator) {
+        expandedCategories.insert(iterator.key(), iterator.value()->isExpanded());
+    }
+
     tree->clear();
     categories.clear();
-    if (tree == _deviceFeatureTree) _softwareTriggerButtons.clear();
+    if (tree == _deviceFeatureTree) {
+        _softwareTriggerButtons.clear();
+        _deviceFeatureEditors.clear();
+    }
     for (const auto& feature : features) {
         auto* parent = ensureCategory(tree, categories, QString::fromStdString(feature.categoryPath));
         auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
@@ -405,30 +443,29 @@ void QHeliotisC4Widget::populateTree(
         if (feature.type == heliotis::FeatureType::Command) {
             auto* executeButton = new QPushButton(tr("Execute"), tree);
             const bool isSoftwareTrigger = featureName == QStringLiteral("TriggerSoftware");
-            executeButton->setEnabled(writable && !_featureOperationPending
+            executeButton->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending
                 && (!isSoftwareTrigger || _acquisitionActive));
             connect(executeButton, &QPushButton::clicked, this, [this, featureName] {
                 emit featureCommandRequested(featureName);
             });
             tree->setItemWidget(item, 1, executeButton);
-            if (isSoftwareTrigger) _softwareTriggerButtons.push_back(executeButton);
-            continue;
-        }
-
-        if (!writable) {
-            item->setText(1, QString::fromStdString(feature.valueText));
-            item->setDisabled(true);
+            if (isSoftwareTrigger) {
+                _softwareTriggerButtons.push_back(executeButton);
+            } else if (tree == _deviceFeatureTree) {
+                _deviceFeatureEditors.push_back(executeButton);
+            }
             continue;
         }
 
         if (feature.type == heliotis::FeatureType::Boolean) {
             auto* checkBox = new QCheckBox(tree);
             checkBox->setChecked(feature.valueText == "1" || feature.valueText == "true");
-            checkBox->setEnabled(!_featureOperationPending);
+            checkBox->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
             connect(checkBox, &QCheckBox::toggled, this, [this, featureName](const bool checked) {
                 emit featureWriteRequested(featureName, checked ? QStringLiteral("1") : QStringLiteral("0"));
             });
             tree->setItemWidget(item, 1, checkBox);
+            if (tree == _deviceFeatureTree) _deviceFeatureEditors.push_back(checkBox);
             continue;
         }
 
@@ -438,11 +475,12 @@ void QHeliotisC4Widget::populateTree(
                 comboBox->addItem(QString::fromStdString(entry));
             }
             comboBox->setCurrentText(QString::fromStdString(feature.valueText));
-            comboBox->setEnabled(!_featureOperationPending);
+            comboBox->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
             connect(comboBox, &QComboBox::textActivated, this, [this, featureName](const QString& value) {
                 emit featureWriteRequested(featureName, value);
             });
             tree->setItemWidget(item, 1, comboBox);
+            if (tree == _deviceFeatureTree) _deviceFeatureEditors.push_back(comboBox);
             continue;
         }
 
@@ -452,13 +490,22 @@ void QHeliotisC4Widget::populateTree(
         } else {
             lineEdit->setText(QString::fromStdString(feature.valueText));
         }
-        lineEdit->setEnabled(!_featureOperationPending);
+        lineEdit->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
         connect(lineEdit, &QLineEdit::editingFinished, this, [this, featureName, lineEdit] {
             emit featureWriteRequested(featureName, lineEdit->text());
         });
         tree->setItemWidget(item, 1, lineEdit);
+        if (tree == _deviceFeatureTree) _deviceFeatureEditors.push_back(lineEdit);
     }
-    tree->expandToDepth(0);
+    if (expandedCategories.isEmpty()) {
+        tree->expandToDepth(0);
+    } else {
+        for (auto iterator = categories.cbegin(); iterator != categories.cend(); ++iterator) {
+            iterator.value()->setExpanded(expandedCategories.value(iterator.key(), false));
+        }
+    }
+    tree->verticalScrollBar()->setValue(verticalScrollValue);
+    tree->horizontalScrollBar()->setValue(horizontalScrollValue);
 }
 
 QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(

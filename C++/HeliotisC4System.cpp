@@ -27,6 +27,135 @@ std::string lastSdkError()
     return error ? std::string(error) : std::string("Unknown C4Utility error.");
 }
 
+std::string operationError(const char* operation, const C4HDL_ERROR result)
+{
+    return std::string(operation) + " returned C4Utility code "
+        + std::to_string(static_cast<long long>(result)) + ": " + lastSdkError();
+}
+
+void logInfo(const std::string& message);
+
+bool checkBufferOperation(
+    const C4HDL_ERROR result,
+    const char* operation,
+    std::string* errorMessage)
+{
+    if (result == C4HDL_ERR_SUCCESS) return true;
+    if (errorMessage) *errorMessage = operationError(operation, result);
+    return false;
+}
+
+template <typename Sample, typename Reader>
+bool copyBufferPartSamples(
+    const std::uint32_t expectedSamples,
+    const char* operation,
+    Reader&& reader,
+    std::vector<Sample>* samples,
+    std::string* errorMessage)
+{
+    if (expectedSamples > (std::numeric_limits<std::uint32_t>::max)() / sizeof(Sample)) {
+        if (errorMessage) *errorMessage = std::string(operation) + " exceeds C4Utility's 32-bit byte-capacity limit.";
+        return false;
+    }
+    std::uint32_t capacity = expectedSamples * static_cast<std::uint32_t>(sizeof(Sample));
+    for (int attempt = 0; attempt != 2; ++attempt) {
+        samples->resize((capacity + sizeof(Sample) - 1) / sizeof(Sample));
+        const C4HDL_ERROR result = reader(samples->data(), &capacity);
+        if (result == C4HDL_ERR_SUCCESS) {
+            if (capacity != expectedSamples * sizeof(Sample)) {
+                if (errorMessage) {
+                    *errorMessage = std::string(operation) + " returned " + std::to_string(capacity)
+                        + " byte(s), but the part geometry requires "
+                        + std::to_string(expectedSamples * sizeof(Sample)) + " byte(s).";
+                }
+                return false;
+            }
+            samples->resize(expectedSamples);
+            return true;
+        }
+        if (result != C4HDL_ERR_SMALL_BUFFER || capacity == 0) {
+            if (errorMessage) *errorMessage = operationError(operation, result);
+            return false;
+        }
+        logInfo(std::string(operation) + " requested receive capacity "
+            + std::to_string(capacity) + " byte(s); retrying with the SDK-required size.");
+    }
+    if (errorMessage) {
+        *errorMessage = std::string(operation) + " still reports an insufficient buffer after retrying with the SDK-required size.";
+    }
+    return false;
+}
+
+bool readBufferPartDimensions(
+    const C4_BUFFER buffer,
+    const std::int64_t partIndex,
+    std::vector<std::int64_t>* dimensions,
+    std::string* errorMessage)
+{
+    std::uint32_t dimensionBytes = 2 * static_cast<std::uint32_t>(sizeof(std::int64_t));
+    dimensions->resize(dimensionBytes / sizeof(std::int64_t));
+    C4HDL_ERROR result = C4Buf_getPartDimension(buffer, partIndex, dimensions->data(), &dimensionBytes);
+    if (result == C4HDL_ERR_SMALL_BUFFER && dimensionBytes != 0) {
+        if (dimensionBytes % sizeof(std::int64_t) != 0) {
+            if (errorMessage) *errorMessage = "C4Utility returned a non-integral byte size for buffer dimensions.";
+            return false;
+        }
+        logInfo("C4Buf_getPartDimension part " + std::to_string(partIndex)
+            + " requested " + std::to_string(dimensionBytes) + " byte(s); retrying.");
+        dimensions->resize(dimensionBytes / sizeof(std::int64_t));
+        result = C4Buf_getPartDimension(buffer, partIndex, dimensions->data(), &dimensionBytes);
+    }
+    if (!checkBufferOperation(result, "C4Buf_getPartDimension", errorMessage)) return false;
+    if (dimensionBytes % sizeof(std::int64_t) != 0) {
+        if (errorMessage) *errorMessage = "C4Utility returned a non-integral byte size for buffer dimensions.";
+        return false;
+    }
+    dimensions->resize(dimensionBytes / sizeof(std::int64_t));
+    if (dimensions->size() < 2) {
+        if (errorMessage) *errorMessage = "C4Utility returned fewer than two dimensions for a buffer part.";
+        return false;
+    }
+
+    std::ostringstream values;
+    for (std::size_t index = 0; index < dimensions->size(); ++index) {
+        if (index != 0) values << 'x';
+        values << dimensions->at(index);
+    }
+    logInfo("C4Utility buffer part " + std::to_string(partIndex) + " dimensions=" + values.str() + ".");
+    return true;
+}
+
+template <typename Sample>
+std::string sampleDiagnostics(const std::vector<Sample>& samples)
+{
+    std::size_t finiteCount = 0;
+    std::size_t zeroCount = 0;
+    double minimum = std::numeric_limits<double>::infinity();
+    double maximum = -std::numeric_limits<double>::infinity();
+    for (const Sample sample : samples) {
+        const double value = static_cast<double>(sample);
+        if (!std::isfinite(value)) continue;
+        ++finiteCount;
+        if (value == 0.0) ++zeroCount;
+        minimum = std::min(minimum, value);
+        maximum = std::max(maximum, value);
+    }
+
+    std::ostringstream summary;
+    summary << "samples=" << samples.size()
+            << ", finite=" << finiteCount
+            << ", zero=" << zeroCount;
+    if (finiteCount != 0U) {
+        summary << std::setprecision(12)
+                << ", min=" << minimum
+                << ", max=" << maximum
+                << ", first=" << static_cast<double>(samples.front())
+                << ", middle=" << static_cast<double>(samples.at(samples.size() / 2U))
+                << ", last=" << static_cast<double>(samples.back());
+    }
+    return summary.str();
+}
+
 bool check(const C4HDL_ERROR result, std::string* errorMessage)
 {
     if (result == C4HDL_ERR_SUCCESS) return true;
@@ -258,8 +387,7 @@ bool validateChunkMetadataConfiguration(const C4_DEVICE device, std::string* err
     if (result != C4HDL_ERR_SUCCESS || chunkModeActive != 1) {
         if (errorMessage) {
             *errorMessage = "Heliotis acquisition requires the existing device configuration to enable "
-                "ChunkModeActive, ChunkPartCount, ChunkPartType, ChunkScan3dDistanceUnit, "
-                "ChunkScan3dOutputMode, ChunkScan3dCoordinateScale, and ChunkScan3dCoordinateOffset. "
+                "ChunkModeActive. "
                 "The plugin does not change device features."
                 + (result == C4HDL_ERR_SUCCESS ? std::string() : " C4Utility: " + lastSdkError());
         }
@@ -476,6 +604,15 @@ bool HeliotisC4Device::open(const DeviceDescriptor& descriptor, std::string* err
             if (errorMessage) *errorMessage = "C4Utility handler is not open.";
             return false;
         }
+        std::int64_t interfaceCount = 0;
+        if (!check(C4Hdl_updateInterfaceList(_system->_handler, &interfaceCount), errorMessage)) return false;
+        logInfo("Device open refreshed " + std::to_string(interfaceCount) + " C4 interface(s).");
+        if (descriptor.interfaceIndex >= interfaceCount) {
+            if (errorMessage) {
+                *errorMessage = "The selected Heliotis interface is no longer present in the refreshed interface list.";
+            }
+            return false;
+        }
         if (!check(C4Hdl_openInterface(_system->_handler, &interfaceHandle, descriptor.interfaceIndex), errorMessage)) return false;
         std::int64_t deviceCount = 0;
         if (!check(C4If_updateDeciveList(interfaceHandle, &deviceCount), errorMessage)) {
@@ -557,9 +694,11 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
         const char* name;
         const char* value;
     };
-    // C4Utility 1.12 h8SurfSimple, plus the Scan3d chunks required by this
-    // module's deep-owned geometry contract.
-    static constexpr std::array<FeatureWrite, 36> preStageInitWrites{{
+    // Keep the measurement/motion setup aligned with C4Utility 1.12's
+    // h8SurfSimple configuration. Trigger routing remains device-owned: do
+    // not overwrite the user's RecordingStart, AcquisitionStart, or
+    // FrameStart configuration during connection.
+    static constexpr std::array<FeatureWrite, 28> preStageInitWrites{{
         {"ComponentSelector", "Intensity"}, {"ComponentEnable", "0"},
         {"ComponentSelector", "Range"}, {"ComponentEnable", "1"},
         {"ComponentSelector", "Reflectance"}, {"ComponentEnable", "1"},
@@ -567,13 +706,12 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
         {"ChunkModeActive", "1"},
         {"ChunkSelector", "PartCount"}, {"ChunkEnable", "1"},
         {"ChunkSelector", "PartType"}, {"ChunkEnable", "1"},
+        // A Surface payload alone contains Z samples.  Preserve the matching
+        // Scan3d chunks so the host can reconstruct its SDK-declared grid.
         {"ChunkSelector", "Scan3dDistanceUnit"}, {"ChunkEnable", "1"},
         {"ChunkSelector", "Scan3dOutputMode"}, {"ChunkEnable", "1"},
         {"ChunkSelector", "Scan3dCoordinateScale"}, {"ChunkEnable", "1"},
         {"ChunkSelector", "Scan3dCoordinateOffset"}, {"ChunkEnable", "1"},
-        {"TriggerSelector", "RecordingStart"}, {"TriggerMode", "On"}, {"TriggerSource", "Stage"},
-        {"TriggerSelector", "AcquisitionStart"}, {"TriggerMode", "Off"},
-        {"TriggerSelector", "FrameStart"}, {"TriggerMode", "On"}, {"TriggerSource", "Software"},
         {"EncoderSelector", "Camera"}, {"EncoderInverter", "1"},
         {"ScanPosition", "-1.4"}, {"ScanRange", "0.5"}, {"ScanSpeed", "5.0"},
         {"GeneralSpeed", "10.0"}, {"ScanMode", "Down"},
@@ -640,7 +778,8 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
 
     if (!applyWrites(postStageInitWrites, "post-stage-init")) return false;
     if (!applyWrites(illuminationWrites, "illumination")) return false;
-    logInfo("H8 reference profile completed; Range/Reflectance, chunks, triggers, motion, processing, and illumination are configured.");
+    logInfo("H8 reference profile completed; Range/Reflectance, chunks, motion, processing, and illumination are configured. "
+        "Existing trigger configuration is preserved: " + triggerConfigurationSummary(_device) + ".");
     return true;
 }
 
@@ -714,7 +853,6 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
         if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
         return features;
     }
-
     C4_FEATUREINFO* featureList = nullptr;
     if (!check(C4Dev_getFeatureList(_device, &featureList), errorMessage)) return features;
     if (!featureList) return features;
@@ -740,7 +878,7 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
         C4Ftr_getAccessMode(feature, &sdkAccess);
         const FeatureType type = featureType(sdkType);
         const FeatureAccess access = featureAccess(sdkAccess);
-        if (access != FeatureAccess::ReadOnly && !isWritable(access)) {
+        if (access == FeatureAccess::NotImplemented) {
             continue;
         }
         std::vector<std::string> enumEntries;
@@ -757,7 +895,10 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
             category,
             name,
             type == FeatureType::Command ? std::string("Execute")
-                : (access == FeatureAccess::WriteOnly ? std::string("<write only>") : readFeatureValue(feature, type)),
+                : (access == FeatureAccess::WriteOnly ? std::string("<write only>")
+                    : (access == FeatureAccess::ReadOnly || access == FeatureAccess::ReadWrite
+                        ? readFeatureValue(feature, type)
+                        : std::string("<unavailable>"))),
             description,
             type,
             access,
@@ -786,11 +927,6 @@ bool HeliotisC4Device::writeFeature(
         if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
         return false;
     }
-    if (_acquiring) {
-        if (errorMessage) *errorMessage = "Heliotis feature writes are unavailable during acquisition.";
-        return false;
-    }
-
     FeatureType type = FeatureType::Unknown;
     FeatureAccess access = FeatureAccess::Unknown;
     if (!findFeatureMetadata(_device, name, &type, &access, errorMessage)) return false;
@@ -866,11 +1002,6 @@ bool HeliotisC4Device::executeCommand(const std::string& name, std::string* erro
         if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
         return false;
     }
-    if (_acquiring) {
-        if (errorMessage) *errorMessage = "Heliotis commands are unavailable during acquisition.";
-        return false;
-    }
-
     FeatureType type = FeatureType::Unknown;
     FeatureAccess access = FeatureAccess::Unknown;
     if (!findFeatureMetadata(_device, name, &type, &access, errorMessage)) return false;
@@ -887,37 +1018,33 @@ bool HeliotisC4Device::executeCommand(const std::string& name, std::string* erro
 
 bool HeliotisC4Device::triggerSoftware(std::string* errorMessage)
 {
-    std::scoped_lock lock(_stateMutex, _sdkMutex);
-    if (!_device) {
-        if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
-        return false;
-    }
-    if (!_acquiring) {
-        if (errorMessage) *errorMessage = "Software trigger requires an armed Heliotis acquisition.";
-        logWarning("Software trigger rejected because acquisition is not armed.");
-        return false;
+    {
+        std::lock_guard<std::mutex> stateLock(_stateMutex);
+        if (!_device) {
+            if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+            return false;
+        }
+        if (!_acquiring) {
+            if (errorMessage) *errorMessage = "Software trigger requires an armed Heliotis acquisition.";
+            logWarning("Software trigger rejected because acquisition is not armed.");
+            return false;
+        }
     }
 
-    logInfo("Software trigger requested while acquisition is armed. " + triggerConfigurationSummary(_device) + ".");
-    FeatureType type = FeatureType::Unknown;
-    FeatureAccess access = FeatureAccess::Unknown;
-    if (!findFeatureMetadata(_device, "TriggerSoftware", &type, &access, errorMessage)) {
-        logWarning("Software trigger metadata lookup failed: "
-            + (errorMessage && !errorMessage->empty() ? *errorMessage : lastSdkError()));
-        return false;
-    }
-    if (type != FeatureType::Command || !isWritable(access)) {
-        if (errorMessage) {
-            *errorMessage = "TriggerSoftware is unavailable. Select FrameStart with TriggerMode=On and TriggerSource=Software.";
+    {
+        std::lock_guard<std::mutex> triggerLock(_triggerMutex);
+        if (_pendingSoftwareTriggers != 0 || _softwareTriggerInFlight) {
+            if (errorMessage) {
+                *errorMessage = "The previous Heliotis software trigger is still waiting for its frame.";
+            }
+            logWarning("Software trigger rejected because a previous trigger is still in flight.");
+            return false;
         }
-        logWarning("Software trigger is unavailable. " + triggerConfigurationSummary(_device) + ".");
-        return false;
+        ++_pendingSoftwareTriggers;
     }
-    const bool succeeded = check(C4Dev_executeCommand(_device, "TriggerSoftware"), errorMessage);
-    if (succeeded) logInfo("Software trigger command accepted by C4Utility.");
-    else logWarning("Software trigger command failed: "
-        + (errorMessage && !errorMessage->empty() ? *errorMessage : lastSdkError()));
-    return succeeded;
+    _triggerCondition.notify_one();
+    logInfo("TriggerSoftware command queued for the acquisition worker.");
+    return true;
 }
 
 bool HeliotisC4Device::startAcquisition(
@@ -936,6 +1063,7 @@ bool HeliotisC4Device::startAcquisition(
     logInfo(std::string("Acquisition arm requested: mode=") + modeName + ".");
 
     C4_DEVICE device = nullptr;
+    bool softwareTriggered = false;
     {
         std::scoped_lock lock(_stateMutex, _sdkMutex);
         if (!_device) {
@@ -949,9 +1077,35 @@ bool HeliotisC4Device::startAcquisition(
                 + (errorMessage && !errorMessage->empty() ? *errorMessage : lastSdkError()));
             return false;
         }
-        const std::int64_t bufferCount = mode == AcquisitionMode::SingleFrame ? 1 : 4;
+        softwareTriggered = readDeviceEnumeration(device, "TriggerSelector") == "FrameStart"
+            && readDeviceEnumeration(device, "TriggerMode") == "On"
+            && readDeviceEnumeration(device, "TriggerSource") == "Software";
+        if (softwareTriggered) {
+            FeatureType triggerType = FeatureType::Unknown;
+            FeatureAccess triggerAccess = FeatureAccess::Unknown;
+            if (!findFeatureMetadata(device, "TriggerSoftware", &triggerType, &triggerAccess, errorMessage)) {
+                return false;
+            }
+            if (triggerType != FeatureType::Command || !isWritable(triggerAccess)) {
+                if (errorMessage) {
+                    *errorMessage = "TriggerSoftware is unavailable. Select FrameStart with "
+                        "TriggerMode=On and TriggerSource=Software.";
+                }
+                return false;
+            }
+        }
+        // h8SurfSimple always starts with four C4Utility-managed receive slots.
+        // A single logical capture still needs this transport queue; it stops
+        // after the first deep-copied frame.
+        constexpr std::int64_t bufferCount = 4;
+        std::int64_t payloadSize = 0;
+        if (C4Dev_readInteger(device, "PayloadSize", &payloadSize) == C4HDL_ERR_SUCCESS) {
+            logInfo("H8 acquisition payload size=" + std::to_string(payloadSize) + " byte(s).");
+        } else {
+            logInfo("H8 acquisition payload size is not exposed by this device configuration.");
+        }
         logInfo(std::string("Calling C4Dev_startAcquisition with ") + std::to_string(bufferCount)
-            + " host buffer(s). " + triggerConfigurationSummary(device) + ".");
+            + " C4Utility receive buffer slot(s). " + triggerConfigurationSummary(device) + ".");
         if (!check(C4Dev_startAcquisition(device, bufferCount), errorMessage)) {
             logWarning(std::string("C4Dev_startAcquisition failed: ")
                 + (errorMessage && !errorMessage->empty() ? *errorMessage : lastSdkError()));
@@ -959,6 +1113,12 @@ bool HeliotisC4Device::startAcquisition(
         }
 
         _stopAcquisitionRequested.store(false);
+        {
+            std::lock_guard<std::mutex> triggerLock(_triggerMutex);
+            _pendingSoftwareTriggers = 0;
+            _softwareTriggerInFlight = false;
+        }
+        _softwareTriggeredAcquisition = softwareTriggered;
         _acquiring = true;
         _lastAcquisitionError.clear();
     }
@@ -966,7 +1126,13 @@ bool HeliotisC4Device::startAcquisition(
     logInfo(std::string("Acquisition armed: mode=") + modeName + ".");
 
     try {
-        std::thread worker(&HeliotisC4Device::acquisitionLoop, this, device, mode, std::move(frameCallback));
+        std::thread worker(
+            &HeliotisC4Device::acquisitionLoop,
+            this,
+            device,
+            mode,
+            softwareTriggered,
+            std::move(frameCallback));
         std::lock_guard<std::mutex> lock(_stateMutex);
         _acquisitionThread = std::move(worker);
     } catch (const std::exception& exception) {
@@ -996,6 +1162,13 @@ void HeliotisC4Device::stopAcquisition()
         wasAcquiring = _acquiring;
         worker = std::move(_acquisitionThread);
     }
+    _triggerCondition.notify_all();
+
+    {
+        std::lock_guard<std::mutex> triggerLock(_triggerMutex);
+        _pendingSoftwareTriggers = 0;
+        _softwareTriggerInFlight = false;
+    }
 
     if (wasAcquiring && device) {
         logInfo("Stopping armed acquisition.");
@@ -1018,6 +1191,12 @@ bool HeliotisC4Device::isAcquiring() const
     return _acquiring;
 }
 
+bool HeliotisC4Device::isSoftwareTriggeredAcquisition() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _acquiring && _softwareTriggeredAcquisition;
+}
+
 std::string HeliotisC4Device::lastAcquisitionError() const
 {
     std::lock_guard<std::mutex> lock(_stateMutex);
@@ -1032,23 +1211,29 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
     }
 
     std::int64_t partCount = 0;
-    if (!check(C4Buf_getNumParts(buffer, &partCount), errorMessage) || partCount <= 0) {
+    if (!checkBufferOperation(C4Buf_getNumParts(buffer, &partCount), "C4Buf_getNumParts", errorMessage) || partCount <= 0) {
         if (errorMessage && errorMessage->empty()) *errorMessage = "C4Utility buffer has no data parts.";
         return false;
     }
 
     std::int64_t chunkPartCount = 0;
-    if (C4Buf_readInteger(buffer, "ChunkPartCount", &chunkPartCount) != C4HDL_ERR_SUCCESS
+    const C4HDL_ERROR chunkPartCountResult = C4Buf_readInteger(buffer, "ChunkPartCount", &chunkPartCount);
+    if (chunkPartCountResult != C4HDL_ERR_SUCCESS
         || chunkPartCount != partCount) {
         if (errorMessage) {
-            *errorMessage = "C4Utility buffer is missing complete ChunkPartCount metadata. "
-                "Enable ChunkPartCount and ChunkPartType in the H8 configuration before acquisition.";
+            *errorMessage = chunkPartCountResult != C4HDL_ERR_SUCCESS
+                ? operationError("C4Buf_readInteger(ChunkPartCount)", chunkPartCountResult)
+                : "C4Utility buffer ChunkPartCount does not match its multipart payload.";
         }
         return false;
     }
 
+    // h8SurfSimple requires only multipart identity chunks.  Geometry chunks
+    // are optional: preserve them when the device emits them, but never reject
+    // an otherwise valid Range/Reflectance frame because they are absent.
     Scan3dGeometry scan3dGeometry;
-    if (!readScan3dGeometry(buffer, &scan3dGeometry, errorMessage)) return false;
+    std::string geometryError;
+    const bool hasScan3dGeometry = readScan3dGeometry(buffer, &scan3dGeometry, &geometryError);
 
     Frame copied;
     std::int64_t chunkFrameId = 0;
@@ -1061,27 +1246,32 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
     }
     copied.parts.reserve(static_cast<std::size_t>(partCount));
     for (std::int64_t partIndex = 0; partIndex < partCount; ++partIndex) {
-        std::array<std::int64_t, 2> dimensions{};
-        std::uint32_t dimensionCount = static_cast<std::uint32_t>(dimensions.size());
-        if (!check(C4Buf_getPartDimension(buffer, partIndex, dimensions.data(), &dimensionCount), errorMessage)
-            || dimensionCount != dimensions.size()
-            || dimensions[0] <= 0 || dimensions[1] <= 0
-            || dimensions[0] > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())
-            || dimensions[1] > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())) {
-            if (errorMessage && errorMessage->empty()) *errorMessage = "C4Utility returned unsupported buffer dimensions.";
-            return false;
-        }
+        std::vector<std::int64_t> dimensions;
+        if (!readBufferPartDimensions(buffer, partIndex, &dimensions, errorMessage)) return false;
 
-        const auto width = static_cast<std::uint32_t>(dimensions[0]);
-        const auto height = static_cast<std::uint32_t>(dimensions[1]);
-        const auto expectedSamples = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+        std::uint64_t expectedSamples = 1;
+        for (const std::int64_t dimension : dimensions) {
+            if (dimension <= 0
+                || dimension > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())
+                || expectedSamples > (std::numeric_limits<std::uint32_t>::max)() / static_cast<std::uint64_t>(dimension)) {
+                if (errorMessage) *errorMessage = "C4Utility returned unsupported buffer dimensions.";
+                return false;
+            }
+            expectedSamples *= static_cast<std::uint64_t>(dimension);
+        }
         if (expectedSamples == 0 || expectedSamples > (std::numeric_limits<std::uint32_t>::max)()) {
             if (errorMessage) *errorMessage = "C4Utility buffer part exceeds the supported sample count.";
             return false;
         }
 
+        const auto width = static_cast<std::uint32_t>(dimensions[0]);
+        const auto height = static_cast<std::uint32_t>(expectedSamples / width);
+
         std::int64_t pixelFormat = 0;
-        if (!check(C4Buf_getPartPixelformat(buffer, partIndex, &pixelFormat), errorMessage)) return false;
+        if (!checkBufferOperation(
+                C4Buf_getPartPixelformat(buffer, partIndex, &pixelFormat),
+                "C4Buf_getPartPixelformat",
+                errorMessage)) return false;
         std::string pixelFormatError;
         const std::string pixelFormatName = readSdkString(
             [buffer, pixelFormat](char* text, std::size_t* size) {
@@ -1093,10 +1283,10 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
             return false;
         }
 
-        if (C4Buf_writeInteger(buffer, "ChunkPartSelector", partIndex) != C4HDL_ERR_SUCCESS) {
+        const C4HDL_ERROR partSelectorResult = C4Buf_writeInteger(buffer, "ChunkPartSelector", partIndex);
+        if (partSelectorResult != C4HDL_ERR_SUCCESS) {
             if (errorMessage) {
-                *errorMessage = "C4Utility buffer cannot select ChunkPartSelector. "
-                    "Enable ChunkPartType in the H8 configuration before acquisition.";
+                *errorMessage = operationError("C4Buf_writeInteger(ChunkPartSelector)", partSelectorResult);
             }
             return false;
         }
@@ -1125,6 +1315,7 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
         part.width = width;
         part.height = height;
         double fixedPointScale = 1.0;
+        bool hasFixedPointScale = false;
         const bool floatingPointSamples = usesFloatingPointSamples(pixelFormatName);
         if (!floatingPointSamples
             && C4Buf_readFloat(buffer, "ChunkPartFixpointScaling", &fixedPointScale) == C4HDL_ERR_SUCCESS) {
@@ -1133,25 +1324,42 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
                 return false;
             }
             part.sampleScale = fixedPointScale;
+            hasFixedPointScale = true;
         }
+        const std::string partDiagnosticPrefix = "C4Utility buffer part " + std::to_string(partIndex)
+            + " type=" + partName
+            + ", pixelFormat=" + pixelFormatName
+            + ", reader=" + (floatingPointSamples ? "float" : "uint16")
+            + ", ChunkPartFixpointScaling="
+            + (hasFixedPointScale ? std::to_string(fixedPointScale) : "unavailable")
+            + ", appliedScale=" + std::to_string(part.sampleScale)
+            + ", ";
         std::uint32_t sampleCount = static_cast<std::uint32_t>(expectedSamples);
         if (floatingPointSamples) {
-            std::vector<double> samples(sampleCount);
-            if (!check(C4Buf_getDataPartFloat(buffer, partIndex, samples.data(), &sampleCount), errorMessage)
-                || sampleCount != expectedSamples) {
-                if (errorMessage && errorMessage->empty()) *errorMessage = "C4Utility returned an invalid floating-point part size.";
-                return false;
-            }
+            std::vector<double> samples;
+            if (!copyBufferPartSamples<double>(
+                    sampleCount,
+                    "C4Buf_getDataPartFloat",
+                    [buffer, partIndex](double* data, std::uint32_t* capacity) {
+                        return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
+                    },
+                    &samples,
+                    errorMessage)) return false;
             part.bitsPerSample = 64;
+            logInfo(partDiagnosticPrefix + sampleDiagnostics(samples) + ".");
             part.samples = std::move(samples);
         } else {
-            std::vector<std::uint16_t> samples(sampleCount);
-            if (!check(C4Buf_getDataPartUint16(buffer, partIndex, samples.data(), &sampleCount), errorMessage)
-                || sampleCount != expectedSamples) {
-                if (errorMessage && errorMessage->empty()) *errorMessage = "C4Utility returned an invalid uint16 part size.";
-                return false;
-            }
+            std::vector<std::uint16_t> samples;
+            if (!copyBufferPartSamples<std::uint16_t>(
+                    sampleCount,
+                    "C4Buf_getDataPartUint16",
+                    [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
+                        return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
+                    },
+                    &samples,
+                    errorMessage)) return false;
             part.bitsPerSample = 16;
+            logInfo(partDiagnosticPrefix + sampleDiagnostics(samples) + ".");
             part.samples = std::move(samples);
         }
         copied.parts.push_back(std::move(part));
@@ -1161,7 +1369,11 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
         if (errorMessage) *errorMessage = "C4Utility produced an invalid frame payload.";
         return false;
     }
-    copied.scan3dGeometry = std::move(scan3dGeometry);
+    if (hasScan3dGeometry) {
+        copied.scan3dGeometry = std::move(scan3dGeometry);
+    } else {
+        copied.scan3dGeometryError = std::move(geometryError);
+    }
     *frame = std::move(copied);
     return true;
 }
@@ -1169,14 +1381,34 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
 void HeliotisC4Device::acquisitionLoop(
     const C4_DEVICE device,
     const AcquisitionMode mode,
+    const bool softwareTriggered,
     FrameCallback frameCallback)
 {
-    constexpr auto bufferTimeout = std::chrono::milliseconds(250);
+    constexpr auto bufferTimeout = std::chrono::seconds(10);
     std::size_t timeoutCount = 0;
     std::size_t receivedFrameCount = 0;
     logInfo(std::string("Acquisition worker started: mode=")
-        + (mode == AcquisitionMode::SingleFrame ? "Single" : "Live") + ".");
+        + (mode == AcquisitionMode::SingleFrame ? "Single" : "Live")
+        + (softwareTriggered ? ", FrameStart source=Software." : ", device trigger configuration preserved."));
     while (!_stopAcquisitionRequested.load()) {
+        bool executeSoftwareTrigger = softwareTriggered;
+        if (softwareTriggered) {
+            std::unique_lock<std::mutex> triggerLock(_triggerMutex);
+            _triggerCondition.wait(triggerLock, [this] {
+                return _stopAcquisitionRequested.load() || _pendingSoftwareTriggers != 0;
+            });
+            if (_stopAcquisitionRequested.load()) break;
+            --_pendingSoftwareTriggers;
+            _softwareTriggerInFlight = true;
+        } else {
+            std::lock_guard<std::mutex> triggerLock(_triggerMutex);
+            if (_pendingSoftwareTriggers != 0) {
+                --_pendingSoftwareTriggers;
+                _softwareTriggerInFlight = true;
+                executeSoftwareTrigger = true;
+            }
+        }
+
         C4_BUFFER buffer = nullptr;
         Frame frame;
         std::string error;
@@ -1185,7 +1417,18 @@ void HeliotisC4Device::acquisitionLoop(
         {
             std::lock_guard<std::mutex> lock(_sdkMutex);
             const auto waitStarted = std::chrono::steady_clock::now();
-            result = C4Dev_getBuffer(device, &buffer, bufferTimeout.count());
+            if (executeSoftwareTrigger) {
+                result = C4Dev_executeCommand(device, "TriggerSoftware");
+                if (result != C4HDL_ERR_SUCCESS) {
+                    error = operationError("C4Dev_executeCommand(TriggerSoftware)", result);
+                }
+            }
+            if (result == C4HDL_ERR_SUCCESS || !executeSoftwareTrigger) {
+                result = C4Dev_getBuffer(device, &buffer, bufferTimeout.count());
+                if (result != C4HDL_ERR_SUCCESS) {
+                    error = operationError("C4Dev_getBuffer", result);
+                }
+            }
             bufferWait = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - waitStarted);
             if (result == C4HDL_ERR_SUCCESS) {
@@ -1203,8 +1446,13 @@ void HeliotisC4Device::acquisitionLoop(
                 if (releaseResult != C4HDL_ERR_SUCCESS && error.empty()) error = lastSdkError();
                 if (!error.empty()) result = C4HDL_ERR_ERROR;
             } else {
-                error = lastSdkError();
+                if (error.empty()) error = operationError("C4Utility acquisition", result);
             }
+        }
+
+        if (executeSoftwareTrigger) {
+            std::lock_guard<std::mutex> triggerLock(_triggerMutex);
+            _softwareTriggerInFlight = false;
         }
 
         if (result != C4HDL_ERR_SUCCESS) {
@@ -1260,6 +1508,7 @@ void HeliotisC4Device::finishAcquisition()
         std::lock_guard<std::mutex> lock(_stateMutex);
         wasAcquiring = _acquiring;
         _acquiring = false;
+        _softwareTriggeredAcquisition = false;
     }
     if (wasAcquiring) dispatchStatus(Status::Acquisition, false);
     if (wasAcquiring) logInfo("Acquisition disarmed.");

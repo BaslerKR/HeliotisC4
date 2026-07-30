@@ -31,7 +31,7 @@ public:
     void setConnectionState(bool connected);
     void setConnectionError(const QString& message);
     void setAcquisitionAvailable(bool available);
-    void setAcquisitionState(bool acquiring, bool continuous);
+    void setAcquisitionState(bool acquiring, bool continuous, bool softwareTriggerAvailable);
     void setAcquisitionError(const QString& message);
     void setFeatureOperationPending(bool pending);
     void setFeatureError(const QString& message);
@@ -42,6 +42,7 @@ signals:
     void connectRequested(int deviceIndex);
     void disconnectRequested();
     void grabOneRequested();
+    void stopRequested();
     void liveGrabToggled(bool enabled);
     void featureWriteRequested(const QString& featureName, const QString& value);
     void featureCommandRequested(const QString& featureName);
@@ -72,11 +73,14 @@ private:
     QHash<QString, QTreeWidgetItem*> _deviceCategories;
     QHash<QString, QTreeWidgetItem*> _motionCategories;
     std::vector<QPushButton*> _softwareTriggerButtons;
+    std::vector<QWidget*> _deviceFeatureEditors;
     std::vector<heliotis::DeviceDescriptor> _devices;
     bool _connectionPending = false;
     bool _acquisitionAvailable = false;
     bool _acquisitionActive = false;
+    bool _softwareTriggerAvailable = false;
     bool _featureOperationPending = false;
+    bool _featureAccessCurrent = true;
 };
 
 #endif // HELIOTISC4_HAS_QT_UI

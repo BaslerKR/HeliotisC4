@@ -33,23 +33,23 @@ standalone CTest is the precondition for the later C4HdlC lifecycle layer.
 
 `HeliotisC4System` now owns one C4 handler and discovers interfaces/devices.
 `HeliotisC4Device` owns one selected interface/device pair. A successful H8
-connection applies the C4Utility 1.12 `h8SurfSimple` reference profile: Range
-and Reflectance components, multipart and Scan3d geometry chunks, stage/software
-trigger selectors, example encoder/motion values, `StageInit`, 3D/processing
-values, and `UserOutput0`-controlled illumination. It writes the example
+connection applies the C4Utility 1.12 `h8SurfSimple` measurement/motion profile: Range
+and Reflectance components, its `PartCount`/`PartType` multipart chunks, example
+encoder/motion values, `StageInit`, 3D/processing values, and
+`UserOutput0`-controlled illumination. It preserves the device's existing
+RecordingStart, AcquisitionStart, and FrameStart trigger configuration. It writes the example
 `ScanPosition=-1.4`, `ScanRange=0.5`, `ScanSpeed=5.0`, and
 `GeneralSpeed=10.0`; this can move hardware, so connection requires a cleared,
 known-safe H8. `StageInit` never runs during discovery or acquisition.
 
 The device builds a deep-owned feature snapshot from C4Utility metadata and
-current readable values. It shows RO, RW, and WO features and command nodes;
-the Qt widget uses typed editors for writable values and an Execute action for
-writable commands. Every write/command rechecks the live C4 type and access
-mode, rejects acquisition-time changes, and refreshes the feature tree after a
-successful operation because selectors can change values and permissions. The
-only acquisition-time command exception is `TriggerSoftware`: the widget
-enables it only while an acquisition is armed, and the device accepts it only
-when C4 reports the command writable.
+current readable values. It retains every implemented feature, including those
+currently unavailable, so the Qt tree can show unavailable entries disabled.
+The widget uses typed editors only for entries whose current C4 access mode is
+WO or RW. Every write/command rechecks the live C4 type and access mode. When
+acquisition starts or stops, the module refreshes this access snapshot: only
+features that C4 currently reports writable remain enabled. `TriggerSoftware`
+is additionally enabled only while an acquisition is armed.
 Stage/scan/motion/encoder categories remain in the Motion tab; all other
 features remain in Device.
 
@@ -91,6 +91,10 @@ both `uint16` and floating-point payload access. The module publishes that data
 as a deep-owned `heliotis::Frame`: each part has an explicit H8 semantic,
 identity, pixel format, dimensions, bit depth, and `uint16` or `double`
 samples. It must not expose an SDK buffer after `C4Buf_release`.
+The C4 C ABI reports required capacity in **bytes** through its `bufferSize`
+arguments; the reader must retry multipart data and dimension reads with that
+returned byte capacity instead of assuming two dimensions or a fixed payload
+size.
 
 `HeliotisC4::Core` has no GraphicsEngine dependency. Acquisition is limited to
 grab lifecycle: it arms the current device configuration, waits for buffers,
@@ -99,11 +103,17 @@ initializes or moves the stage, or changes trigger, output-component, stage, or
 scan features. Motion operations are separate from the acquisition controller.
 Before arming, it reads and requires
 `ChunkModeActive=1`; every delivered buffer must provide matching
-`ChunkPartCount`, a selected `ChunkPartType` for every part, and Scan3d chunk
-metadata. The required H8 configuration must already enable `ChunkPartCount`,
-`ChunkPartType`, `ChunkScan3dDistanceUnit`, `ChunkScan3dOutputMode`,
-`ChunkScan3dCoordinateScale`, and `ChunkScan3dCoordinateOffset`; the plugin
-reports a configuration error instead of guessing a part semantic or geometry.
+`ChunkPartCount` and a selected `ChunkPartType` for every part. The reference
+profile enables the `Scan3dDistanceUnit`, `Scan3dOutputMode`,
+`Scan3dCoordinateScale`, and `Scan3dCoordinateOffset` chunks in addition to
+multipart identity. Scan3d geometry is required for 3D presentation: a
+complete Range/Reflectance frame without it remains Range2D, and the
+GraphicsEngine adapter preserves its native Range/Reflectance/Confidence
+16-bit codes without inferring a calibrated 3D grid. The
+shared Mono MSB/LSB window selects the visible 8-bit range; it does not alter
+the retained device codes or physical analysis values. Both Single and Live
+start the vendor example's four C4Utility receive slots. The arm log
+records the device-reported `PayloadSize` when it is available.
 `ChunkPartSelector` and `ChunkScan3dCoordinateSelector` are written only on a
 received C4 buffer to read that buffer's metadata; neither writes a device
 feature. Hosts may opt into the module-owned static
@@ -113,23 +123,41 @@ Range part and compatible Intensity/Confidence parts to `GraphicsScene3D` and
 acquisition-only hosts. The C4 reader must classify parts before invoking it.
 It converts Scan3d units (`nm`, `um`, or `mm`) plus the C scale/offset to
 physical millimeter Z values before the RangeFrame reaches Range2D, analysis,
-or 3D consumers. `RectifiedC`
-provides a uniform A/B grid and can therefore derive PointCloud/Surface views;
-`CalibratedC` remains Range2D-only because its 2.5D Surface payload contains no
-X/Y axes. `ChunkFrameID` and `ChunkTimestamp` are captured when configured;
+or 3D consumers. `RectifiedC` provides a uniform physical A/B grid and derives
+PointCloud/Surface views. `CalibratedC` contains no physical X/Y axes, so its
+PointCloud/Surface views use an explicitly labelled pixel grid while retaining
+physical millimeter Z for Range2D and analysis. Matching heliViewer, the 3D
+preview uses a 1 micrometer pixel-grid pitch while leaving camera direction
+under GraphicsEngine/user control. It is not metrically calibrated 3D data;
+`RectifiedC` remains required for physical XYZ geometry.
+`ChunkFrameID` and `ChunkTimestamp` are captured when configured;
 they remain optional metadata so an existing read-only configuration without
 them can still acquire frames. `ChunkPartFixpointScaling` is preserved per part
 and applied by the GraphicsEngine adapter.
 
-The host's **Single** action arms one incoming frame, issues one
-`TriggerSoftware` command for the reference profile's `FrameStart=Software`,
-and stops after the frame is copied; **Live** arms continuous reception. They
-are host grab policies and do not write the device's GenICam `AcquisitionMode`.
-Live accepts explicit `TriggerSoftware` commands from the feature tree. With
-FrameStart configured for a physical input, the device instead supplies frames
-from that input. `RecordingStart` and `FrameStart` remain distinct H8 trigger
-selectors; `AcquisitionStart` is configured only as part of the vendor
-reference profile.
+Before GraphicsEngine conversion, every completed Single acquisition is also
+written under `<bundle>/heliotis-captures/<UTC timestamp>-frame-<sequence>/`.
+`capture.json` records frame identity, part layout, source pixel formats,
+sample scaling, and either decoded Scan3d geometry or its buffer-decode error.
+Each part stores every SDK-returned sample in the manifest-named little-endian
+`float64` or `uint16` file. Live frames are not captured, and a capture write
+failure is logged without blocking frame delivery.
+
+The host's **Single** action arms one incoming frame and stops after it is
+copied; its action becomes **Stop** while it remains armed, so a missing
+trigger can be cancelled. **Live** arms continuous reception. The host does
+not auto-trigger Single. `TriggerSoftware` remains available while armed and
+is forwarded to C4Utility without a host selector/source policy. TriggerMode
+and TriggerSource are selector-scoped: choosing a different selector reveals
+that selector's saved values and does not change the FrameStart configuration.
+They are host grab policies and do not write the device's GenICam
+`AcquisitionMode`.
+While acquisition is armed, the module does not enumerate feature metadata.
+A software trigger is a single
+in-flight request; a second request is rejected until the prior request has
+received, failed, or been stopped.
+The device determines whether an explicit `TriggerSoftware` command applies
+to its current trigger configuration.
 
 ## Control boundary
 
@@ -143,17 +171,18 @@ Keep these operation paths separate:
 - **Motion:** connection-time C4Utility `h8SurfSimple` profile plus
   user-requested stage, scan, speed, and encoder changes in the Motion tab.
 - **Acquisition:** only arm, receive, deep-copy, release, and stop buffers.
-  It consumes the already configured trigger source and does not create a
-  stage or external-trigger policy. `TriggerSoftware` is an explicit armed
-  command rather than an implicit side effect of Start or Live.
+  Single does not issue an automatic trigger. An explicit `TriggerSoftware`
+  command is queued to the acquisition worker, which executes it immediately
+  before one 10-second C4Utility `getBuffer` wait.
 
 `C++/Utility/Qt/QHeliotisC4Widget` owns the plain Qt feature-tree presentation.
 It accepts only SDK-neutral `FeatureDescriptor` values and exposes the existing
 `treeRole="DeviceFeatureTree"` contract; Resources may theme it, but this module
 must remain usable without Resources. Device and Motion tabs keep internal H8
-stage features separate from normal device configuration. The trees expose
-current writable feature editors but never own the SDK call; their host wires
-the request to the device boundary.
+stage features separate from normal device configuration. The trees preserve
+their scroll position and category expansion state across a metadata refresh.
+They expose current writable feature editors but never own the SDK call; their
+host wires the request to the device boundary.
 
 ## H8 internal motion contract
 
@@ -161,9 +190,9 @@ H8 motion is controlled through C4 feature reads, writes, and commands, not by
 an external motion-controller integration. Discovery never runs `StageInit`,
 changes position, or starts a stage-triggered scan. Connection runs the vendor
 reference profile, including its `StageInit` command and motion values; user
-motion writes and commands require an open, idle device and use the live SDK
-access check. After every successful user operation, the host refreshes the
-affected feature tree. Motion feature descriptors use the Motion section so
+motion writes and commands require an open device and use the live SDK access
+check. After every successful user operation except `TriggerSoftware`, the
+host refreshes the affected feature tree. Motion feature descriptors use the Motion section so
 `QHeliotisC4Widget` renders them only on its Motion tab.
 
 ## Runtime and deployment gate

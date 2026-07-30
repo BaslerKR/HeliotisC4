@@ -5,6 +5,7 @@
 #include <C4HdlC.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -77,6 +78,7 @@ public:
         std::string* errorMessage = nullptr);
     void stopAcquisition();
     [[nodiscard]] bool isAcquiring() const;
+    [[nodiscard]] bool isSoftwareTriggeredAcquisition() const;
     [[nodiscard]] std::string lastAcquisitionError() const;
 
     CallbackId registerStatusCallback(StatusCallback callback);
@@ -84,7 +86,11 @@ public:
 
 private:
     [[nodiscard]] bool copyFrame(C4_BUFFER buffer, Frame* frame, std::string* errorMessage) const;
-    void acquisitionLoop(C4_DEVICE device, AcquisitionMode mode, FrameCallback frameCallback);
+    void acquisitionLoop(
+        C4_DEVICE device,
+        AcquisitionMode mode,
+        bool softwareTriggered,
+        FrameCallback frameCallback);
     void finishAcquisition();
     void setAcquisitionError(std::string message);
     void dispatchStatus(Status status, bool active);
@@ -101,6 +107,11 @@ private:
     CallbackId _nextCallbackId = 1;
     std::thread _acquisitionThread;
     std::atomic<bool> _stopAcquisitionRequested{false};
+    std::mutex _triggerMutex;
+    std::condition_variable _triggerCondition;
+    std::size_t _pendingSoftwareTriggers = 0;
+    bool _softwareTriggerInFlight = false;
+    bool _softwareTriggeredAcquisition = false;
     bool _acquiring = false;
     std::string _lastAcquisitionError;
     std::uint64_t _nextFrameSequence = 1;
