@@ -1232,8 +1232,7 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
     // are optional: preserve them when the device emits them, but never reject
     // an otherwise valid Range/Reflectance frame because they are absent.
     Scan3dGeometry scan3dGeometry;
-    std::string geometryError;
-    const bool hasScan3dGeometry = readScan3dGeometry(buffer, &scan3dGeometry, &geometryError);
+    const bool hasScan3dGeometry = readScan3dGeometry(buffer, &scan3dGeometry, nullptr);
 
     Frame copied;
     std::int64_t chunkFrameId = 0;
@@ -1371,8 +1370,6 @@ bool HeliotisC4Device::copyFrame(const C4_BUFFER buffer, Frame* frame, std::stri
     }
     if (hasScan3dGeometry) {
         copied.scan3dGeometry = std::move(scan3dGeometry);
-    } else {
-        copied.scan3dGeometryError = std::move(geometryError);
     }
     *frame = std::move(copied);
     return true;

@@ -135,14 +135,6 @@ they remain optional metadata so an existing read-only configuration without
 them can still acquire frames. `ChunkPartFixpointScaling` is preserved per part
 and applied by the GraphicsEngine adapter.
 
-Before GraphicsEngine conversion, every completed Single acquisition is also
-written under `<bundle>/heliotis-captures/<UTC timestamp>-frame-<sequence>/`.
-`capture.json` records frame identity, part layout, source pixel formats,
-sample scaling, and either decoded Scan3d geometry or its buffer-decode error.
-Each part stores every SDK-returned sample in the manifest-named little-endian
-`float64` or `uint16` file. Live frames are not captured, and a capture write
-failure is logged without blocking frame delivery.
-
 The host's **Single** action arms one incoming frame and stops after it is
 copied; its action becomes **Stop** while it remains armed, so a missing
 trigger can be cancelled. **Live** arms continuous reception. The host does
