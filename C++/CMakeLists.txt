@@ -110,4 +110,22 @@ if(HELIOTISC4_BUILD_TESTS)
             COMMAND heliotis_c4_graphics_adapter_test
         )
     endif()
+
+    if(HELIOTISC4_BUILD_QT_UI AND TARGET Qt6::Widgets)
+        add_executable(heliotis_c4_widget_test
+            Tests/HeliotisC4WidgetTest.cpp
+        )
+        target_link_libraries(heliotis_c4_widget_test
+            PRIVATE
+                HeliotisC4::Core
+                Qt6::Widgets
+        )
+        add_test(
+            NAME heliotis_c4_widget
+            COMMAND heliotis_c4_widget_test
+        )
+        set_tests_properties(heliotis_c4_widget PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        )
+    endif()
 endif()

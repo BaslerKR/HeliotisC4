@@ -5,6 +5,7 @@
 #include "HeliotisC4.h"
 
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <QWidget>
 
@@ -48,10 +49,27 @@ signals:
     void featureCommandRequested(const QString& featureName);
 
 private:
+    struct TreeState {
+        bool hadItems = false;
+        QSet<QString> expandedCategories;
+        QString currentItem;
+        QString topVisibleItem;
+        int topVisibleOffset = 0;
+        int verticalScrollValue = 0;
+        int horizontalScrollValue = 0;
+    };
+
     void populateTree(
         QTreeWidget* tree,
         QHash<QString, QTreeWidgetItem*>& categories,
         const heliotis::HeliotisC4::FeatureList& features);
+    TreeState captureTreeState(
+        QTreeWidget* tree,
+        const QHash<QString, QTreeWidgetItem*>& categories) const;
+    void restoreTreeState(
+        QTreeWidget* tree,
+        const QHash<QString, QTreeWidgetItem*>& categories,
+        const TreeState& state) const;
     QTreeWidgetItem* ensureCategory(
         QTreeWidget* tree,
         QHash<QString, QTreeWidgetItem*>& categories,

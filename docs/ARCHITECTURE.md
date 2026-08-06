@@ -172,7 +172,10 @@ It accepts only SDK-neutral `FeatureDescriptor` values and exposes the existing
 `treeRole="DeviceFeatureTree"` contract; Resources may theme it, but this module
 must remain usable without Resources. Device and Motion tabs keep internal H8
 stage features separate from normal device configuration. The trees preserve
-their scroll position and category expansion state across a metadata refresh.
+their current item, scroll position, and category expansion state across a
+metadata refresh. On the first population, each top-level category is expanded
+one level so its direct children are visible while deeper category levels remain
+collapsed.
 They expose current writable feature editors but never own the SDK call; their
 host wires the request to the device boundary.
 

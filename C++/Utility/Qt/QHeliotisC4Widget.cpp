@@ -2,6 +2,7 @@
 
 #ifdef HELIOTISC4_HAS_QT_UI
 
+#include <QAbstractItemView>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QDebug>
@@ -23,6 +24,39 @@
 #include <QVBoxLayout>
 
 namespace {
+
+constexpr int featureTreeIdRole = Qt::UserRole;
+
+QString categoryItemId(const QString& categoryPath)
+{
+    return QStringLiteral("category:") + categoryPath;
+}
+
+QString featureItemId(const heliotis::FeatureDescriptor& feature)
+{
+    return QStringLiteral("feature:")
+        + QString::fromStdString(feature.categoryPath)
+        + QStringLiteral("/")
+        + QString::fromStdString(feature.displayName);
+}
+
+QString itemId(const QTreeWidgetItem* item)
+{
+    return item ? item->data(0, featureTreeIdRole).toString() : QString();
+}
+
+void collectTreeItems(
+    QTreeWidgetItem* item,
+    QHash<QString, QTreeWidgetItem*>& items)
+{
+    if (!item) return;
+
+    const QString id = itemId(item);
+    if (!id.isEmpty()) items.insert(id, item);
+    for (int index = 0; index < item->childCount(); ++index) {
+        collectTreeItems(item->child(index), items);
+    }
+}
 
 QTreeWidget* createFeatureTree(QWidget* parent, const QString& objectName)
 {
@@ -418,12 +452,7 @@ void QHeliotisC4Widget::populateTree(
     QHash<QString, QTreeWidgetItem*>& categories,
     const heliotis::HeliotisC4::FeatureList& features)
 {
-    const int verticalScrollValue = tree->verticalScrollBar()->value();
-    const int horizontalScrollValue = tree->horizontalScrollBar()->value();
-    QHash<QString, bool> expandedCategories;
-    for (auto iterator = categories.cbegin(); iterator != categories.cend(); ++iterator) {
-        expandedCategories.insert(iterator.key(), iterator.value()->isExpanded());
-    }
+    const TreeState state = captureTreeState(tree, categories);
 
     tree->clear();
     categories.clear();
@@ -434,6 +463,7 @@ void QHeliotisC4Widget::populateTree(
     for (const auto& feature : features) {
         auto* parent = ensureCategory(tree, categories, QString::fromStdString(feature.categoryPath));
         auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
+        item->setData(0, featureTreeIdRole, featureItemId(feature));
         item->setText(0, QString::fromStdString(feature.displayName));
         item->setToolTip(0, QString::fromStdString(feature.description));
         const QString featureName = QString::fromStdString(feature.displayName);
@@ -497,15 +527,69 @@ void QHeliotisC4Widget::populateTree(
         tree->setItemWidget(item, 1, lineEdit);
         if (tree == _deviceFeatureTree) _deviceFeatureEditors.push_back(lineEdit);
     }
-    if (expandedCategories.isEmpty()) {
+    restoreTreeState(tree, categories, state);
+}
+
+QHeliotisC4Widget::TreeState QHeliotisC4Widget::captureTreeState(
+    QTreeWidget* tree,
+    const QHash<QString, QTreeWidgetItem*>& categories) const
+{
+    TreeState state;
+    state.hadItems = tree->topLevelItemCount() > 0;
+    for (auto iterator = categories.cbegin(); iterator != categories.cend(); ++iterator) {
+        if (iterator.value() && iterator.value()->isExpanded()) {
+            state.expandedCategories.insert(iterator.key());
+        }
+    }
+    if (tree->currentItem()) {
+        state.currentItem = itemId(tree->currentItem());
+    }
+    state.verticalScrollValue = tree->verticalScrollBar()->value();
+    state.horizontalScrollValue = tree->horizontalScrollBar()->value();
+    if (QTreeWidgetItem* topItem = tree->itemAt(tree->viewport()->rect().topLeft())) {
+        state.topVisibleItem = itemId(topItem);
+        state.topVisibleOffset = tree->visualItemRect(topItem).top();
+    }
+    return state;
+}
+
+void QHeliotisC4Widget::restoreTreeState(
+    QTreeWidget* tree,
+    const QHash<QString, QTreeWidgetItem*>& categories,
+    const TreeState& state) const
+{
+    if (!state.hadItems) {
+        // Keep the initial tree compact: show each top-level category's direct
+        // children, while leaving deeper category levels collapsed.
         tree->expandToDepth(0);
     } else {
         for (auto iterator = categories.cbegin(); iterator != categories.cend(); ++iterator) {
-            iterator.value()->setExpanded(expandedCategories.value(iterator.key(), false));
+            if (iterator.value()) {
+                iterator.value()->setExpanded(state.expandedCategories.contains(iterator.key()));
+            }
         }
     }
-    tree->verticalScrollBar()->setValue(verticalScrollValue);
-    tree->horizontalScrollBar()->setValue(horizontalScrollValue);
+
+    QHash<QString, QTreeWidgetItem*> items;
+    for (int index = 0; index < tree->topLevelItemCount(); ++index) {
+        collectTreeItems(tree->topLevelItem(index), items);
+    }
+    if (!state.currentItem.isEmpty()) {
+        if (QTreeWidgetItem* currentItem = items.value(state.currentItem)) {
+            tree->setCurrentItem(currentItem);
+        }
+    }
+
+    if (QTreeWidgetItem* topVisibleItem = items.value(state.topVisibleItem)) {
+        tree->scrollToItem(topVisibleItem, QAbstractItemView::PositionAtTop);
+        const int offsetDelta =
+            tree->visualItemRect(topVisibleItem).top() - state.topVisibleOffset;
+        tree->verticalScrollBar()->setValue(
+            tree->verticalScrollBar()->value() + offsetDelta);
+    } else {
+        tree->verticalScrollBar()->setValue(state.verticalScrollValue);
+    }
+    tree->horizontalScrollBar()->setValue(state.horizontalScrollValue);
 }
 
 QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(
@@ -522,6 +606,7 @@ QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(
         auto* category = categories.value(currentPath);
         if (!category) {
             category = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
+            category->setData(0, featureTreeIdRole, categoryItemId(currentPath));
             category->setText(0, segment);
             category->setFlags(Qt::ItemIsEnabled);
             categories.insert(currentPath, category);
