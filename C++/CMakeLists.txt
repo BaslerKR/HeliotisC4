@@ -88,6 +88,20 @@ if(HELIOTISC4_BUILD_TESTS)
         COMMAND heliotis_c4_sdk_layout_test "${HELIOTISC4_C4UTILITY_ROOT}"
     )
 
+    if(HELIOTISC4_ENABLE_SDK)
+        add_executable(heliotis_c4_runtime_open_test
+            Tests/C4UtilityRuntimeOpenTest.cpp
+        )
+        target_link_libraries(heliotis_c4_runtime_open_test PRIVATE HeliotisC4::Core)
+        add_test(
+            NAME heliotis_c4_runtime_open
+            COMMAND ${CMAKE_COMMAND} -E env
+                "PATH=${HELIOTISC4_C4UTILITY_ROOT}/c4hdl/win64-x64/c/bin;${HELIOTISC4_C4UTILITY_ROOT}/c4hdl/win64-x64/genicam/bin;$ENV{PATH}"
+                $<TARGET_FILE:heliotis_c4_runtime_open_test>
+                "${HELIOTISC4_C4UTILITY_ROOT}"
+        )
+    endif()
+
     add_executable(heliotis_c4_frame_contract_test
         Tests/FrameContractTest.cpp
     )
@@ -120,12 +134,22 @@ if(HELIOTISC4_BUILD_TESTS)
                 HeliotisC4::Core
                 Qt6::Widgets
         )
-        add_test(
-            NAME heliotis_c4_widget
-            COMMAND heliotis_c4_widget_test
-        )
-        set_tests_properties(heliotis_c4_widget PROPERTIES
-            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        )
+        if(WIN32)
+            add_test(
+                NAME heliotis_c4_widget
+                COMMAND ${CMAKE_COMMAND} -E env
+                    "QT_QPA_PLATFORM=offscreen"
+                    "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"
+                    $<TARGET_FILE:heliotis_c4_widget_test>
+            )
+        else()
+            add_test(
+                NAME heliotis_c4_widget
+                COMMAND heliotis_c4_widget_test
+            )
+            set_tests_properties(heliotis_c4_widget PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            )
+        endif()
     endif()
 endif()

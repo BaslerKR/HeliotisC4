@@ -1,6 +1,7 @@
 #include "Internal/C4UtilitySdkRuntime.h"
 
 #include <sstream>
+#include <stdexcept>
 
 namespace heliotis::internal {
 
@@ -24,8 +25,25 @@ C4UtilitySdkLayout C4UtilitySdkRuntime::fromRoot(const std::filesystem::path& ro
     layout.c4HdlRuntime = c4HdlRoot / "c" / "bin" / "C4HdlC.dll";
     layout.genApiRuntime = c4HdlRoot / "genicam" / "bin" / "GenApi_MD_VC141_v3_2.dll";
     layout.gcBaseRuntime = c4HdlRoot / "genicam" / "bin" / "GCBase_MD_VC141_v3_2.dll";
+    layout.mathParserRuntime = c4HdlRoot / "genicam" / "bin" / "MathParser_MD_VC141_v3_2.dll";
+    layout.xmlParserRuntime = c4HdlRoot / "genicam" / "bin" / "XmlParser_MD_VC141_v3_2.dll";
+    layout.logRuntime = c4HdlRoot / "genicam" / "bin" / "Log_MD_VC141_v3_2.dll";
+    layout.log4cppRuntime = c4HdlRoot / "genicam" / "bin" / "log4cpp_MD_VC141_v3_2.dll";
+    layout.nodeMapDataRuntime = c4HdlRoot / "genicam" / "bin" / "NodeMapData_MD_VC141_v3_2.dll";
     layout.diaphusProducer = root / "diaphus" / "win64-x64" / "diaphus.cti";
     return layout;
+}
+
+std::string C4UtilitySdkRuntime::processRootEnvironmentValue(const std::filesystem::path& root)
+{
+    if (root.empty()) throw std::invalid_argument("C4Utility runtime root is empty.");
+
+    std::string value = root.lexically_normal().string();
+    if (value.empty()) throw std::invalid_argument("C4Utility runtime root is empty.");
+    if (value.back() != '/' && value.back() != '\\') {
+        value.push_back(std::filesystem::path::preferred_separator);
+    }
+    return value;
 }
 
 bool C4UtilitySdkLayout::isComplete() const
@@ -42,6 +60,11 @@ std::vector<std::filesystem::path> C4UtilitySdkLayout::missingPaths() const
         c4HdlRuntime,
         genApiRuntime,
         gcBaseRuntime,
+        mathParserRuntime,
+        xmlParserRuntime,
+        logRuntime,
+        log4cppRuntime,
+        nodeMapDataRuntime,
         diaphusProducer,
     };
 
@@ -74,6 +97,11 @@ std::vector<std::filesystem::path> C4UtilitySdkLayout::missingRuntimePaths() con
         c4HdlRuntime,
         genApiRuntime,
         gcBaseRuntime,
+        mathParserRuntime,
+        xmlParserRuntime,
+        logRuntime,
+        log4cppRuntime,
+        nodeMapDataRuntime,
         diaphusProducer,
     };
 

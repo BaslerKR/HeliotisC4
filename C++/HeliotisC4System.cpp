@@ -14,6 +14,7 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -162,6 +163,63 @@ bool check(const C4HDL_ERROR result, std::string* errorMessage)
     if (errorMessage) *errorMessage = lastSdkError();
     return false;
 }
+
+void validateC4UtilityRootEnvironment(const std::filesystem::path& expectedRoot)
+{
+    const char* configuredRoot = std::getenv("C4UTILITY_ROOT");
+    if (!configuredRoot || configuredRoot[0] == '\0') {
+        throw std::runtime_error(
+            "C4UTILITY_ROOT is not configured. The host must point it to the "
+            "C4Utility runtime root with a trailing directory separator.");
+    }
+
+    const std::string configuredValue(configuredRoot);
+    if (configuredValue.back() != '/' && configuredValue.back() != '\\') {
+        throw std::runtime_error("C4UTILITY_ROOT must end with a directory separator.");
+    }
+
+    std::error_code equivalentError;
+    const bool matchesExpectedRoot = std::filesystem::equivalent(
+        expectedRoot,
+        std::filesystem::path(configuredValue),
+        equivalentError);
+    if (!matchesExpectedRoot || equivalentError) {
+        throw std::runtime_error(
+            "C4UTILITY_ROOT does not match the requested C4Utility runtime root. Expected: "
+            + internal::C4UtilitySdkRuntime::processRootEnvironmentValue(expectedRoot)
+            + ", actual: " + configuredValue);
+    }
+}
+
+class C4HandlerGuard final {
+public:
+    explicit C4HandlerGuard(const C4_HANDLER handler)
+        : _handler(handler)
+    {
+    }
+
+    ~C4HandlerGuard()
+    {
+        if (!_handler) return;
+        try {
+            C4Hdl_close(_handler);
+        } catch (...) {
+        }
+    }
+
+    C4HandlerGuard(const C4HandlerGuard&) = delete;
+    C4HandlerGuard& operator=(const C4HandlerGuard&) = delete;
+
+    [[nodiscard]] C4_HANDLER release() noexcept
+    {
+        const C4_HANDLER handler = _handler;
+        _handler = nullptr;
+        return handler;
+    }
+
+private:
+    C4_HANDLER _handler = nullptr;
+};
 
 std::mutex& diagnosticLogMutex()
 {
@@ -496,12 +554,38 @@ HeliotisC4System::HeliotisC4System(const std::string& sdkRoot)
     if (sdkRoot.empty()) throw std::runtime_error("C4Utility SDK root is empty.");
     const auto layout = internal::C4UtilitySdkRuntime::fromRoot(sdkRoot);
     if (!layout.isRuntimeComplete()) throw std::runtime_error(layout.runtimeDiagnostic());
+    validateC4UtilityRootEnvironment(layout.root);
 
+    C4_HANDLER openedHandler = nullptr;
+    const C4HDL_ERROR openResult = C4Hdl_open(&openedHandler);
+    C4HandlerGuard handlerGuard(openedHandler);
     std::string error;
-    if (!check(C4Hdl_open(&_handler), &error)) {
+    if (!check(openResult, &error)) {
         throw std::runtime_error(error);
     }
-    logInfo("C4Utility handler opened from " + sdkRoot + ".");
+
+    std::string locationError;
+    const std::string diaphusLocation = readSdkString(
+        [openedHandler](char* buffer, std::size_t* size) {
+            return C4Hdl_getDiaphusLocation(openedHandler, buffer, size);
+        },
+        &locationError);
+    std::error_code equivalentError;
+    const bool usesRequestedProducer = locationError.empty()
+        && !diaphusLocation.empty()
+        && std::filesystem::equivalent(
+            layout.diaphusProducer,
+            std::filesystem::path(diaphusLocation),
+            equivalentError);
+    if (!usesRequestedProducer || equivalentError) {
+        throw std::runtime_error(
+            "C4Utility loaded an unexpected Diaphus producer. Expected: "
+            + layout.diaphusProducer.string() + ", actual: "
+            + (diaphusLocation.empty() ? std::string("<unavailable>") : diaphusLocation)
+            + (locationError.empty() ? std::string() : ". C4Utility: " + locationError));
+    }
+    logInfo("C4Utility handler opened with requested Diaphus producer " + diaphusLocation + ".");
+    _handler = handlerGuard.release();
 }
 
 HeliotisC4System::~HeliotisC4System()

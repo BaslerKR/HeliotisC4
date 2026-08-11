@@ -14,6 +14,11 @@ struct C4UtilitySdkLayout {
     std::filesystem::path c4HdlRuntime;
     std::filesystem::path genApiRuntime;
     std::filesystem::path gcBaseRuntime;
+    std::filesystem::path mathParserRuntime;
+    std::filesystem::path xmlParserRuntime;
+    std::filesystem::path logRuntime;
+    std::filesystem::path log4cppRuntime;
+    std::filesystem::path nodeMapDataRuntime;
     std::filesystem::path diaphusProducer;
 
     [[nodiscard]] bool isComplete() const;
@@ -27,6 +32,7 @@ struct C4UtilitySdkLayout {
 class C4UtilitySdkRuntime final {
 public:
     [[nodiscard]] static C4UtilitySdkLayout fromRoot(const std::filesystem::path& root);
+    [[nodiscard]] static std::string processRootEnvironmentValue(const std::filesystem::path& root);
 };
 
 } // namespace heliotis::internal

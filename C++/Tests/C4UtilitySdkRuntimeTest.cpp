@@ -11,5 +11,15 @@ int main(int argc, char* argv[])
 
     const auto layout = heliotis::internal::C4UtilitySdkRuntime::fromRoot(argv[1]);
     std::cout << layout.diagnostic() << '\n';
-    return layout.isComplete() ? 0 : 1;
+    if (!layout.isComplete()) return 1;
+
+    const std::string expectedRoot =
+        heliotis::internal::C4UtilitySdkRuntime::processRootEnvironmentValue(argv[1]);
+    if (expectedRoot.empty()
+        || (expectedRoot.back() != '/' && expectedRoot.back() != '\\')) {
+        std::cerr << "C4UTILITY_ROOT must retain a trailing directory separator.\n";
+        return 1;
+    }
+
+    return 0;
 }

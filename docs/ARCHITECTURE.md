@@ -195,8 +195,12 @@ host refreshes the affected feature tree. Motion feature descriptors use the Mot
 The Windows plugin runtime belongs below `plugins/heliotis-c4/runtime`,
 preserving the C4Utility-relative layout above. It stages `C4HdlC.dll`, the
 complete delayed GenICam closure (`GenApi`, `GCBase`, `MathParser`, `XmlParser`,
-`Log`, and `NodeMapData`), and `diaphus.cti`; `PluginManager` registers only
-their private DLL directories and sets the private Diaphus producer path.
+`Log`, its dynamically loaded `log4cpp` backend, and `NodeMapData`), and
+`diaphus.cti`. Before `C4Hdl_open`, the host must point the vendor-required
+`C4UTILITY_ROOT` at this runtime with a trailing directory separator. The module
+validates that process contract and the producer reported by
+`C4Hdl_getDiaphusLocation`; the host registers only the package's private DLL
+directories and supplies the package root.
 Before release, validate a clean staged copy with the SDK license/distribution
 terms confirmed, direct plugin loading, H8 discovery, and a capture/stop cycle.
 Do not add Heliotis paths to the host-wide GenTL environment without proving
