@@ -53,15 +53,19 @@ int main()
     const auto& range = *scene->rangeFrame;
     if (range.width != 2 || range.height != 2
         || range.zValues.size() != 4U || range.intensity.size() != 4U
-        || std::fabs(range.zValues.at(3) + 0.00775F) > 0.0000001F
+        || std::fabs(range.zValues.at(3) - 4.5F) > 0.0000001F
         || std::fabs(range.intensity.at(1) - 10.0F) > 0.0001F
         || range.intensityBits != 16U
-        || std::fabs(range.xScaleMm - 0.002) > 0.0000001
-        || std::fabs(range.yScaleMm - 0.003) > 0.0000001
-        || std::fabs(range.zScaleMm - 1.0) > 0.0000001
-        || std::fabs(range.xOffsetMm - 0.1) > 0.0000001
-        || std::fabs(range.yOffsetMm - 0.2) > 0.0000001
-        || std::fabs(range.zOffsetMm) > 0.0000001
+        || range.lengthUnit != GraphicsLengthUnit::Micrometer
+        || std::fabs(range.xScale - 2.0) > 0.0000001
+        || std::fabs(range.yScale - 3.0) > 0.0000001
+        || std::fabs(range.zScale - 0.5) > 0.0000001
+        || std::fabs(range.xOffset - 100.0) > 0.0000001
+        || std::fabs(range.yOffset - 200.0) > 0.0000001
+        || std::fabs(range.zOffset + 10.0) > 0.0000001
+        || std::fabs(range.worldXAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.102F) > 0.0000001F
+        || std::fabs(range.worldYAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.203F) > 0.0000001F
+        || std::fabs(range.worldZAt(3, GraphicsLengthUnit::Millimeter) + 0.00775F) > 0.0000001F
         || scene->meta.frameIndex != 7U)
     {
         std::cerr << "The GraphicsEngine scene must preserve H8 frame geometry, values, and metadata.\n";
@@ -74,15 +78,28 @@ int main()
         return 1;
     }
 
+    const PointCloudData cloud = RangeFramePointCloudBuilder::build(range);
+    if (!cloud.isValid()
+        || std::fabs(cloud.xyz.at(0) - 0.1F) > 0.0000001F
+        || std::fabs(cloud.xyz.at(1) - 0.2F) > 0.0000001F
+        || std::fabs(cloud.xyz.at(2) + 0.00925F) > 0.0000001F
+        || std::fabs(cloud.xyz.at(9) - 0.102F) > 0.0000001F
+        || std::fabs(cloud.xyz.at(10) - 0.203F) > 0.0000001F
+        || std::fabs(cloud.xyz.at(11) + 0.00775F) > 0.0000001F)
+    {
+        std::cerr << "Native micrometer geometry must convert to millimeter render coordinates.\n";
+        return 1;
+    }
+
     frame.scan3dGeometry->outputMode = "CalibratedC";
     const auto calibratedScene = adapter.convert(frame, {});
     if (!calibratedScene || !calibratedScene->rangeFrame
         || calibratedScene->rangeFrame->xyCoordinateMode != RangeFrameXYCoordinateMode::ImagePixels
-        || std::fabs(calibratedScene->rangeFrame->xScaleMm - 0.001) > 0.0000001
-        || std::fabs(calibratedScene->rangeFrame->yScaleMm - 0.001) > 0.0000001
+        || std::fabs(calibratedScene->rangeFrame->xScale - 1.0) > 0.0000001
+        || std::fabs(calibratedScene->rangeFrame->yScale - 1.0) > 0.0000001
         || !RangeFramePointCloudBuilder::canBuild(*calibratedScene->rangeFrame))
     {
-        std::cerr << "CalibratedC must use the 1 um pixel-grid preview.\n";
+        std::cerr << "CalibratedC must use the 1 µm pixel-grid preview.\n";
         return 1;
     }
 

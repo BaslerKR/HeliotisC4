@@ -121,14 +121,15 @@ feature. Hosts may opt into the module-owned static
 Range part and compatible Intensity/Confidence parts to `GraphicsScene3D` and
 `RangeFrame`. The adapter is not required for discovery, control, or
 acquisition-only hosts. The C4 reader must classify parts before invoking it.
-It converts Scan3d units (`nm`, `um`, or `mm`) plus the C scale/offset to
-physical millimeter Z values before the RangeFrame reaches Range2D, analysis,
-or 3D consumers. `RectifiedC` provides a uniform physical A/B grid and derives
-PointCloud/Surface views. `CalibratedC` contains no physical X/Y axes, so its
-PointCloud/Surface views use an explicitly labelled pixel grid while retaining
-physical millimeter Z for Range2D and analysis. Matching heliViewer, the 3D
-preview uses a 1 micrometer pixel-grid pitch while leaving camera direction
-under GraphicsEngine/user control. It is not metrically calibrated 3D data;
+It preserves the Scan3d unit (`nm`, `um`, or `mm`) together with the C
+scale/offset in the RangeFrame unit metadata; consumers choose any required
+render or presentation unit explicitly. `RectifiedC` provides a uniform
+physical A/B grid and derives PointCloud/Surface views. `CalibratedC` contains
+no physical X/Y axes, so its PointCloud/Surface views use an explicitly
+labelled pixel grid while retaining the native calibrated Z unit for Range2D
+and analysis. Matching heliViewer, the 3D preview uses a 1 micrometer
+pixel-grid pitch while leaving camera direction under the consumer's control.
+It is not metrically calibrated 3D data;
 `RectifiedC` remains required for physical XYZ geometry.
 `ChunkFrameID` and `ChunkTimestamp` are captured when configured;
 they remain optional metadata so an existing read-only configuration without

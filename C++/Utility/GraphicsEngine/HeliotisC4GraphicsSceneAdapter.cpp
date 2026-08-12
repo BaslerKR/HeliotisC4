@@ -63,13 +63,13 @@ namespace {
     return value;
 }
 
-[[nodiscard]] double distanceUnitToMillimeters(const std::string& distanceUnit) noexcept
+[[nodiscard]] std::optional<GraphicsLengthUnit> distanceUnit(const std::string& distanceUnit) noexcept
 {
     const std::string value = lowerCase(distanceUnit);
-    if (value == "nm") return 0.000001;
-    if (value == "um") return 0.001;
-    if (value == "mm") return 1.0;
-    return std::numeric_limits<double>::quiet_NaN();
+    if (value == "nm") return GraphicsLengthUnit::Nanometer;
+    if (value == "um") return GraphicsLengthUnit::Micrometer;
+    if (value == "mm") return GraphicsLengthUnit::Millimeter;
+    return std::nullopt;
 }
 
 [[nodiscard]] bool isRectifiedOutput(const std::string& outputMode) noexcept
@@ -107,28 +107,25 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
     range.zValues = toFloatSamples(*rangePart);
     range.rangeRaw = rawUint16Samples(*rangePart);
     range.rangeBits = graphicsBitDepth(*rangePart);
-    range.zScaleMm = 1.0;
-    range.zOffsetMm = 0.0;
-    range.xScaleMm = std::numeric_limits<double>::quiet_NaN();
-    range.yScaleMm = std::numeric_limits<double>::quiet_NaN();
-    range.xOffsetMm = std::numeric_limits<double>::quiet_NaN();
-    range.yOffsetMm = std::numeric_limits<double>::quiet_NaN();
+    range.zScale = 1.0;
+    range.zOffset = 0.0;
+    range.xScale = std::numeric_limits<double>::quiet_NaN();
+    range.yScale = std::numeric_limits<double>::quiet_NaN();
+    range.xOffset = std::numeric_limits<double>::quiet_NaN();
+    range.yOffset = std::numeric_limits<double>::quiet_NaN();
     if (frame.scan3dGeometry)
     {
         const Scan3dGeometry& geometry = *frame.scan3dGeometry;
-        const double unitToMillimeters = distanceUnitToMillimeters(geometry.distanceUnit);
-        if (!std::isfinite(unitToMillimeters)
+        const std::optional<GraphicsLengthUnit> unit = distanceUnit(geometry.distanceUnit);
+        if (!unit.has_value()
             || !std::isfinite(geometry.zScale)
             || !std::isfinite(geometry.zOffset))
         {
             return std::nullopt;
         }
-        const double zScaleMm = geometry.zScale * unitToMillimeters;
-        const double zOffsetMm = geometry.zOffset * unitToMillimeters;
-        for (float& value : range.zValues)
-        {
-            if (std::isfinite(value)) value = static_cast<float>(static_cast<double>(value) * zScaleMm + zOffsetMm);
-        }
+        range.lengthUnit = *unit;
+        range.zScale = geometry.zScale;
+        range.zOffset = geometry.zOffset;
         if (isRectifiedOutput(geometry.outputMode))
         {
             if (!std::isfinite(geometry.xScale) || !std::isfinite(geometry.yScale)
@@ -136,24 +133,27 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
             {
                 return std::nullopt;
             }
-            range.xScaleMm = geometry.xScale * unitToMillimeters;
-            range.yScaleMm = geometry.yScale * unitToMillimeters;
-            range.xOffsetMm = geometry.xOffset * unitToMillimeters;
-            range.yOffsetMm = geometry.yOffset * unitToMillimeters;
+            range.xScale = geometry.xScale;
+            range.yScale = geometry.yScale;
+            range.xOffset = geometry.xOffset;
+            range.yOffset = geometry.yOffset;
         }
         else
         {
             // CalibratedC intentionally has no physical X/Y information. Keep
             // its physical Z values, but expose a pixel-grid preview instead
             // of inventing a millimetre calibration.
-            // heliViewer's CalibratedC surface convention is a 1 um pixel
+            // heliViewer's CalibratedC surface convention is a 1 µm pixel
             // grid. It exposes relative relief without claiming calibrated
             // object-space X/Y coordinates.
-            constexpr double previewPixelPitchMm = 0.001;
-            range.xScaleMm = previewPixelPitchMm;
-            range.yScaleMm = previewPixelPitchMm;
-            range.xOffsetMm = 0.0;
-            range.yOffsetMm = 0.0;
+            const double previewPixelPitch = convertGraphicsLength(
+                0.001,
+                GraphicsLengthUnit::Millimeter,
+                range.lengthUnit);
+            range.xScale = previewPixelPitch;
+            range.yScale = previewPixelPitch;
+            range.xOffset = 0.0;
+            range.yOffset = 0.0;
             range.xyCoordinateMode = RangeFrameXYCoordinateMode::ImagePixels;
         }
     }

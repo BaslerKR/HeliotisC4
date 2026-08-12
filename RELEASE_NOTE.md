@@ -1,5 +1,10 @@
 # HeliotisC4 Release Note
 
+## v0.1.2
+
+- Preserve native Scan3d distance units and calibrated scale/offset metadata in the organized scene adapter.
+- Add adapter coverage for micrometer geometry and explicit unit conversion.
+
 ## v0.1.1
 
 - Validate the vendor-required trailing-separator `C4UTILITY_ROOT` before opening C4HdlC.
