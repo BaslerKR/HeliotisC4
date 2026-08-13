@@ -12,28 +12,34 @@ target_include_directories(heliotis_c4_core
 )
 
 set(HELIOTISC4_C4UTILITY_ROOT "C:/Program Files/C4Utility" CACHE PATH
-    "C4Utility installation root used by the future HeliotisC4 implementation")
+    "C4Utility installation root used by the SDK-enabled implementation")
 option(HELIOTISC4_ENABLE_SDK "Resolve C4HdlC for implementation work" OFF)
-option(HELIOTISC4_BUILD_QT_UI "Build the optional Qt HeliotisC4 feature-tree widget" ON)
+option(HELIOTISC4_BUILD_QT_UI "Build the optional Qt HeliotisC4 feature-tree widget" OFF)
 option(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER
     "Build the optional HeliotisC4-to-GraphicsEngine adapter target." OFF)
 option(HELIOTISC4_BUILD_TESTS "Build the standalone HeliotisC4 module tests" OFF)
 
 if(HELIOTISC4_BUILD_QT_UI)
-    find_package(Qt6 QUIET COMPONENTS Widgets)
-    if(Qt6_FOUND)
-        set_target_properties(heliotis_c4_core PROPERTIES AUTOMOC ON)
-        target_sources(heliotis_c4_core PRIVATE
-            Utility/Qt/QHeliotisC4Widget.cpp
-            Utility/Qt/QHeliotisC4Widget.h
-        )
-        target_link_libraries(heliotis_c4_core PUBLIC Qt6::Widgets)
-        target_compile_definitions(heliotis_c4_core PUBLIC HELIOTISC4_HAS_QT_UI)
-    endif()
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+
+    add_library(HeliotisC4QtWidget STATIC
+        Utility/Qt/QHeliotisC4Widget.cpp
+        Utility/Qt/QHeliotisC4Widget.h
+    )
+    add_library(HeliotisC4::QtWidget ALIAS HeliotisC4QtWidget)
+    set_target_properties(HeliotisC4QtWidget PROPERTIES AUTOMOC ON)
+    target_compile_features(HeliotisC4QtWidget PUBLIC cxx_std_17)
+    target_compile_definitions(HeliotisC4QtWidget PUBLIC HELIOTISC4_HAS_QT_UI)
+    target_link_libraries(HeliotisC4QtWidget
+        PUBLIC
+            HeliotisC4::Core
+            Qt6::Widgets
+    )
+    message(STATUS "[HeliotisC4] HeliotisC4::QtWidget enabled.")
 endif()
 
-# This skeleton deliberately does not link or distribute the proprietary SDK.
-# Enable discovery only when an implementation target consumes C4HdlC.
+# The module does not distribute the proprietary SDK. Enable SDK discovery only
+# when the consumer provides a compatible C4Utility installation.
 if(HELIOTISC4_ENABLE_SDK)
     if(NOT WIN32)
         message(FATAL_ERROR "[HeliotisC4] C4Utility SDK discovery is currently supported only on Windows.")
@@ -53,10 +59,10 @@ if(HELIOTISC4_ENABLE_SDK)
 endif()
 
 if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
-    if(NOT TARGET GraphicsEngine::GraphicsEngine)
+    if(NOT TARGET GraphicsEngine::Contracts)
         message(FATAL_ERROR
             "[HeliotisC4] HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER=ON requires "
-            "GraphicsEngine::GraphicsEngine. Add GraphicsEngine first or disable the adapter."
+            "GraphicsEngine::Contracts. Add GraphicsEngine first or disable the adapter."
         )
     endif()
 
@@ -73,7 +79,7 @@ if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
     target_link_libraries(HeliotisC4GraphicsEngineAdapter
         PUBLIC
             HeliotisC4::Core
-            GraphicsEngine::GraphicsEngine
+            GraphicsEngine::Contracts
     )
     message(STATUS "[HeliotisC4] HeliotisC4::GraphicsEngineAdapter enabled.")
 endif()
@@ -125,14 +131,13 @@ if(HELIOTISC4_BUILD_TESTS)
         )
     endif()
 
-    if(HELIOTISC4_BUILD_QT_UI AND TARGET Qt6::Widgets)
+    if(HELIOTISC4_BUILD_QT_UI)
         add_executable(heliotis_c4_widget_test
             Tests/HeliotisC4WidgetTest.cpp
         )
         target_link_libraries(heliotis_c4_widget_test
             PRIVATE
-                HeliotisC4::Core
-                Qt6::Widgets
+                HeliotisC4::QtWidget
         )
         if(WIN32)
             add_test(
