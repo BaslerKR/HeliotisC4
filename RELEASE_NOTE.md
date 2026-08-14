@@ -2,10 +2,11 @@
 
 ## Unreleased
 
+- Correct the acquisition buffer timeout unit and poll the SDK in bounded slices so stop and close can interrupt a pending buffer wait without changing trigger or motion behavior.
 - Split the opt-in `HeliotisC4::QtWidget` static target from `HeliotisC4::Core`; Qt integration is now disabled by default and fails configuration explicitly when requested without Qt 6.
 - Updated the optional scene adapter to consume a neutral scene-contract target without inheriting the visualization runtime; frame conversion output is unchanged.
 - Replace non-standalone documentation with module-local lifecycle, safety, runtime, and performance contracts.
-- Clarify that opening a device does not move the stage and that the H8 example profile is an explicit motion-producing operation.
+- Clarify that opening a device does not initialize or move the stage; profile and motion initialization remain separate consumer-owned operations with explicit safety preconditions.
 
 ## v0.1.2
 

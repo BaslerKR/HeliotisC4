@@ -35,7 +35,7 @@ The SDK-enabled implementation is currently Windows x64 only because that is the
 
 ## Safety and Ownership
 
-`HeliotisC4Device::open()` opens the selected device but does not move the stage. `configureH8SurfaceExample()` writes output, chunk, encoder, scan, motion, processing, and illumination values, preserves the existing trigger configuration, and executes stage initialization; call it only as an explicit operator-approved action after confirming safe motion clearance.
+`HeliotisC4Device::open()` opens the selected device but does not initialize or move the stage. `configureH8SurfaceExample()` is a separate motion-producing reference-profile operation: it writes output, chunk, encoder, scan, motion, processing, and illumination values, preserves the existing trigger configuration, and executes stage initialization. `initializeMotion()` is a separate motion-readiness operation. The consumer owns whether and when either operation is invoked and must confirm that the device is connected, known-safe, and has sufficient physical clearance; neither operation is an implicit side effect of discovery, `open()`, or acquisition.
 
 Every `heliotis::Frame` is copied before the C4 buffer is released. Consumers may retain it independently of the SDK lifetime. Feature writes and commands recheck live type and access information.
 

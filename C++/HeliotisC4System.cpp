@@ -1465,7 +1465,11 @@ void HeliotisC4Device::acquisitionLoop(
     const bool softwareTriggered,
     FrameCallback frameCallback)
 {
+    // C4Dev_getBuffer takes milliseconds.  Keep the logical acquisition wait
+    // at ten seconds, but poll in short slices so stopAcquisition() can acquire
+    // _sdkMutex between SDK calls instead of waiting for the full timeout.
     constexpr auto bufferTimeout = std::chrono::seconds(10);
+    constexpr auto bufferPollTimeout = std::chrono::milliseconds(100);
     std::size_t timeoutCount = 0;
     std::size_t receivedFrameCount = 0;
     logInfo(std::string("Acquisition worker started: mode=")
@@ -1495,40 +1499,65 @@ void HeliotisC4Device::acquisitionLoop(
         std::string error;
         C4HDL_ERROR result = C4HDL_ERR_ERROR;
         std::chrono::milliseconds bufferWait{};
-        {
-            std::lock_guard<std::mutex> lock(_sdkMutex);
-            const auto waitStarted = std::chrono::steady_clock::now();
-            if (executeSoftwareTrigger) {
-                result = C4Dev_executeCommand(device, "TriggerSoftware");
-                if (result != C4HDL_ERR_SUCCESS) {
-                    error = operationError("C4Dev_executeCommand(TriggerSoftware)", result);
+        auto logicalWaitStarted = std::chrono::steady_clock::now();
+        bool triggerIssued = !executeSoftwareTrigger;
+        while (!_stopAcquisitionRequested.load()) {
+            const auto pollStarted = std::chrono::steady_clock::now();
+            error.clear();
+            result = C4HDL_ERR_SUCCESS;
+            {
+                std::lock_guard<std::mutex> lock(_sdkMutex);
+                if (!triggerIssued) {
+                    result = C4Dev_executeCommand(device, "TriggerSoftware");
+                    triggerIssued = true;
+                    if (result != C4HDL_ERR_SUCCESS) {
+                        error = operationError("C4Dev_executeCommand(TriggerSoftware)", result);
+                    }
+                }
+                if (result == C4HDL_ERR_SUCCESS) {
+                    result = C4Dev_getBuffer(device, &buffer, bufferPollTimeout.count());
+                    if (result != C4HDL_ERR_SUCCESS) {
+                        error = operationError("C4Dev_getBuffer", result);
+                    }
+                }
+                if (result == C4HDL_ERR_SUCCESS) {
+                    bool copied = false;
+                    try {
+                        copied = copyFrame(buffer, &frame, &error);
+                    } catch (const std::exception& exception) {
+                        error = exception.what();
+                    } catch (...) {
+                        error = "An unknown exception occurred while copying a C4Utility buffer.";
+                    }
+                    const C4HDL_ERROR releaseResult = C4Buf_release(buffer);
+                    buffer = nullptr;
+                    if (!copied && error.empty()) error = "C4Utility could not copy an acquisition buffer.";
+                    if (releaseResult != C4HDL_ERR_SUCCESS && error.empty()) error = lastSdkError();
+                    if (!error.empty()) result = C4HDL_ERR_ERROR;
+                } else if (error.empty()) {
+                    error = operationError("C4Utility acquisition", result);
                 }
             }
-            if (result == C4HDL_ERR_SUCCESS || !executeSoftwareTrigger) {
-                result = C4Dev_getBuffer(device, &buffer, bufferTimeout.count());
-                if (result != C4HDL_ERR_SUCCESS) {
-                    error = operationError("C4Dev_getBuffer", result);
-                }
-            }
+
             bufferWait = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - waitStarted);
-            if (result == C4HDL_ERR_SUCCESS) {
-                bool copied = false;
-                try {
-                    copied = copyFrame(buffer, &frame, &error);
-                } catch (const std::exception& exception) {
-                    error = exception.what();
-                } catch (...) {
-                    error = "An unknown exception occurred while copying a C4Utility buffer.";
+                std::chrono::steady_clock::now() - logicalWaitStarted);
+            if (result == C4HDL_ERR_SUCCESS) break;
+            if (_stopAcquisitionRequested.load()) break;
+
+            const auto pollWait = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - pollStarted);
+            if (isLikelyTimeoutError(error, pollWait, bufferPollTimeout)) {
+                if (bufferWait >= bufferTimeout) {
+                    ++timeoutCount;
+                    if (timeoutCount == 1 || timeoutCount % 20 == 0) {
+                        logInfo("Acquisition is armed but waiting for a frame/trigger (timeouts="
+                            + std::to_string(timeoutCount) + ").");
+                    }
+                    logicalWaitStarted = std::chrono::steady_clock::now();
                 }
-                const C4HDL_ERROR releaseResult = C4Buf_release(buffer);
-                buffer = nullptr;
-                if (!copied && error.empty()) error = "C4Utility could not copy an acquisition buffer.";
-                if (releaseResult != C4HDL_ERR_SUCCESS && error.empty()) error = lastSdkError();
-                if (!error.empty()) result = C4HDL_ERR_ERROR;
-            } else {
-                if (error.empty()) error = operationError("C4Utility acquisition", result);
+                continue;
             }
+            break;
         }
 
         if (executeSoftwareTrigger) {
@@ -1538,14 +1567,6 @@ void HeliotisC4Device::acquisitionLoop(
 
         if (result != C4HDL_ERR_SUCCESS) {
             if (_stopAcquisitionRequested.load()) break;
-            if (isLikelyTimeoutError(error, bufferWait, bufferTimeout)) {
-                ++timeoutCount;
-                if (timeoutCount == 1 || timeoutCount % 20 == 0) {
-                    logInfo("Acquisition is armed but waiting for a frame/trigger (timeouts="
-                        + std::to_string(timeoutCount) + ").");
-                }
-                continue;
-            }
             logWarning("Acquisition buffer wait failed: "
                 + (error.empty() ? std::string("C4Utility acquisition failed.") : error));
             setAcquisitionError(error.empty() ? "C4Utility acquisition failed." : error);

@@ -37,7 +37,7 @@ Opening a device does not initialize or move the stage. Motion-producing setup i
 - `initializeMotion()` executes the dedicated motion initialization path.
 - Both operations require a connected, known-safe device and sufficient physical clearance.
 
-A consumer must not invoke either operation automatically as part of connection. Discovery and acquisition never initialize motion.
+A consumer must not treat either operation as an implicit side effect of connection. If a consumer workflow invokes one after connection, that call policy must be explicit and must enforce the connected, known-safe, and clearance preconditions. Discovery and acquisition never initialize motion.
 
 The feature snapshot retains unavailable entries so a UI can explain them. Typed writes and commands recheck the live SDK type and access mode. Motion features remain classified under `FeatureSection::Motion`; normal configuration remains under `FeatureSection::Device`. A Qt consumer executes SDK work away from its event thread.
 
