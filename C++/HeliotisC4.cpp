@@ -1,4 +1,4 @@
 #include "HeliotisC4.h"
 
-// Device lifecycle and C4HdlC calls are intentionally deferred to the next
-// implementation milestone. This translation unit establishes the core target.
+// SDK-neutral payload contracts remain header-defined. Device lifecycle and
+// C4HdlC ownership are implemented by HeliotisC4System.cpp.

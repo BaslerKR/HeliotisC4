@@ -1,5 +1,7 @@
 add_library(heliotis_c4_core STATIC
     HeliotisC4.cpp
+    Internal/HeliotisAcquisitionPolicy.cpp
+    Internal/HeliotisAcquisitionPolicy.h
     Internal/C4UtilitySdkRuntime.cpp
     Internal/C4UtilitySdkRuntime.h
 )
@@ -115,6 +117,15 @@ if(HELIOTISC4_BUILD_TESTS)
     add_test(
         NAME heliotis_c4_frame_contract
         COMMAND heliotis_c4_frame_contract_test
+    )
+
+    add_executable(heliotis_c4_acquisition_policy_test
+        Tests/HeliotisAcquisitionPolicyTest.cpp
+    )
+    target_link_libraries(heliotis_c4_acquisition_policy_test PRIVATE HeliotisC4::Core)
+    add_test(
+        NAME heliotis_c4_acquisition_policy
+        COMMAND heliotis_c4_acquisition_policy_test
     )
 
     if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)

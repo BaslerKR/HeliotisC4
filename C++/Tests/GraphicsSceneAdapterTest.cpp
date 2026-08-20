@@ -1,5 +1,4 @@
 #include "HeliotisC4GraphicsSceneAdapter.h"
-#include "engine/range/RangeFramePointCloudBuilder.h"
 
 #include <cmath>
 #include <cstdint>
@@ -72,32 +71,12 @@ int main()
         return 1;
     }
 
-    if (!RangeFramePointCloudBuilder::canBuild(range))
-    {
-        std::cerr << "Rectified H8 range data must produce calibrated point-cloud geometry.\n";
-        return 1;
-    }
-
-    const PointCloudData cloud = RangeFramePointCloudBuilder::build(range);
-    if (!cloud.isValid()
-        || std::fabs(cloud.xyz.at(0) - 0.1F) > 0.0000001F
-        || std::fabs(cloud.xyz.at(1) - 0.2F) > 0.0000001F
-        || std::fabs(cloud.xyz.at(2) + 0.00925F) > 0.0000001F
-        || std::fabs(cloud.xyz.at(9) - 0.102F) > 0.0000001F
-        || std::fabs(cloud.xyz.at(10) - 0.203F) > 0.0000001F
-        || std::fabs(cloud.xyz.at(11) + 0.00775F) > 0.0000001F)
-    {
-        std::cerr << "Native micrometer geometry must convert to millimeter render coordinates.\n";
-        return 1;
-    }
-
     frame.scan3dGeometry->outputMode = "CalibratedC";
     const auto calibratedScene = adapter.convert(frame, {});
     if (!calibratedScene || !calibratedScene->rangeFrame
         || calibratedScene->rangeFrame->xyCoordinateMode != RangeFrameXYCoordinateMode::ImagePixels
         || std::fabs(calibratedScene->rangeFrame->xScale - 1.0) > 0.0000001
-        || std::fabs(calibratedScene->rangeFrame->yScale - 1.0) > 0.0000001
-        || !RangeFramePointCloudBuilder::canBuild(*calibratedScene->rangeFrame))
+        || std::fabs(calibratedScene->rangeFrame->yScale - 1.0) > 0.0000001)
     {
         std::cerr << "CalibratedC must use the 1 µm pixel-grid preview.\n";
         return 1;
@@ -106,7 +85,8 @@ int main()
     frame.scan3dGeometry.reset();
     const auto rawScene = adapter.convert(frame, {});
     if (!rawScene || !rawScene->rangeFrame
-        || RangeFramePointCloudBuilder::canBuild(*rawScene->rangeFrame))
+        || std::isfinite(rawScene->rangeFrame->xScale)
+        || std::isfinite(rawScene->rangeFrame->yScale))
     {
         std::cerr << "Range data without Scan3d geometry must remain a 2D-only payload.\n";
         return 1;

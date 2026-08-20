@@ -26,6 +26,7 @@
 namespace {
 
 constexpr int featureTreeIdRole = Qt::UserRole;
+constexpr auto featureWritableProperty = "heliotisFeatureWritable";
 
 QString categoryItemId(const QString& categoryPath)
 {
@@ -103,12 +104,20 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     _connectButton->setIcon(connectIcon);
     _connectButton->setEnabled(false);
 
+    _initializeButton = new QToolButton(this);
+    _initializeButton->setObjectName(QStringLiteral("HeliotisC4InitializeButton"));
+    _initializeButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-setup-48.png")));
+    _initializeButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    _initializeButton->setIconSize(QSize(16, 16));
+    _initializeButton->setToolTip(tr("Initialize H8 stage motion without changing the capture profile"));
+    _initializeButton->setEnabled(false);
+
     _grabOneButton = new QToolButton(this);
     _grabOneButton->setObjectName(QStringLiteral("HeliotisC4GrabOneButton"));
     _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
     _grabOneButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     _grabOneButton->setIconSize(QSize(16, 16));
-    _grabOneButton->setToolTip(tr("Acquire one Heliotis frame"));
+    _grabOneButton->setToolTip(tr("Arm acquisition for one Heliotis frame"));
     _grabOneButton->setEnabled(false);
 
     _grabLiveButton = new QToolButton(this);
@@ -131,6 +140,7 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     auto* toolLayout = new QHBoxLayout;
     toolLayout->setObjectName(QStringLiteral("DeviceToolLayout"));
     toolLayout->addWidget(_connectButton);
+    toolLayout->addWidget(_initializeButton);
     toolLayout->addWidget(_grabOneButton);
     toolLayout->addWidget(_grabLiveButton);
 
@@ -202,6 +212,11 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
         }
         emit grabOneRequested();
     });
+    connect(_initializeButton, &QToolButton::clicked, this, [this] {
+        if (_connected && !_acquisitionActive && !_initializationPending && !_featureOperationPending) {
+            emit initializationRequested();
+        }
+    });
     connect(_grabLiveButton, &QToolButton::toggled, this, &QHeliotisC4Widget::liveGrabToggled);
     setConnectionState(false);
 }
@@ -223,9 +238,10 @@ void QHeliotisC4Widget::setDiscoveredDevices(const std::vector<heliotis::DeviceD
             interfaceName.isEmpty() ? name : QStringLiteral("%1 — %2").arg(name, interfaceName),
             index);
     }
-    _deviceSelector->setEnabled(!_devices.empty());
-    _connectButton->setEnabled(!_devices.empty() && !_connectButton->isChecked() && !_connectionPending);
-    _refreshButton->setEnabled(true);
+    _deviceSelector->setEnabled(!_connected && !_discoveryPending && !_devices.empty());
+    _connectButton->setEnabled(!_connected && !_discoveryPending && !_devices.empty()
+        && !_connectButton->isChecked() && !_connectionPending);
+    _refreshButton->setEnabled(!_connected && !_discoveryPending);
     if (!_connectButton->isChecked()) {
         setIdleState(_devices.empty()
         ? tr("No Heliotis devices discovered.")
@@ -233,9 +249,33 @@ void QHeliotisC4Widget::setDiscoveredDevices(const std::vector<heliotis::DeviceD
     }
 }
 
+void QHeliotisC4Widget::setDiscoveryPending(const bool pending)
+{
+    _discoveryPending = pending;
+    if (pending) {
+        _deviceSelector->setEnabled(false);
+        _connectButton->setEnabled(false);
+        _refreshButton->setEnabled(false);
+        _connectionStatus->setText(tr("Searching"));
+        _connectionStatus->setProperty("status", QStringLiteral("idle"));
+        _connectionStatus->style()->unpolish(_connectionStatus);
+        _connectionStatus->style()->polish(_connectionStatus);
+        _messageLabel->setText(tr("Searching for Heliotis devices..."));
+        _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+        _messageLabel->style()->unpolish(_messageLabel);
+        _messageLabel->style()->polish(_messageLabel);
+        return;
+    }
+
+    _deviceSelector->setEnabled(!_connected && !_devices.empty());
+    _connectButton->setEnabled(!_connected && !_devices.empty()
+        && !_connectButton->isChecked() && !_connectionPending);
+    _refreshButton->setEnabled(!_connected);
+}
+
 void QHeliotisC4Widget::setDiscoveryError(const QString& message)
 {
-    _refreshButton->setEnabled(true);
+    setDiscoveryPending(false);
     setIdleState(message);
     _messageLabel->setProperty("messageState", QStringLiteral("error"));
     _messageLabel->style()->unpolish(_messageLabel);
@@ -244,7 +284,16 @@ void QHeliotisC4Widget::setDiscoveryError(const QString& message)
 
 void QHeliotisC4Widget::setConnectionState(const bool connected)
 {
+    _connected = connected;
     _connectionPending = false;
+    _disconnectionPending = false;
+    _acquisitionArmPending = false;
+    _acquisitionStopPending = false;
+    _softwareTriggerPending = false;
+    if (!connected) {
+        _initializationPending = false;
+        _tabs->setEnabled(true);
+    }
     const QString previousStatus = _connectionStatus->property("status").toString();
     const bool wasConnected = previousStatus == QStringLiteral("connected")
         || previousStatus == QStringLiteral("grabbing");
@@ -262,6 +311,9 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
         _connectButton->setEnabled(!_devices.empty());
         _deviceSelector->setEnabled(!_devices.empty());
         _refreshButton->setEnabled(true);
+        _initializeButton->setEnabled(false);
+        _deviceFeatureTree->setEnabled(false);
+        _motionFeatureTree->setEnabled(false);
         setAcquisitionAvailable(false);
         return;
     }
@@ -273,11 +325,80 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
     _connectButton->setEnabled(connected || !_devices.empty());
     _deviceSelector->setEnabled(!connected && !_devices.empty());
     _refreshButton->setEnabled(!connected);
-    setAcquisitionAvailable(connected && _acquisitionAvailable);
+    _initializeButton->setEnabled(connected && !_initializationPending
+        && !_acquisitionActive && !_featureOperationPending && !_featureRefreshPending
+        && !_acquisitionArmPending);
+    _deviceFeatureTree->setEnabled(connected && !_featureOperationPending
+        && !_featureRefreshPending && !_acquisitionArmPending);
+    _motionFeatureTree->setEnabled(connected && !_acquisitionActive
+        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
+    if (!connected) setAcquisitionAvailable(false);
     _messageLabel->setText(connected
         ? tr("Heliotis device connected.")
         : tr("Heliotis device disconnected."));
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setDisconnectionPending()
+{
+    _disconnectionPending = true;
+    _connectButton->setEnabled(false);
+    _initializeButton->setEnabled(false);
+    _grabOneButton->setEnabled(false);
+    _grabLiveButton->setEnabled(false);
+    _tabs->setEnabled(false);
+    _connectionStatus->setText(tr("Stopping"));
+    _connectionStatus->setProperty("status", QStringLiteral("idle"));
+    _connectionStatus->style()->unpolish(_connectionStatus);
+    _connectionStatus->style()->polish(_connectionStatus);
+    _messageLabel->setText(tr("Stopping acquisition before disconnecting the Heliotis device..."));
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setInitializationPending(const bool pending)
+{
+    _initializationPending = pending;
+    if (pending) {
+        _tabs->setEnabled(false);
+        _connectButton->setEnabled(false);
+        _initializeButton->setEnabled(false);
+        setAcquisitionAvailable(_acquisitionAvailable);
+        _messageLabel->setText(tr("H8 Stage Init is in progress; the stage may move..."));
+        _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+        _messageLabel->style()->unpolish(_messageLabel);
+        _messageLabel->style()->polish(_messageLabel);
+        return;
+    }
+
+    _tabs->setEnabled(!_acquisitionArmPending && !_featureRefreshPending
+        && !_featureOperationPending);
+    _connectButton->setEnabled(!_acquisitionArmPending
+        && (_connectButton->isChecked() || !_devices.empty()));
+    _initializeButton->setEnabled(_connected && !_acquisitionActive
+        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
+    setAcquisitionAvailable(_acquisitionAvailable);
+    _messageLabel->setText(tr("Heliotis Stage Init request completed; capture settings were not changed."));
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setInitializationError(const QString& message)
+{
+    _initializationPending = false;
+    _tabs->setEnabled(!_acquisitionArmPending && !_featureRefreshPending
+        && !_featureOperationPending);
+    _connectButton->setEnabled(!_acquisitionArmPending
+        && (_connectButton->isChecked() || !_devices.empty()));
+    _initializeButton->setEnabled(_connected && !_acquisitionActive
+        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
+    setAcquisitionAvailable(_acquisitionAvailable);
+    _messageLabel->setText(message);
+    _messageLabel->setProperty("messageState", QStringLiteral("error"));
     _messageLabel->style()->unpolish(_messageLabel);
     _messageLabel->style()->polish(_messageLabel);
 }
@@ -292,10 +413,11 @@ void QHeliotisC4Widget::setConnectionPending(const bool pending)
     _connectionStatus->style()->unpolish(_connectionStatus);
     _connectionStatus->style()->polish(_connectionStatus);
     _connectButton->setEnabled(false);
+    _initializeButton->setEnabled(false);
     _deviceSelector->setEnabled(false);
     _refreshButton->setEnabled(false);
     setAcquisitionAvailable(false);
-    _messageLabel->setText(tr("Connecting and initializing the selected Heliotis device..."));
+    _messageLabel->setText(tr("Connecting to the selected Heliotis device..."));
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
     _messageLabel->style()->unpolish(_messageLabel);
     _messageLabel->style()->polish(_messageLabel);
@@ -315,7 +437,9 @@ void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
     _acquisitionAvailable = available;
     if (!available) _acquisitionActive = false;
     const QString status = _connectionStatus->property("status").toString();
-    const bool enabled = (status == QStringLiteral("connected") || status == QStringLiteral("grabbing")) && available;
+    const bool enabled = (status == QStringLiteral("connected") || status == QStringLiteral("grabbing"))
+        && available && !_initializationPending && !_featureRefreshPending
+        && !_featureOperationPending && !_acquisitionArmPending && !_acquisitionStopPending;
     _grabOneButton->setEnabled(enabled && !_grabLiveButton->isChecked());
     _grabLiveButton->setEnabled(enabled);
     if (!enabled) {
@@ -325,49 +449,161 @@ void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
     setSoftwareTriggerAvailable(_acquisitionActive && enabled && _softwareTriggerAvailable);
 }
 
+void QHeliotisC4Widget::setAcquisitionArmPending(const bool pending, const bool continuous)
+{
+    _acquisitionArmPending = pending;
+    if (pending) {
+        _continuousAcquisition = continuous;
+        _connectButton->setEnabled(false);
+        _initializeButton->setEnabled(false);
+        _grabOneButton->setEnabled(false);
+        _grabLiveButton->setEnabled(false);
+        _tabs->setEnabled(false);
+        _deviceFeatureTree->setEnabled(false);
+        _motionFeatureTree->setEnabled(false);
+        for (auto* editor : _deviceFeatureEditors) {
+            if (editor) editor->setEnabled(false);
+        }
+        setSoftwareTriggerAvailable(false);
+        _connectionStatus->setText(tr("Arming"));
+        _connectionStatus->setProperty("status", QStringLiteral("idle"));
+        _connectionStatus->style()->unpolish(_connectionStatus);
+        _connectionStatus->style()->polish(_connectionStatus);
+        _messageLabel->setText(continuous
+            ? tr("Arming continuous Heliotis acquisition...")
+            : tr("Arming one Heliotis frame..."));
+        _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+        _messageLabel->style()->unpolish(_messageLabel);
+        _messageLabel->style()->polish(_messageLabel);
+        return;
+    }
+
+    if (_acquisitionActive) {
+        setAcquisitionState(true, _continuousAcquisition, _softwareTriggerAvailable);
+        return;
+    }
+    {
+        const QSignalBlocker blocker(_grabLiveButton);
+        _grabLiveButton->setChecked(false);
+    }
+    _continuousAcquisition = false;
+    _tabs->setEnabled(!_initializationPending && !_featureRefreshPending
+        && !_featureOperationPending);
+    _connectButton->setEnabled(_connected || !_devices.empty());
+    _initializeButton->setEnabled(_connected && !_initializationPending
+        && !_featureRefreshPending && !_featureOperationPending);
+    _deviceFeatureTree->setEnabled(_connected && !_featureRefreshPending
+        && !_featureOperationPending);
+    _motionFeatureTree->setEnabled(_connected && !_featureRefreshPending
+        && !_featureOperationPending);
+    for (auto* editor : _deviceFeatureEditors) {
+        if (editor) {
+            editor->setEnabled(editor->property(featureWritableProperty).toBool()
+                && !_featureRefreshPending && !_featureOperationPending);
+        }
+    }
+    if (_connected) {
+        _connectionStatus->setText(tr("Connected"));
+        _connectionStatus->setProperty("status", QStringLiteral("connected"));
+        _connectionStatus->style()->unpolish(_connectionStatus);
+        _connectionStatus->style()->polish(_connectionStatus);
+    }
+    setAcquisitionAvailable(_acquisitionAvailable);
+}
+
+void QHeliotisC4Widget::setAcquisitionStopPending()
+{
+    if (!_acquisitionActive || _disconnectionPending) return;
+    _acquisitionStopPending = true;
+    _softwareTriggerPending = false;
+    _connectButton->setEnabled(false);
+    _initializeButton->setEnabled(false);
+    _grabOneButton->setEnabled(false);
+    _grabLiveButton->setEnabled(false);
+    _tabs->setEnabled(false);
+    _deviceFeatureTree->setEnabled(false);
+    _motionFeatureTree->setEnabled(false);
+    setSoftwareTriggerAvailable(false);
+    _connectionStatus->setText(tr("Stopping"));
+    _connectionStatus->setProperty("status", QStringLiteral("idle"));
+    _connectionStatus->style()->unpolish(_connectionStatus);
+    _connectionStatus->style()->polish(_connectionStatus);
+    _messageLabel->setText(tr("Stopping Heliotis acquisition..."));
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::setSoftwareTriggerPending(const bool pending)
+{
+    const bool nextPending = pending && _acquisitionActive && _softwareTriggerAvailable;
+    if (!nextPending && !_softwareTriggerPending) return;
+    _softwareTriggerPending = nextPending;
+    setSoftwareTriggerAvailable(_softwareTriggerAvailable);
+    qInfo().noquote() << "[Heliotis C4] Software trigger in-flight UI state:"
+                      << (_softwareTriggerPending ? "waiting-for-frame" : "idle");
+    if (!_featureOperationPending) updateAcquisitionMessage();
+}
+
 void QHeliotisC4Widget::setAcquisitionState(
     const bool acquiring,
     const bool continuous,
     const bool softwareTriggerAvailable)
 {
-    if (!_acquisitionAvailable) return;
+    // A late worker status/error must not re-enable controls while asynchronous
+    // teardown owns the device handles.
+    if (_disconnectionPending) return;
+    if (acquiring && (!_acquisitionAvailable || _initializationPending)) return;
 
+    _acquisitionStopPending = false;
+    if (!acquiring || !_acquisitionActive) _softwareTriggerPending = false;
     _acquisitionActive = acquiring;
+    _continuousAcquisition = acquiring && continuous;
     _softwareTriggerAvailable = acquiring && softwareTriggerAvailable;
     // Keep the feature tree available so an armed TriggerSoftware command can
     // be delivered to the SDK. All other editors remain locked below.
-    _featureAccessCurrent = acquiring;
-    _deviceFeatureTree->setEnabled(acquiring);
-    _motionFeatureTree->setEnabled(false);
+    _featureAccessCurrent = !acquiring;
+    _tabs->setEnabled(_connected && !_initializationPending && !_featureOperationPending
+        && !_featureRefreshPending && !_acquisitionArmPending && !_acquisitionStopPending);
+    _connectButton->setEnabled(!_initializationPending && !_featureOperationPending
+        && !_featureRefreshPending && !_acquisitionArmPending && !_acquisitionStopPending
+        && (_connected || !_devices.empty()));
+    _deviceFeatureTree->setEnabled(_connected && !_featureOperationPending
+        && !_featureRefreshPending && !_acquisitionArmPending);
+    _motionFeatureTree->setEnabled(_connected && !acquiring
+        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
     for (auto* editor : _deviceFeatureEditors) {
-        if (editor) editor->setEnabled(false);
+        if (editor) {
+            editor->setEnabled(editor->property(featureWritableProperty).toBool()
+                && !acquiring && !_featureOperationPending && !_featureRefreshPending
+                && !_acquisitionArmPending);
+        }
     }
+    _initializeButton->setEnabled(_connected && !acquiring
+        && !_initializationPending && !_featureOperationPending && !_featureRefreshPending
+        && !_acquisitionArmPending);
 
     {
         const QSignalBlocker blocker(_grabLiveButton);
         _grabLiveButton->setChecked(acquiring && continuous);
     }
-    _grabOneButton->setEnabled(true);
+    const bool acquisitionControlsEnabled = _connected && _acquisitionAvailable
+        && !_initializationPending && !_featureOperationPending && !_featureRefreshPending
+        && !_acquisitionArmPending && !_acquisitionStopPending;
+    _grabOneButton->setEnabled(acquisitionControlsEnabled && (!acquiring || !continuous));
     _grabOneButton->setIcon(acquiring && !continuous
         ? QIcon(QStringLiteral(":/Resources/Icons/icons8-stop-48.png"))
         : QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
     _grabOneButton->setToolTip(acquiring && !continuous
         ? tr("Stop the armed single Heliotis acquisition")
-        : tr("Acquire one Heliotis frame"));
-    _grabLiveButton->setEnabled(!acquiring || continuous);
+        : tr("Arm acquisition for one Heliotis frame"));
+    _grabLiveButton->setEnabled(acquisitionControlsEnabled && (!acquiring || continuous));
     setSoftwareTriggerAvailable(_softwareTriggerAvailable);
     _connectionStatus->setText(acquiring ? tr("Armed") : tr("Connected"));
     _connectionStatus->setProperty("status", acquiring ? QStringLiteral("grabbing") : QStringLiteral("connected"));
     _connectionStatus->style()->unpolish(_connectionStatus);
     _connectionStatus->style()->polish(_connectionStatus);
-    _messageLabel->setText(acquiring
-        ? (continuous
-            ? tr("Armed for frames from the current Heliotis trigger configuration.")
-            : tr("Armed for one Heliotis frame from the current trigger configuration."))
-        : tr("Heliotis acquisition stopped."));
-    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
-    _messageLabel->style()->unpolish(_messageLabel);
-    _messageLabel->style()->polish(_messageLabel);
+    updateAcquisitionMessage();
 }
 
 void QHeliotisC4Widget::setAcquisitionError(const QString& message)
@@ -381,28 +617,108 @@ void QHeliotisC4Widget::setAcquisitionError(const QString& message)
 
 void QHeliotisC4Widget::setSoftwareTriggerAvailable(const bool available)
 {
-    const bool enabled = available && _featureAccessCurrent && !_featureOperationPending;
+    const bool enabled = available && _acquisitionActive && _acquisitionAvailable
+        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending
+        && !_acquisitionStopPending && !_softwareTriggerPending;
     qInfo().noquote() << "[Heliotis C4] Software trigger UI state:"
                       << (enabled ? "enabled" : "disabled")
                       << "buttons=" << _softwareTriggerButtons.size()
                       << "acquisitionActive=" << _acquisitionActive
                       << "acquisitionAvailable=" << _acquisitionAvailable
-                      << "featureOperationPending=" << _featureOperationPending;
+                      << "featureOperationPending=" << _featureOperationPending
+                      << "triggerPending=" << _softwareTriggerPending
+                      << "stopPending=" << _acquisitionStopPending;
     for (auto* button : _softwareTriggerButtons) {
         if (button) button->setEnabled(enabled);
+    }
+}
+
+void QHeliotisC4Widget::setFeatureRefreshPending(const bool pending)
+{
+    _featureRefreshPending = pending;
+    _tabs->setEnabled(!pending && !_initializationPending && !_featureOperationPending
+        && !_acquisitionArmPending);
+    _connectButton->setEnabled(!pending && !_acquisitionArmPending
+        && (_connected || !_devices.empty()));
+    _initializeButton->setEnabled(_connected && !pending && !_initializationPending
+        && !_featureOperationPending && !_acquisitionActive && !_acquisitionArmPending);
+    _deviceFeatureTree->setEnabled(_connected && !pending && !_featureOperationPending
+        && !_acquisitionArmPending);
+    _motionFeatureTree->setEnabled(_connected && !pending
+        && !_featureOperationPending && !_acquisitionActive && !_acquisitionArmPending);
+    for (auto* editor : _deviceFeatureEditors) {
+        if (editor) {
+            editor->setEnabled(editor->property(featureWritableProperty).toBool()
+                && !pending && !_featureOperationPending && !_acquisitionActive
+                && !_acquisitionArmPending);
+        }
+    }
+    setAcquisitionAvailable(_acquisitionAvailable);
+    setSoftwareTriggerAvailable(_softwareTriggerAvailable);
+    if (pending) {
+        _messageLabel->setText(tr("Refreshing Heliotis features..."));
+        _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+        _messageLabel->style()->unpolish(_messageLabel);
+        _messageLabel->style()->polish(_messageLabel);
+    } else {
+        _messageLabel->setText(tr("Heliotis features refreshed."));
+        _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+        _messageLabel->style()->unpolish(_messageLabel);
+        _messageLabel->style()->polish(_messageLabel);
     }
 }
 
 void QHeliotisC4Widget::setFeatureOperationPending(const bool pending)
 {
     _featureOperationPending = pending;
-    _tabs->setEnabled(!pending);
+    _connectButton->setEnabled(!pending && !_featureRefreshPending
+        && !_acquisitionArmPending && !_acquisitionStopPending
+        && (_connected || !_devices.empty()));
+    _tabs->setEnabled(!pending && !_initializationPending && !_featureRefreshPending
+        && !_acquisitionArmPending && !_acquisitionStopPending);
+    _initializeButton->setEnabled(_connected && !pending && !_initializationPending
+        && !_acquisitionActive && !_featureRefreshPending && !_acquisitionArmPending
+        && !_acquisitionStopPending);
+    _deviceFeatureTree->setEnabled(_connected && !pending && !_featureRefreshPending
+        && !_acquisitionArmPending && !_acquisitionStopPending);
+    _motionFeatureTree->setEnabled(_connected && !pending
+        && !_acquisitionActive && !_featureRefreshPending && !_acquisitionArmPending
+        && !_acquisitionStopPending);
+    for (auto* editor : _deviceFeatureEditors) {
+        if (editor) {
+            editor->setEnabled(editor->property(featureWritableProperty).toBool()
+                && !pending && !_acquisitionActive && !_featureRefreshPending
+                && !_acquisitionArmPending && !_acquisitionStopPending);
+        }
+    }
     if (!pending) {
         setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable && _softwareTriggerAvailable);
+        if (_softwareTriggerPending) setSoftwareTriggerPending(true);
+        else if (_acquisitionActive) updateAcquisitionMessage();
         return;
     }
 
     _messageLabel->setText(tr("Applying Heliotis feature change..."));
+    _messageLabel->setProperty("messageState", QStringLiteral("normal"));
+    _messageLabel->style()->unpolish(_messageLabel);
+    _messageLabel->style()->polish(_messageLabel);
+}
+
+void QHeliotisC4Widget::updateAcquisitionMessage()
+{
+    if (!_acquisitionActive) {
+        _messageLabel->setText(tr("Heliotis acquisition stopped."));
+    } else if (_softwareTriggerPending) {
+        _messageLabel->setText(tr("TriggerSoftware was accepted. Waiting for its Heliotis frame..."));
+    } else if (_softwareTriggerAvailable) {
+        _messageLabel->setText(_continuousAcquisition
+            ? tr("Live is armed. Each TriggerSoftware command starts FrameStart; RecordingStart may still gate delivery.")
+            : tr("Single is armed. Execute TriggerSoftware; RecordingStart may still gate its one frame."));
+    } else {
+        _messageLabel->setText(_continuousAcquisition
+            ? tr("Live is armed for automatic or external frames.")
+            : tr("Single is armed for one automatic or external frame."));
+    }
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
     _messageLabel->style()->unpolish(_messageLabel);
     _messageLabel->style()->polish(_messageLabel);
@@ -430,9 +746,11 @@ void QHeliotisC4Widget::setIdleState(const QString& message)
 
 void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& features)
 {
-    _featureAccessCurrent = true;
-    _deviceFeatureTree->setEnabled(true);
-    _motionFeatureTree->setEnabled(true);
+    _featureAccessCurrent = !_acquisitionActive;
+    _deviceFeatureTree->setEnabled(_connected && !_featureOperationPending
+        && !_featureRefreshPending && !_acquisitionArmPending);
+    _motionFeatureTree->setEnabled(_connected && !_acquisitionActive
+        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
     heliotis::HeliotisC4::FeatureList deviceFeatures;
     heliotis::HeliotisC4::FeatureList motionFeatures;
     for (const auto& feature : features) {
@@ -473,6 +791,7 @@ void QHeliotisC4Widget::populateTree(
         if (feature.type == heliotis::FeatureType::Command) {
             auto* executeButton = new QPushButton(tr("Execute"), tree);
             const bool isSoftwareTrigger = featureName == QStringLiteral("TriggerSoftware");
+            executeButton->setProperty(featureWritableProperty, writable);
             executeButton->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending
                 && (!isSoftwareTrigger || _acquisitionActive));
             connect(executeButton, &QPushButton::clicked, this, [this, featureName] {
@@ -489,6 +808,7 @@ void QHeliotisC4Widget::populateTree(
 
         if (feature.type == heliotis::FeatureType::Boolean) {
             auto* checkBox = new QCheckBox(tree);
+            checkBox->setProperty(featureWritableProperty, writable);
             checkBox->setChecked(feature.valueText == "1" || feature.valueText == "true");
             checkBox->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
             connect(checkBox, &QCheckBox::toggled, this, [this, featureName](const bool checked) {
@@ -501,6 +821,7 @@ void QHeliotisC4Widget::populateTree(
 
         if (feature.type == heliotis::FeatureType::Enumeration && !feature.enumEntries.empty()) {
             auto* comboBox = new QComboBox(tree);
+            comboBox->setProperty(featureWritableProperty, writable);
             for (const auto& entry : feature.enumEntries) {
                 comboBox->addItem(QString::fromStdString(entry));
             }
@@ -515,6 +836,7 @@ void QHeliotisC4Widget::populateTree(
         }
 
         auto* lineEdit = new QLineEdit(tree);
+        lineEdit->setProperty(featureWritableProperty, writable);
         if (feature.access == heliotis::FeatureAccess::WriteOnly) {
             lineEdit->setPlaceholderText(tr("Enter value"));
         } else {
