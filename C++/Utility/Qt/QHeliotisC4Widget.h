@@ -33,10 +33,17 @@ public:
     void setConnectionPending(bool pending);
     /** Shows a non-blocking stop-and-disconnect operation in progress. */
     void setDisconnectionPending();
+    /**
+     * Applies the authoritative device connection state.
+     *
+     * @param connected Whether the device session owns an open SDK device.
+     * @note Disconnect clears all acquisition presentation and pending-trigger
+     *       state so a later connection always starts with idle Single/Live controls.
+     */
     void setConnectionState(bool connected);
     void setConnectionError(const QString& message);
     /**
-     * Shows that the connected device is undergoing explicit Stage Init.
+     * Shows that the connected device is undergoing explicit H8 profile initialization.
      *
      * @param pending Whether the initialization worker is running.
      * @note Acquisition and feature editing are temporarily unavailable while
@@ -44,13 +51,19 @@ public:
      */
     void setInitializationPending(bool pending);
     /**
-     * Reports a Stage Init failure without changing connection or capture availability.
+     * Reports an H8 profile failure without changing connection or capture availability.
      *
      * @param message Failure text to show in the device message area.
-     * @note Non-stage capture remains available after this optional operation fails.
+     * @note Capture controls remain available for inspection or retry after failure.
      */
     void setInitializationError(const QString& message);
-    /** Sets capture availability independently from optional Stage Init. */
+    /**
+     * Sets capture availability independently from explicit H8 initialization.
+     *
+     * @param available Whether a new acquisition may be armed.
+     * @note Losing availability clears active-mode presentation, including the
+     *       Single stop icon, Live toggle, and software-trigger pending state.
+     */
     void setAcquisitionAvailable(bool available);
     /**
      * Shows asynchronous acquisition arming without blocking the Qt event loop.
@@ -78,7 +91,7 @@ public:
      * @param pending Whether an asynchronous feature refresh is running.
      */
     void setFeatureRefreshPending(bool pending);
-    /** Locks competing controls while one asynchronous feature operation runs. */
+    /** Locks competing controls and restores capture after an asynchronous feature operation and refresh. */
     void setFeatureOperationPending(bool pending);
     void setFeatureError(const QString& message);
     /** Rebuilds both trees while preserving scroll, selection, and acquisition locks. */
@@ -88,7 +101,7 @@ signals:
     void refreshRequested();
     void connectRequested(int deviceIndex);
     void disconnectRequested();
-    /** Requests Stage Init without applying a capture profile. */
+    /** Requests complete H8 capture defaults and Stage Init. */
     void initializationRequested();
     void grabOneRequested();
     void stopRequested();

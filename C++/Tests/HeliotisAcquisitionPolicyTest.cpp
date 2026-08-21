@@ -36,8 +36,8 @@ int main()
 
     const auto canonical = evaluateAcquisitionTriggerPlan(
         triggerState("Off"), triggerState("On", "Software"), triggerState("On", "Stage"));
-    if (!require(canonical.valid && canonical.usesHostSoftwareTrigger() && !canonical.isFreeRun()
-            && canonical.frameStartRoute == FrameStartRoute::Software
+    if (!require(canonical.valid && canonical.usesHostSoftwareTrigger()
+            && !canonical.isFreeRun() && canonical.frameStartRoute == FrameStartRoute::Software
             && canonical.recordingStartRoute == RecordingStartRoute::Stage,
             "The canonical H8 Software/Stage route was not accepted.")) {
         return EXIT_FAILURE;

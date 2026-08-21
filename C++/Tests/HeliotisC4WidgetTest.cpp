@@ -171,36 +171,40 @@ int main(int argc, char** argv)
     widget.setConnectionState(true);
     widget.setAcquisitionAvailable(true);
     if (!require(initializeButton->isEnabled() && grabOneButton->isEnabled() && liveButton->isEnabled(),
-                 "Connection must expose capture and optional Stage Init independently.")) {
+                 "Connection must expose capture and explicit H8 profile initialization independently.")) {
+        return EXIT_FAILURE;
+    }
+    if (!require(initializeButton->toolTip().contains(QStringLiteral("vendor defaults")),
+                 "The Init action must identify that it resets the complete capture defaults.")) {
         return EXIT_FAILURE;
     }
     widget.setInitializationPending(true);
     application.processEvents();
     if (!require(status->property("status").toString() == QStringLiteral("connected"),
-                 "Stage Init must not replace the connected status.")) {
+                 "H8 initialization must not replace the connected status.")) {
         return EXIT_FAILURE;
     }
     if (!require(!liveButton->isEnabled(),
-                 "Acquisition must be temporarily disabled while Stage Init is pending.")) {
+                 "Acquisition must be temporarily disabled while H8 initialization is pending.")) {
         return EXIT_FAILURE;
     }
     if (!require(!initializeButton->isEnabled(),
-                 "A second Stage Init must be disabled while initialization is pending.")) {
+                 "A second H8 initialization must be disabled while initialization is pending.")) {
         return EXIT_FAILURE;
     }
 
-    widget.setInitializationError(QStringLiteral("optional Stage Init failed"));
+    widget.setInitializationError(QStringLiteral("H8 reference profile failed"));
     application.processEvents();
     if (!require(status->property("status").toString() == QStringLiteral("connected"),
-                 "A Stage Init error must not disconnect the device.")) {
+                 "An H8 initialization error must not disconnect the device.")) {
         return EXIT_FAILURE;
     }
     if (!require(grabOneButton->isEnabled() && liveButton->isEnabled(),
-                 "A Stage Init failure must restore non-stage capture controls.")) {
+                 "An H8 initialization failure must restore capture controls for inspection or retry.")) {
         return EXIT_FAILURE;
     }
     if (!require(initializeButton->isEnabled(),
-                 "Stage Init must remain retryable after failure.")) {
+                 "H8 initialization must remain retryable after failure.")) {
         return EXIT_FAILURE;
     }
 
@@ -208,7 +212,7 @@ int main(int argc, char** argv)
     widget.setInitializationPending(false);
     application.processEvents();
     if (!require(grabOneButton->isEnabled() && liveButton->isEnabled(),
-                 "A completed Stage Init must preserve the connection-owned capture availability.")) {
+                 "Completed H8 initialization must preserve connection-owned capture availability.")) {
         return EXIT_FAILURE;
     }
 
@@ -256,6 +260,25 @@ int main(int argc, char** argv)
                  "SDK-dependent controls must recover after an asynchronous feature refresh.")) {
         return EXIT_FAILURE;
     }
+
+    // A successful feature write owns featureOperationPending across its
+    // follow-up refresh. Capture must recover only after that outer operation
+    // is released.
+    widget.setFeatureOperationPending(true);
+    application.processEvents();
+    if (!require(!grabOneButton->isEnabled() && !liveButton->isEnabled(),
+                 "A pending feature write must lock capture controls.")) {
+        return EXIT_FAILURE;
+    }
+    widget.setFeatureRefreshPending(true);
+    widget.setFeatureRefreshPending(false);
+    widget.setFeatureOperationPending(false);
+    application.processEvents();
+    if (!require(grabOneButton->isEnabled() && liveButton->isEnabled(),
+                 "Capture controls must recover after a feature write and its nested refresh.")) {
+        return EXIT_FAILURE;
+    }
+
     widget.setAcquisitionArmPending(true, false);
     application.processEvents();
     if (!require(!tree->isEnabled() && !initializeButton->isEnabled() && !liveButton->isEnabled(),
@@ -357,6 +380,37 @@ int main(int argc, char** argv)
     if (!require(!connectButton->isEnabled() && !liveButton->isEnabled()
                      && !tree->isEnabled() && !motionTree->isEnabled(),
                  "A late acquisition error must not unlock controls during asynchronous disconnect.")) {
+        return EXIT_FAILURE;
+    }
+
+    // Disconnect is the acquisition-presentation session boundary. A worker
+    // that was still armed must not leave either capture action in Stop state.
+    widget.setConnectionState(false);
+    application.processEvents();
+    if (!require(grabOneButton->toolTip().contains(QStringLiteral("Arm acquisition"))
+                     && !liveButton->isChecked() && !grabOneButton->isEnabled()
+                     && !liveButton->isEnabled() && !triggerButton->isEnabled(),
+                 "Disconnect must restore idle Single/Live presentation and clear trigger state.")) {
+        return EXIT_FAILURE;
+    }
+
+    // A queued inactive callback from the old worker must not relabel the
+    // disconnected session as connected before the next open completes.
+    const QString disconnectedStatus = status->property("status").toString();
+    widget.setAcquisitionState(false, false, false);
+    application.processEvents();
+    if (!require(status->property("status").toString() == disconnectedStatus,
+                 "A late acquisition state must not overwrite disconnected presentation.")) {
+        return EXIT_FAILURE;
+    }
+
+    widget.setConnectionState(true);
+    widget.setAcquisitionAvailable(true);
+    application.processEvents();
+    if (!require(grabOneButton->isEnabled() && liveButton->isEnabled()
+                     && grabOneButton->toolTip().contains(QStringLiteral("Arm acquisition"))
+                     && !liveButton->isChecked(),
+                 "Reconnect must expose fresh idle Single and Live controls.")) {
         return EXIT_FAILURE;
     }
 

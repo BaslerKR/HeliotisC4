@@ -5,7 +5,6 @@
 #include <QAbstractItemView>
 #include <QComboBox>
 #include <QCheckBox>
-#include <QDebug>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
@@ -109,7 +108,7 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     _initializeButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-setup-48.png")));
     _initializeButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     _initializeButton->setIconSize(QSize(16, 16));
-    _initializeButton->setToolTip(tr("Initialize H8 stage motion without changing the capture profile"));
+    _initializeButton->setToolTip(tr("Reset all H8 capture settings to the vendor defaults and initialize the stage"));
     _initializeButton->setEnabled(false);
 
     _grabOneButton = new QToolButton(this);
@@ -284,6 +283,7 @@ void QHeliotisC4Widget::setDiscoveryError(const QString& message)
 
 void QHeliotisC4Widget::setConnectionState(const bool connected)
 {
+    const bool wasConnected = _connected;
     _connected = connected;
     _connectionPending = false;
     _disconnectionPending = false;
@@ -292,11 +292,11 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
     _softwareTriggerPending = false;
     if (!connected) {
         _initializationPending = false;
+        _featureRefreshPending = false;
+        _featureOperationPending = false;
+        _featureAccessCurrent = true;
         _tabs->setEnabled(true);
     }
-    const QString previousStatus = _connectionStatus->property("status").toString();
-    const bool wasConnected = previousStatus == QStringLiteral("connected")
-        || previousStatus == QStringLiteral("grabbing");
 
     const QSignalBlocker blocker(_connectButton);
     _connectButton->setChecked(connected);
@@ -367,7 +367,7 @@ void QHeliotisC4Widget::setInitializationPending(const bool pending)
         _connectButton->setEnabled(false);
         _initializeButton->setEnabled(false);
         setAcquisitionAvailable(_acquisitionAvailable);
-        _messageLabel->setText(tr("H8 Stage Init is in progress; the stage may move..."));
+        _messageLabel->setText(tr("Applying all H8 capture defaults and initializing stage motion; the stage may move..."));
         _messageLabel->setProperty("messageState", QStringLiteral("normal"));
         _messageLabel->style()->unpolish(_messageLabel);
         _messageLabel->style()->polish(_messageLabel);
@@ -381,7 +381,7 @@ void QHeliotisC4Widget::setInitializationPending(const bool pending)
     _initializeButton->setEnabled(_connected && !_acquisitionActive
         && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
     setAcquisitionAvailable(_acquisitionAvailable);
-    _messageLabel->setText(tr("Heliotis Stage Init request completed; capture settings were not changed."));
+    _messageLabel->setText(tr("Heliotis H8 capture defaults and Stage Init completed."));
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
     _messageLabel->style()->unpolish(_messageLabel);
     _messageLabel->style()->polish(_messageLabel);
@@ -435,7 +435,18 @@ void QHeliotisC4Widget::setConnectionError(const QString& message)
 void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
 {
     _acquisitionAvailable = available;
-    if (!available) _acquisitionActive = false;
+    if (!available) {
+        _acquisitionActive = false;
+        _continuousAcquisition = false;
+        _softwareTriggerAvailable = false;
+        _softwareTriggerPending = false;
+        {
+            const QSignalBlocker blocker(_grabLiveButton);
+            _grabLiveButton->setChecked(false);
+        }
+        _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
+        _grabOneButton->setToolTip(tr("Arm acquisition for one Heliotis frame"));
+    }
     const QString status = _connectionStatus->property("status").toString();
     const bool enabled = (status == QStringLiteral("connected") || status == QStringLiteral("grabbing"))
         && available && !_initializationPending && !_featureRefreshPending
@@ -540,8 +551,6 @@ void QHeliotisC4Widget::setSoftwareTriggerPending(const bool pending)
     if (!nextPending && !_softwareTriggerPending) return;
     _softwareTriggerPending = nextPending;
     setSoftwareTriggerAvailable(_softwareTriggerAvailable);
-    qInfo().noquote() << "[Heliotis C4] Software trigger in-flight UI state:"
-                      << (_softwareTriggerPending ? "waiting-for-frame" : "idle");
     if (!_featureOperationPending) updateAcquisitionMessage();
 }
 
@@ -553,6 +562,7 @@ void QHeliotisC4Widget::setAcquisitionState(
     // A late worker status/error must not re-enable controls while asynchronous
     // teardown owns the device handles.
     if (_disconnectionPending) return;
+    if (!_connected) return;
     if (acquiring && (!_acquisitionAvailable || _initializationPending)) return;
 
     _acquisitionStopPending = false;
@@ -620,14 +630,6 @@ void QHeliotisC4Widget::setSoftwareTriggerAvailable(const bool available)
     const bool enabled = available && _acquisitionActive && _acquisitionAvailable
         && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending
         && !_acquisitionStopPending && !_softwareTriggerPending;
-    qInfo().noquote() << "[Heliotis C4] Software trigger UI state:"
-                      << (enabled ? "enabled" : "disabled")
-                      << "buttons=" << _softwareTriggerButtons.size()
-                      << "acquisitionActive=" << _acquisitionActive
-                      << "acquisitionAvailable=" << _acquisitionAvailable
-                      << "featureOperationPending=" << _featureOperationPending
-                      << "triggerPending=" << _softwareTriggerPending
-                      << "stopPending=" << _acquisitionStopPending;
     for (auto* button : _softwareTriggerButtons) {
         if (button) button->setEnabled(enabled);
     }
@@ -691,6 +693,13 @@ void QHeliotisC4Widget::setFeatureOperationPending(const bool pending)
                 && !_acquisitionArmPending && !_acquisitionStopPending);
         }
     }
+
+    // A successful feature write keeps featureOperationPending set while the
+    // follow-up refresh runs. The refresh therefore disables capture controls;
+    // recompute them when the outer operation finally completes. Do not use
+    // setAcquisitionAvailable() while armed because Single/Live stop controls
+    // have mode-specific enablement owned by setAcquisitionState().
+    if (!_acquisitionActive) setAcquisitionAvailable(_acquisitionAvailable);
     if (!pending) {
         setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable && _softwareTriggerAvailable);
         if (_softwareTriggerPending) setSoftwareTriggerPending(true);

@@ -19,6 +19,13 @@ class HeliotisC4Device;
 
 class HeliotisC4System final {
 public:
+    /**
+     * Opens one validated C4Utility runtime and records its SDK/producer versions.
+     *
+     * @param sdkRoot Selected installed or staged C4Utility runtime root.
+     * @throws std::runtime_error When the runtime layout, process environment,
+     *         C4Hdl open, or Diaphus producer identity is invalid.
+     */
     explicit HeliotisC4System(const std::string& sdkRoot);
     ~HeliotisC4System();
 
@@ -51,6 +58,7 @@ public:
     using StatusCallback = std::function<void(Status status, bool connected)>;
     using FrameCallback = std::function<void(Frame&& frame)>;
 
+    /** Selects host-side completion while device acquisition remains Continuous. */
     enum class AcquisitionMode {
         SingleFrame,
         Continuous
@@ -75,12 +83,20 @@ public:
     [[nodiscard]] bool isOpened() const;
     [[nodiscard]] std::string connectedDeviceName() const;
     /**
-     * Applies the motion-producing H8 reference profile without changing triggers.
+     * Applies the complete H8 surface capture defaults, including components,
+     * chunks, canonical RecordingStart/FrameStart routing, encoder, scan motion,
+     * processing, and illumination. It disables the deprecated AcquisitionStart
+     * route when the firmware exposes it.
      *
      * @param errorMessage Optional failure detail.
-     * @return True when every required group succeeded; optional geometry and
-     *         illumination groups may warn without failing the operation.
+     * @return True when every required group and the legacy-trigger cleanup
+     *         succeeded; an absent AcquisitionStart and optional capability
+     *         failures are treated as compatible.
      * @note The caller must establish stage clearance before invoking this method.
+     *       Encoder and motion values are reset to the C4Utility h8SurfSimple
+     *       defaults before StageInit. Independent groups continue after required
+     *       write failures so logs expose all reachable problems. StageInit is
+     *       skipped when required encoder or motion defaults are incomplete.
      */
     [[nodiscard]] bool configureH8SurfaceExample(std::string* errorMessage = nullptr);
     /** Requests cancellation of a running H8 profile or motion initialization. */
@@ -89,11 +105,14 @@ public:
      * Initializes stage motion without applying the complete reference profile.
      *
      * @param errorMessage Optional failure detail.
-     * @return True when the stage was already initialized or StageInit completed;
-     *         false when stage status/command support is unavailable or failed.
+     * @return True when StageInit completes; false when its command or completion
+     *         status fails. Legacy trigger cleanup failure is logged separately.
      * @note This operation is serialized against profile initialization and
-     *       acquisition and may move the stage. It does not write capture,
-     *       processing, illumination, user-set, or trigger feature values.
+     *       acquisition and may move the stage. It attempts to disable the
+     *       deprecated AcquisitionStart route when exposed, but cleanup failure
+     *       does not block StageInit. StageInit always executes so the device
+     *       StageInitMode owns reinitialization policy. Other trigger values and
+     *       all capture, processing, illumination, and user-set values are preserved.
      */
     [[nodiscard]] bool initializeMotion(std::string* errorMessage = nullptr);
     [[nodiscard]] HeliotisC4::FeatureList readFeatures(std::string* errorMessage = nullptr) const;
@@ -103,22 +122,30 @@ public:
         std::string* errorMessage = nullptr);
     [[nodiscard]] bool executeCommand(const std::string& name, std::string* errorMessage = nullptr);
     /**
-     * Queues one FrameStart software command for an armed acquisition.
+     * Queues one logical FrameStart software request for an armed acquisition.
      *
      * @param errorMessage Optional rejection detail.
      * @return True when the command was accepted by the worker queue.
+     * @note TriggerSelector is pinned to FrameStart before SDK start. Each
+     *       accepted request then issues exactly one TriggerSoftware command
+     *       without another selector write before waiting for its buffer.
      */
     [[nodiscard]] bool triggerSoftware(std::string* errorMessage = nullptr);
     /**
      * Starts one worker-owned acquisition cycle.
      *
-     * @param mode Requested SingleFrame or Continuous behavior.
+     * @param mode Requested host-side SingleFrame or Continuous behavior.
      * @param frameCallback Consumer for deep-owned frames.
      * @param errorMessage Optional arm failure detail.
-     * @return True after C4Utility starts and the receive worker is installed.
-     * @note Temporarily applies only the matching device AcquisitionMode and
-     *       restores it after stop. Trigger selectors are inspected and restored
-     *       to select the worker route; no trigger mode/source is changed.
+     * @return True after the receive worker starts C4Utility successfully.
+     * @note Both modes apply device AcquisitionMode=Continuous. SingleFrame
+     *       stops after the first copied buffer; Continuous stops on request.
+     *       A changed prior device mode is restored after stop. The same worker
+     *       thread owns C4Dev_startAcquisition, TriggerSoftware, getBuffer, and
+     *       C4Dev_stopAcquisition. For software acquisition, TriggerSelector is
+     *       pinned to FrameStart before SDK start, held unchanged through every
+     *       TriggerSoftware/getBuffer request, then restored after SDK stop; no
+     *       trigger mode/source is changed.
      */
     [[nodiscard]] bool startAcquisition(
         AcquisitionMode mode,
@@ -166,7 +193,7 @@ private:
      * Deep-copies supported multipart data before releasing the SDK buffer.
      *
      * @param buffer Live C4Utility buffer.
-     * @param detailedDiagnostics Whether to scan samples for diagnostic summaries.
+     * @param detailedDiagnostics Whether to emit sampled metadata warnings.
      * @param frame Destination deep-owned frame.
      * @param errorMessage Optional copy failure detail.
      * @return True when a valid frame containing Range data was copied.
@@ -179,18 +206,25 @@ private:
         Frame* frame,
         std::string* errorMessage) const;
     /**
-     * Runs the acquisition receive loop on the device worker thread.
+     * Starts, receives, and stops one acquisition on the device worker thread.
      *
      * @param device C4Utility device handle to receive from.
      * @param mode Single-frame or continuous acquisition behavior.
      * @param softwareTriggered Whether FrameStart is controlled by software.
      * @param triggerDiagnosticSummary Trigger selector state captured before arming.
      * @param acquisitionId Monotonic identifier used to correlate one arm cycle.
+     * @param originalTriggerSelector Selector cursor to restore after SDK shutdown.
+     * @param restoreTriggerSelector Whether the arm operation changed that cursor.
      * @param originalAcquisitionMode Device mode to restore after SDK shutdown.
      * @param restoreAcquisitionMode Whether the arm operation changed that mode.
      * @param frameCallback Callback that receives each deep-owned frame.
-     * @note C4Utility calls are serialized and bounded buffer polls keep stop,
-     *       close, and queued software-trigger handling responsive.
+     * @note One worker owns the complete C4Utility acquisition lifecycle. Calls
+     *       are serialized. Each queued software request follows the vendor
+     *       sample by calling TriggerSoftware with the pre-start FrameStart
+     *       selector unchanged immediately before one bounded getBuffer wait.
+     *       No feature access occurs after SDK start and before the command.
+     *       A timeout terminates the arm so a stale logical request cannot block
+     *       the next acquisition.
      */
     void acquisitionLoop(
         C4_DEVICE device,
@@ -198,6 +232,8 @@ private:
         bool softwareTriggered,
         std::string triggerDiagnosticSummary,
         std::uint64_t acquisitionId,
+        std::string originalTriggerSelector,
+        bool restoreTriggerSelector,
         std::string originalAcquisitionMode,
         bool restoreAcquisitionMode,
         FrameCallback frameCallback);
@@ -225,6 +261,9 @@ private:
     std::atomic<bool> _cancelInitializationRequested{false};
     std::mutex _acquisitionStartMutex;
     std::condition_variable _acquisitionStartCondition;
+    bool _acquisitionStartCompleted = false;
+    bool _acquisitionStartSucceeded = false;
+    std::string _acquisitionStartError;
     bool _acquisitionWorkerReleased = false;
     std::mutex _triggerMutex;
     std::condition_variable _triggerCondition;
@@ -233,6 +272,7 @@ private:
     bool _softwareTriggeredAcquisition = false;
     bool _softwareTriggerAvailable = false;
     bool _acquiring = false;
+    std::thread::id _acquisitionWorkerThreadId;
     bool _activeStatusDispatching = false;
     std::thread::id _activeStatusDispatchThreadId;
     bool _initializing = false;

@@ -16,6 +16,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -88,11 +89,10 @@ bool copyBufferPartSamples(
     return false;
 }
 
-/** Reads one part's complete dimension vector with optional diagnostic output. */
+/** Reads one part's complete dimension vector. */
 bool readBufferPartDimensions(
     const C4_BUFFER buffer,
     const std::int64_t partIndex,
-    const bool detailedDiagnostics,
     std::vector<std::int64_t>* dimensions,
     std::string* errorMessage)
 {
@@ -120,46 +120,7 @@ bool readBufferPartDimensions(
         return false;
     }
 
-    if (detailedDiagnostics) {
-        std::ostringstream values;
-        for (std::size_t index = 0; index < dimensions->size(); ++index) {
-            if (index != 0) values << 'x';
-            values << dimensions->at(index);
-        }
-        logInfo("C4Utility buffer part " + std::to_string(partIndex) + " dimensions=" + values.str() + ".");
-    }
     return true;
-}
-
-template <typename Sample>
-std::string sampleDiagnostics(const std::vector<Sample>& samples)
-{
-    std::size_t finiteCount = 0;
-    std::size_t zeroCount = 0;
-    double minimum = std::numeric_limits<double>::infinity();
-    double maximum = -std::numeric_limits<double>::infinity();
-    for (const Sample sample : samples) {
-        const double value = static_cast<double>(sample);
-        if (!std::isfinite(value)) continue;
-        ++finiteCount;
-        if (value == 0.0) ++zeroCount;
-        minimum = std::min(minimum, value);
-        maximum = std::max(maximum, value);
-    }
-
-    std::ostringstream summary;
-    summary << "samples=" << samples.size()
-            << ", finite=" << finiteCount
-            << ", zero=" << zeroCount;
-    if (finiteCount != 0U) {
-        summary << std::setprecision(12)
-                << ", min=" << minimum
-                << ", max=" << maximum
-                << ", first=" << static_cast<double>(samples.front())
-                << ", middle=" << static_cast<double>(samples.at(samples.size() / 2U))
-                << ", last=" << static_cast<double>(samples.back());
-    }
-    return summary.str();
 }
 
 bool check(const C4HDL_ERROR result, std::string* errorMessage)
@@ -380,6 +341,53 @@ bool findFeatureMetadata(
     return found;
 }
 
+/** Reads the advertised entries of one enumeration feature. */
+bool readDeviceEnumerationEntries(
+    const C4_DEVICE device,
+    const std::string& requestedName,
+    std::vector<std::string>* entries,
+    std::string* errorMessage)
+{
+    if (entries) entries->clear();
+    C4_FEATUREINFO* featureList = nullptr;
+    if (!check(C4Dev_getFeatureList(device, &featureList), errorMessage)) return false;
+    if (!featureList) {
+        if (errorMessage) *errorMessage = "C4Utility returned an empty feature list.";
+        return false;
+    }
+
+    bool found = false;
+    bool succeeded = false;
+    constexpr std::size_t maximumFeatureCount = 4096;
+    for (std::size_t index = 0; index < maximumFeatureCount && featureList[index] != nullptr; ++index) {
+        const C4_FEATUREINFO feature = featureList[index];
+        std::string metadataError;
+        const std::string name = readSdkString(
+            [feature](char* buffer, std::size_t* size) { return C4Ftr_getName(feature, buffer, size); },
+            &metadataError);
+        if (!metadataError.empty() || name != requestedName) continue;
+
+        found = true;
+        const std::string entryList = readSdkString(
+            [feature](char* buffer, std::size_t* size) {
+                return C4Ftr_getEnumEntryList(feature, buffer, size);
+            },
+            &metadataError);
+        if (!metadataError.empty()) {
+            if (errorMessage) *errorMessage = std::move(metadataError);
+            break;
+        }
+        if (entries) *entries = splitEnumEntries(entryList);
+        succeeded = true;
+        break;
+    }
+    C4Ftr_release(featureList);
+    if (!found && errorMessage && errorMessage->empty()) {
+        *errorMessage = "Heliotis feature is not available: " + requestedName;
+    }
+    return succeeded;
+}
+
 /** Reads an enumeration while preserving the SDK error separately from its value. */
 bool readDeviceEnumerationValue(
     const C4_DEVICE device,
@@ -398,6 +406,106 @@ bool readDeviceEnumerationValue(
         return false;
     }
     if (value) *value = readValue;
+    return true;
+}
+
+/** Disables the deprecated AcquisitionStart route when the firmware exposes it. */
+bool disableLegacyAcquisitionStartIfPresent(
+    const C4_DEVICE device,
+    std::string* errorMessage)
+{
+    if (!device) {
+        if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+        return false;
+    }
+
+    std::string originalSelector;
+    std::string selectorReadError;
+    if (!readDeviceEnumerationValue(
+            device, "TriggerSelector", &originalSelector, &selectorReadError)) {
+        if (errorMessage) {
+            *errorMessage = "Could not read TriggerSelector before legacy cleanup: " + selectorReadError;
+        }
+        return false;
+    }
+
+    std::vector<std::string> selectors;
+    std::string entriesError;
+    if (readDeviceEnumerationEntries(device, "TriggerSelector", &selectors, &entriesError)) {
+        if (std::find(selectors.begin(), selectors.end(), "AcquisitionStart") == selectors.end()) {
+            logInfo("TriggerSelector does not expose AcquisitionStart; legacy trigger cleanup is not required.");
+            return true;
+        }
+    } else {
+        logWarning("Could not enumerate TriggerSelector entries before legacy cleanup; direct selector access will be attempted: "
+            + entriesError + ".");
+    }
+
+    const C4HDL_ERROR selectResult = C4Dev_writeEnumeration(
+        device, "TriggerSelector", "AcquisitionStart");
+    if (selectResult != C4HDL_ERR_SUCCESS) {
+        if (errorMessage) {
+            *errorMessage = operationError(
+                "C4Dev_writeEnumeration(TriggerSelector=AcquisitionStart)", selectResult);
+        }
+        return false;
+    }
+
+    bool succeeded = true;
+    bool changed = false;
+    std::string operationFailure;
+    std::string currentMode;
+    std::string modeReadError;
+    if (!readDeviceEnumerationValue(device, "TriggerMode", &currentMode, &modeReadError)) {
+        succeeded = false;
+        operationFailure = "Could not read AcquisitionStart TriggerMode: " + modeReadError;
+    } else if (currentMode != "Off") {
+        const C4HDL_ERROR writeResult = C4Dev_writeEnumeration(device, "TriggerMode", "Off");
+        if (writeResult != C4HDL_ERR_SUCCESS) {
+            succeeded = false;
+            operationFailure = operationError(
+                "C4Dev_writeEnumeration(TriggerMode=Off for AcquisitionStart)", writeResult);
+        } else {
+            changed = true;
+            std::string readback;
+            std::string readbackError;
+            if (!readDeviceEnumerationValue(device, "TriggerMode", &readback, &readbackError)) {
+                succeeded = false;
+                operationFailure = "AcquisitionStart TriggerMode=Off was written but could not be verified: "
+                    + readbackError;
+            } else if (readback != "Off") {
+                succeeded = false;
+                operationFailure = "AcquisitionStart TriggerMode did not retain Off; readback="
+                    + readback + ".";
+            }
+        }
+    }
+
+    std::string restoreFailure;
+    if (originalSelector != "AcquisitionStart") {
+        const C4HDL_ERROR restoreResult = C4Dev_writeEnumeration(
+            device, "TriggerSelector", originalSelector.c_str());
+        if (restoreResult != C4HDL_ERR_SUCCESS) {
+            restoreFailure = operationError(
+                "C4Dev_writeEnumeration(TriggerSelector restore)", restoreResult);
+            succeeded = false;
+        }
+    }
+
+    if (!succeeded) {
+        if (errorMessage) {
+            *errorMessage = operationFailure;
+            if (!restoreFailure.empty()) {
+                if (!errorMessage->empty()) *errorMessage += "; ";
+                *errorMessage += restoreFailure;
+            }
+        }
+        return false;
+    }
+
+    logInfo(std::string("Legacy AcquisitionStart selector normalized: TriggerMode=Off, changed=")
+        + (changed ? "true" : "false")
+        + ", restoredSelector=" + originalSelector + ".");
     return true;
 }
 
@@ -444,6 +552,15 @@ std::string readDeviceInteger(const C4_DEVICE device, const char* name)
         : "<unavailable: " + operationError("C4Dev_readInteger", result) + ">";
 }
 
+/** Reads immutable device identity fields so hardware and firmware changes are visible. */
+std::string deviceIdentitySummary(const C4_DEVICE device)
+{
+    return "vendor=" + readDeviceString(device, "DeviceVendorName")
+        + ", model=" + readDeviceString(device, "DeviceModelName")
+        + ", serial=" + readDeviceString(device, "DeviceSerialNumber")
+        + ", firmware=" + readDeviceString(device, "DeviceFirmwareVersion");
+}
+
 /** Reads the current trigger cursor without changing any selector. */
 std::string currentTriggerCursorSummary(const C4_DEVICE device)
 {
@@ -467,6 +584,19 @@ std::string motionDeviceStateSummary(const C4_DEVICE device)
         + ", ScanMode=" + readDeviceEnumeration(device, "ScanMode");
 }
 
+/** Reads the encoder and scan settings controlled by the explicit H8 profile. */
+std::string deviceMotionConfigurationSummary(const C4_DEVICE device)
+{
+    return "EncoderSelector=" + readDeviceEnumeration(device, "EncoderSelector")
+        + ", EncoderInverter=" + readDeviceInteger(device, "EncoderInverter")
+        + ", EncoderResolution=" + readDeviceFloat(device, "EncoderResolution")
+        + ", ScanPosition=" + readDeviceFloat(device, "ScanPosition")
+        + ", ScanRange=" + readDeviceFloat(device, "ScanRange")
+        + ", ScanSpeed=" + readDeviceFloat(device, "ScanSpeed")
+        + ", GeneralSpeed=" + readDeviceFloat(device, "GeneralSpeed")
+        + ", ScanMode=" + readDeviceEnumeration(device, "ScanMode");
+}
+
 /** Reads a non-mutating snapshot of capture, payload, processing, and motion settings. */
 std::string deviceConfigurationSnapshotSummary(const C4_DEVICE device)
 {
@@ -480,6 +610,10 @@ std::string deviceConfigurationSnapshotSummary(const C4_DEVICE device)
         + ", ChunkCursor={selector=" + readDeviceEnumeration(device, "ChunkSelector")
         + ", enabled=" + readDeviceInteger(device, "ChunkEnable") + "}"
         + ", PayloadSize=" + readDeviceInteger(device, "PayloadSize")
+        + ", EncoderCursor={selector=" + readDeviceEnumeration(device, "EncoderSelector")
+        + ", inverter=" + readDeviceInteger(device, "EncoderInverter")
+        + ", value=" + readDeviceInteger(device, "EncoderValue")
+        + ", resolutionNm=" + readDeviceFloat(device, "EncoderResolution") + "}"
         + ", Scan3dExtractionMethod=" + readDeviceEnumeration(device, "Scan3dExtractionMethod")
         + ", Scan3dScalingMethod=" + readDeviceEnumeration(device, "Scan3dScalingMethod")
         + ", Scan3dDistanceUnit=" + readDeviceEnumeration(device, "Scan3dDistanceUnit")
@@ -626,13 +760,111 @@ std::string acquisitionStatusSnapshotSummary(const C4_DEVICE device)
     return summary.str();
 }
 
+/** Reads one selector-dependent integer status and restores its selector cursor. */
+std::string selectorStatusValue(
+    const C4_DEVICE device,
+    const char* selectorFeature,
+    const char* statusFeature,
+    const char* selectorValue)
+{
+    std::string originalSelector;
+    std::string selectorError;
+    if (!readDeviceEnumerationValue(
+            device, selectorFeature, &originalSelector, &selectorError)) {
+        return "<selector unavailable: " + selectorError + ">";
+    }
+
+    const bool selectorChanged = originalSelector != selectorValue;
+    if (selectorChanged) {
+        const C4HDL_ERROR selectResult = C4Dev_writeEnumeration(
+            device, selectorFeature, selectorValue);
+        if (selectResult != C4HDL_ERR_SUCCESS) {
+            const std::string operation = std::string("C4Dev_writeEnumeration(")
+                + selectorFeature + ")";
+            return "<select failed: " + operationError(operation.c_str(), selectResult) + ">";
+        }
+    }
+
+    const std::string value = readDeviceInteger(device, statusFeature);
+    if (!selectorChanged) return value;
+
+    const C4HDL_ERROR restoreResult = C4Dev_writeEnumeration(
+        device, selectorFeature, originalSelector.c_str());
+    if (restoreResult == C4HDL_ERR_SUCCESS) return value;
+    const std::string restoreOperation = std::string("C4Dev_writeEnumeration(")
+        + selectorFeature + " restore)";
+    return value + " (selector restore failed: "
+        + operationError(restoreOperation.c_str(), restoreResult)
+        + ")";
+}
+
+/** Reads calculated H8 recording and motion values before transport is armed. */
+std::string surfaceRecordingPlanSummary(const C4_DEVICE device)
+{
+    return "VerticalSegmentSelector=" + readDeviceEnumeration(device, "VerticalSegmentSelector")
+        + ", ActualVerticalSpacing=" + readDeviceFloat(device, "ActualVerticalSpacing")
+        + ", ActualScanRange=" + readDeviceFloat(device, "ActualScanRange")
+        + ", RecordingNFrames=" + readDeviceInteger(device, "RecordingNFrames")
+        + ", OverallRecordingNFrames=" + readDeviceInteger(device, "OverallRecordingNFrames")
+        + ", FrameRate=" + readDeviceFloat(device, "FrameRate")
+        + ", StartPosition=" + readDeviceFloat(device, "StartPosition")
+        + ", TriggerPosition=" + readDeviceFloat(device, "TriggerPosition")
+        + ", EndPosition=" + readDeviceFloat(device, "EndPosition")
+        + ", ScanPositionMin=" + readDeviceFloat(device, "ScanPositionMin")
+        + ", ScanPositionMax=" + readDeviceFloat(device, "ScanPositionMax");
+}
+
 /** Reads state that distinguishes a trigger wait, motion wait, and re-arm issue. */
 std::string acquisitionDeviceStateSummary(const C4_DEVICE device)
 {
     return deviceConfigurationSnapshotSummary(device)
         + ", RecordingActive=" + readDeviceInteger(device, "RecordingActive")
         + ", AcquisitionStatuses={" + acquisitionStatusSnapshotSummary(device) + "}"
+        + ", TransferStatus[Streaming]=" + selectorStatusValue(
+            device, "TransferStatusSelector", "TransferStatus", "Streaming")
+        + ", StageStatus[InMotion]=" + selectorStatusValue(
+            device, "StageStatusSelector", "StageStatus", "InMotion")
         + ", LastErrorMessage=" + readDeviceString(device, "LastErrorMessage");
+}
+
+/** Classifies the acquisition state reached after a terminal buffer wait. */
+std::string acquisitionStallDiagnosis(const C4_DEVICE device)
+{
+    const std::string frameTriggerWait = selectorStatusValue(
+        device, "AcquisitionStatusSelector", "AcquisitionStatus", "FrameTriggerWait");
+    const std::string recordingTriggerWait = selectorStatusValue(
+        device, "AcquisitionStatusSelector", "AcquisitionStatus", "RecordingTriggerWait");
+    const std::string frameActive = selectorStatusValue(
+        device, "AcquisitionStatusSelector", "AcquisitionStatus", "FrameActive");
+    const std::string recordingActive = selectorStatusValue(
+        device, "AcquisitionStatusSelector", "AcquisitionStatus", "RecordingActive");
+    const std::string streaming = selectorStatusValue(
+        device, "TransferStatusSelector", "TransferStatus", "Streaming");
+    const std::string stageInMotion = selectorStatusValue(
+        device, "StageStatusSelector", "StageStatus", "InMotion");
+    const auto active = [](const std::string& value) {
+        return value == "1" || value == "true" || value == "True";
+    };
+
+    if (active(frameTriggerWait)) {
+        // FrameTriggerWait is also the normal state after a completed or
+        // aborted frame cycle. A terminal snapshot cannot prove whether the
+        // earlier TriggerSoftware command was consumed.
+        return "frame-trigger-wait-after-timeout-command-consumption-unknown";
+    }
+    if (active(recordingTriggerWait)) {
+        return "frame-start-consumed-but-recording-start-gate-not-satisfied";
+    }
+    if (active(streaming)) {
+        return "device-streaming-but-host-buffer-not-delivered";
+    }
+    if (active(frameActive) || active(recordingActive)) {
+        return "measurement-active-without-transfer-stream";
+    }
+    if (active(stageInMotion)) {
+        return "stage-motion-active-without-recording";
+    }
+    return "device-idle-or-status-unclassified";
 }
 
 FramePartKind framePartKind(const std::string& partType)
@@ -700,56 +932,11 @@ bool writeAndVerifyEnumeration(
     return true;
 }
 
-/** Executes TriggerSoftware against FrameStart and restores the selector cursor. */
-bool executeFrameStartSoftwareTrigger(const C4_DEVICE device, std::string* errorMessage)
-{
-    std::string originalSelector;
-    std::string selectorError;
-    if (!readDeviceEnumerationValue(device, "TriggerSelector", &originalSelector, &selectorError)) {
-        if (errorMessage) *errorMessage = "Could not read TriggerSelector before TriggerSoftware: " + selectorError;
-        return false;
-    }
-
-    const bool selectorChanged = originalSelector != "FrameStart";
-    if (selectorChanged) {
-        const C4HDL_ERROR selectResult = C4Dev_writeEnumeration(device, "TriggerSelector", "FrameStart");
-        if (selectResult != C4HDL_ERR_SUCCESS) {
-            if (errorMessage) *errorMessage = operationError(
-                "C4Dev_writeEnumeration(TriggerSelector=FrameStart)", selectResult);
-            return false;
-        }
-    }
-
-    const C4HDL_ERROR triggerResult = C4Dev_executeCommand(device, "TriggerSoftware");
-    std::string commandError;
-    if (triggerResult != C4HDL_ERR_SUCCESS) {
-        commandError = operationError("C4Dev_executeCommand(TriggerSoftware)", triggerResult);
-    }
-
-    std::string restoreError;
-    if (selectorChanged) {
-        const C4HDL_ERROR restoreResult = C4Dev_writeEnumeration(
-            device, "TriggerSelector", originalSelector.c_str());
-        if (restoreResult != C4HDL_ERR_SUCCESS) {
-            restoreError = operationError("C4Dev_writeEnumeration(TriggerSelector restore)", restoreResult);
-        }
-    }
-
-    if (!commandError.empty() || !restoreError.empty()) {
-        if (errorMessage) {
-            *errorMessage = commandError;
-            if (!restoreError.empty()) {
-                if (!errorMessage->empty()) *errorMessage += "; ";
-                *errorMessage += restoreError;
-            }
-        }
-        return false;
-    }
-    return true;
-}
-
-/** Validates TriggerSoftware access while the selector cursor is FrameStart. */
-bool validateFrameStartSoftwareTrigger(const C4_DEVICE device, std::string* errorMessage)
+/** Validates one-command-per-frame TriggerSoftware access while the cursor is FrameStart. */
+bool validateFrameStartSoftwareTrigger(
+    const C4_DEVICE device,
+    std::string* diagnosticSummary,
+    std::string* errorMessage)
 {
     std::string originalSelector;
     std::string selectorError;
@@ -775,6 +962,35 @@ bool validateFrameStartSoftwareTrigger(const C4_DEVICE device, std::string* erro
     const bool metadataAvailable = findFeatureMetadata(
         device, "TriggerSoftware", &triggerType, &triggerAccess, &metadataError);
 
+    std::int64_t triggerDivider = 0;
+    const C4HDL_ERROR dividerResult = C4Dev_readInteger(
+        device, "TriggerDivider", &triggerDivider);
+    std::int64_t triggerMultiplier = 0;
+    const C4HDL_ERROR multiplierResult = C4Dev_readInteger(
+        device, "TriggerMultiplier", &triggerMultiplier);
+    if (diagnosticSummary) {
+        *diagnosticSummary = "activation=" + readDeviceEnumeration(device, "TriggerActivation")
+            + ", overlap=" + readDeviceEnumeration(device, "TriggerOverlap")
+            + ", delayUs=" + readDeviceFloat(device, "TriggerDelay")
+            + ", divider=" + (dividerResult == C4HDL_ERR_SUCCESS
+                ? std::to_string(triggerDivider)
+                : "<unavailable: " + operationError("C4Dev_readInteger(TriggerDivider)", dividerResult) + ">")
+            + ", multiplier=" + (multiplierResult == C4HDL_ERR_SUCCESS
+                ? std::to_string(triggerMultiplier)
+                : "<unavailable: " + operationError("C4Dev_readInteger(TriggerMultiplier)", multiplierResult) + ">");
+    }
+
+    std::string pulseRatioError;
+    if (dividerResult == C4HDL_ERR_SUCCESS && triggerDivider != 1) {
+        pulseRatioError = "FrameStart TriggerDivider=" + std::to_string(triggerDivider)
+            + " is incompatible with the one-command-per-frame host contract; set it to 1.";
+    }
+    if (multiplierResult == C4HDL_ERR_SUCCESS && triggerMultiplier != 1) {
+        if (!pulseRatioError.empty()) pulseRatioError += " ";
+        pulseRatioError += "FrameStart TriggerMultiplier=" + std::to_string(triggerMultiplier)
+            + " is incompatible with the one-command-per-frame host contract; set it to 1.";
+    }
+
     std::string restoreError;
     if (selectorChanged) {
         const C4HDL_ERROR restoreResult = C4Dev_writeEnumeration(
@@ -785,13 +1001,13 @@ bool validateFrameStartSoftwareTrigger(const C4_DEVICE device, std::string* erro
     }
 
     if (!metadataAvailable || triggerType != FeatureType::Command || !isWritable(triggerAccess)
-        || !restoreError.empty()) {
+        || !pulseRatioError.empty() || !restoreError.empty()) {
         if (errorMessage) {
             *errorMessage = !metadataAvailable
                 ? metadataError
                 : (triggerType != FeatureType::Command || !isWritable(triggerAccess)
                     ? std::string("TriggerSoftware is not an executable FrameStart command.")
-                    : std::string());
+                    : pulseRatioError);
             if (!restoreError.empty()) {
                 if (!errorMessage->empty()) *errorMessage += "; ";
                 *errorMessage += restoreError;
@@ -815,9 +1031,9 @@ bool isLikelyTimeoutError(
         return true;
     }
 
-    // The C API exposes only a generic error code for getBuffer().  Treat a
-    // generic error that consumed the requested wait as a timeout so an armed
-    // external/stage trigger remains armed instead of ending acquisition.
+    // The C API may expose only a generic error code for getBuffer(). Classify
+    // a result that consumed the requested wait so the caller can apply the
+    // software-terminal or external/stage-nonterminal timeout policy.
     const bool genericError = result == C4HDL_ERR_ERROR
         || value.empty()
         || value == "unknown c4utility error."
@@ -956,7 +1172,30 @@ HeliotisC4System::HeliotisC4System(const std::string& sdkRoot)
             + (diaphusLocation.empty() ? std::string("<unavailable>") : diaphusLocation)
             + (locationError.empty() ? std::string() : ". C4Utility: " + locationError));
     }
-    logInfo("C4Utility handler opened with requested Diaphus producer " + diaphusLocation + ".");
+
+    std::string c4HdlVersionError;
+    const std::string c4HdlVersion = readSdkString(
+        [openedHandler](char* buffer, std::size_t* size) {
+            return C4Hdl_getC4HdlVersion(openedHandler, buffer, size);
+        },
+        &c4HdlVersionError);
+    std::string diaphusVersionError;
+    const std::string diaphusVersion = readSdkString(
+        [openedHandler](char* buffer, std::size_t* size) {
+            return C4Hdl_getDiaphusVersion(openedHandler, buffer, size);
+        },
+        &diaphusVersionError);
+    if (!c4HdlVersionError.empty() || !diaphusVersionError.empty()) {
+        logWarning("C4Utility runtime version query was incomplete: C4Hdl="
+            + (c4HdlVersionError.empty() ? std::string("available") : c4HdlVersionError)
+            + ", Diaphus="
+            + (diaphusVersionError.empty() ? std::string("available") : diaphusVersionError) + ".");
+    }
+    logInfo("C4Utility runtime opened: C4HdlVersion="
+        + (c4HdlVersion.empty() ? std::string("<unavailable>") : c4HdlVersion)
+        + ", DiaphusVersion="
+        + (diaphusVersion.empty() ? std::string("<unavailable>") : diaphusVersion)
+        + ", producer=" + diaphusLocation + ".");
     _handler = handlerGuard.release();
 }
 
@@ -1143,6 +1382,7 @@ bool HeliotisC4Device::open(const DeviceDescriptor& descriptor, std::string* err
         _requiresReconnect = false;
         _lastAcquisitionError.clear();
     }
+    logInfo("Opened device identity: " + deviceIdentitySummary(deviceHandle) + ".");
     logInfo("Device open preserved the existing configuration; no capture profile, user set, motion command, or trigger value was applied. Initial snapshot: "
         + deviceConfigurationSnapshotSummary(deviceHandle) + ".");
     dispatchConnectionStatus(true);
@@ -1168,8 +1408,7 @@ void HeliotisC4Device::close()
         std::lock_guard<std::mutex> stateLock(_stateMutex);
         callbackThread = (_activeStatusDispatching
                 && _activeStatusDispatchThreadId == std::this_thread::get_id())
-            || (_acquisitionThread.joinable()
-                && _acquisitionThread.get_id() == std::this_thread::get_id());
+            || _acquisitionWorkerThreadId == std::this_thread::get_id();
         initializationThread = _initializing
             && _initializationThreadId == std::this_thread::get_id();
         initializationPending = _initializing;
@@ -1286,8 +1525,8 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
             }
             return false;
         }
-        if (_acquiring) {
-            if (errorMessage) *errorMessage = "The H8 reference profile cannot be applied during acquisition.";
+        if (_acquiring || _acquisitionWorkerInstalling) {
+            if (errorMessage) *errorMessage = "The H8 reference profile cannot be applied while acquisition is arming or active.";
             return false;
         }
         if (_initializing) {
@@ -1328,21 +1567,50 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
         const char* name;
         const char* value;
     };
-    // Keep the measurement/motion setup aligned with C4Utility 1.12's
-    // h8SurfSimple configuration. Trigger routing remains device-owned: do
-    // not overwrite the user's RecordingStart, AcquisitionStart, or
-    // FrameStart configuration during connection.
-    static constexpr std::array<FeatureWrite, 20> preStageInitWrites{{
+    // Keep the explicit profile aligned with C4Utility 1.12's h8SurfSimple
+    // configuration. Selector-dependent pairs are separate groups so one
+    // unavailable component does not redirect or suppress independent setup.
+    static constexpr std::array<FeatureWrite, 2> intensityWrites{{
         {"ComponentSelector", "Intensity"}, {"ComponentEnable", "0"},
+    }};
+    static constexpr std::array<FeatureWrite, 2> rangeWrites{{
         {"ComponentSelector", "Range"}, {"ComponentEnable", "1"},
+    }};
+    static constexpr std::array<FeatureWrite, 2> reflectanceWrites{{
         {"ComponentSelector", "Reflectance"}, {"ComponentEnable", "1"},
+    }};
+    static constexpr std::array<FeatureWrite, 2> phaseWrites{{
         {"ComponentSelector", "Phase"}, {"ComponentEnable", "0"},
+    }};
+    static constexpr std::array<FeatureWrite, 1> chunkModeWrites{{
         {"ChunkModeActive", "1"},
+    }};
+    static constexpr std::array<FeatureWrite, 2> partCountChunkWrites{{
         {"ChunkSelector", "PartCount"}, {"ChunkEnable", "1"},
+    }};
+    static constexpr std::array<FeatureWrite, 2> partTypeChunkWrites{{
         {"ChunkSelector", "PartType"}, {"ChunkEnable", "1"},
-        {"EncoderSelector", "Camera"}, {"EncoderInverter", "1"},
-        {"ScanPosition", "-1.4"}, {"ScanRange", "0.5"}, {"ScanSpeed", "5.0"},
-        {"GeneralSpeed", "10.0"}, {"ScanMode", "Down"},
+    }};
+    static constexpr std::array<FeatureWrite, 3> recordingTriggerWrites{{
+        {"TriggerSelector", "RecordingStart"},
+        {"TriggerMode", "On"},
+        {"TriggerSource", "Stage"},
+    }};
+    static constexpr std::array<FeatureWrite, 3> frameTriggerWrites{{
+        {"TriggerSelector", "FrameStart"},
+        {"TriggerMode", "On"},
+        {"TriggerSource", "Software"},
+    }};
+    static constexpr std::array<FeatureWrite, 2> encoderWrites{{
+        {"EncoderSelector", "Camera"},
+        {"EncoderInverter", "1"},
+    }};
+    static constexpr std::array<FeatureWrite, 5> motionWrites{{
+        {"ScanPosition", "-1.4"},
+        {"ScanRange", "0.5"},
+        {"ScanSpeed", "5.0"},
+        {"GeneralSpeed", "10.0"},
+        {"ScanMode", "Down"},
     }};
     // A Surface payload remains capturable without these physical-coordinate
     // chunks. Enable them as one selector-dependent optional group when the
@@ -1371,21 +1639,38 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
     }};
 
     bool optionalConfigurationWarning = false;
-    const auto applyWrites = [this, errorMessage, &cancelled](
+    bool requiredConfigurationFailed = false;
+    bool initializationCancelled = false;
+    std::vector<std::string> requiredErrors;
+    const auto recordRequiredFailure = [this, &requiredConfigurationFailed, &requiredErrors](
+        const char* phase,
+        const std::string& detail) {
+        requiredConfigurationFailed = true;
+        const std::string message = std::string(phase) + ": " + detail;
+        requiredErrors.push_back(message);
+        logWarning("H8 required profile group failed: " + message
+            + ". Independent initialization groups will continue.");
+    };
+    const auto applyRequiredGroup = [this, &cancelled, &initializationCancelled, &recordRequiredFailure](
         const auto& steps,
-        const char* phase) {
+        const char* phase,
+        const bool stopAfterFailure) {
+        bool groupSucceeded = true;
         for (std::size_t index = 0; index < steps.size(); ++index) {
-            if (cancelled(phase)) return false;
-            const auto& step = steps[index];
-            logInfo(std::string("H8 reference profile [") + phase + " "
-                + std::to_string(index + 1) + "/" + std::to_string(steps.size()) + "]: "
-                + step.name + "=" + step.value + ".");
-            if (!writeFeature(step.name, step.value, errorMessage)) {
-                logWarning(std::string("H8 reference profile failed at ") + step.name + "=" + step.value + ".");
+            if (cancelled(phase)) {
+                initializationCancelled = true;
                 return false;
             }
+            const auto& step = steps[index];
+            std::string writeError;
+            if (!writeFeature(step.name, step.value, &writeError)) {
+                recordRequiredFailure(phase, std::string(step.name) + "=" + step.value + " failed: "
+                    + (writeError.empty() ? std::string("unknown feature-write error") : writeError));
+                groupSucceeded = false;
+                if (stopAfterFailure) return false;
+            }
         }
-        return true;
+        return groupSucceeded;
     };
     const auto applyOptionalGroup = [this, errorMessage, &cancelled, &optionalConfigurationWarning](
         const auto& steps,
@@ -1393,9 +1678,6 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
         for (std::size_t index = 0; index < steps.size(); ++index) {
             if (cancelled(groupName)) return false;
             const auto& step = steps[index];
-            logInfo(std::string("H8 optional profile [") + groupName + " "
-                + std::to_string(index + 1) + "/" + std::to_string(steps.size()) + "]: "
-                + step.name + "=" + step.value + ".");
             std::string optionalError;
             if (!writeFeature(step.name, step.value, &optionalError)) {
                 optionalConfigurationWarning = true;
@@ -1411,45 +1693,117 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
         return true;
     };
 
-    logInfo("Applying C4Utility h8SurfSimple reference profile to the connected H8.");
-    if (!applyWrites(preStageInitWrites, "pre-stage-init")) return false;
-    if (!applyOptionalGroup(scan3dGeometryChunkWrites, "scan3d-geometry-chunks")) return false;
+    const auto logConfigurationSnapshot = [this](const char* phase) {
+        std::scoped_lock lock(_stateMutex, _sdkMutex);
+        if (!_device) {
+            logWarning(std::string("H8 reference profile ") + phase
+                + " snapshot unavailable because the device is disconnected.");
+            return;
+        }
+        logInfo(std::string("H8 reference profile ") + phase + " snapshot: "
+            + deviceConfigurationSnapshotSummary(_device) + ".");
+    };
 
-    logInfo("H8 reference profile: executing StageInit after motion configuration.");
-    if (!executeCommand("StageInit", errorMessage)) return false;
-
-    constexpr auto initializationTimeout = std::chrono::seconds(30);
-    constexpr auto pollInterval = std::chrono::milliseconds(100);
-    const auto deadline = std::chrono::steady_clock::now() + initializationTimeout;
-    std::int64_t initialized = 0;
-    std::size_t pollCount = 0;
-    do {
-        std::this_thread::sleep_for(pollInterval);
-        if (cancelled("StageInit wait")) return false;
+    logInfo("Applying the complete C4Utility h8SurfSimple capture defaults to the connected H8. Components, chunks, canonical triggers, encoder, motion, processing, and illumination are initialized. Required group failures are accumulated; optional geometry and illumination failures remain warning-only.");
+    applyRequiredGroup(intensityWrites, "component-intensity", true);
+    if (initializationCancelled) return false;
+    applyRequiredGroup(rangeWrites, "component-range", true);
+    if (initializationCancelled) return false;
+    applyRequiredGroup(reflectanceWrites, "component-reflectance", true);
+    if (initializationCancelled) return false;
+    applyRequiredGroup(phaseWrites, "component-phase", true);
+    if (initializationCancelled) return false;
+    applyRequiredGroup(chunkModeWrites, "chunk-mode", true);
+    if (initializationCancelled) return false;
+    applyRequiredGroup(partCountChunkWrites, "chunk-part-count", true);
+    if (initializationCancelled) return false;
+    applyRequiredGroup(partTypeChunkWrites, "chunk-part-type", true);
+    if (initializationCancelled) return false;
+    applyRequiredGroup(recordingTriggerWrites, "trigger-recording-start", true);
+    if (initializationCancelled) return false;
+    {
+        std::string legacyTriggerError;
+        bool legacyTriggerReady = false;
         {
             std::scoped_lock lock(_stateMutex, _sdkMutex);
-            if (!_device) {
-                if (errorMessage) *errorMessage = "Heliotis C4 device disconnected during reference-profile StageInit.";
-                return false;
+            legacyTriggerReady = disableLegacyAcquisitionStartIfPresent(_device, &legacyTriggerError);
+        }
+        if (!legacyTriggerReady) {
+            recordRequiredFailure("trigger-acquisition-start",
+                "AcquisitionStart=Off failed: " + legacyTriggerError);
+        }
+    }
+    applyRequiredGroup(frameTriggerWrites, "trigger-frame-start", true);
+    if (initializationCancelled) return false;
+    const bool encoderConfigured = applyRequiredGroup(
+        encoderWrites, "encoder-defaults", true);
+    if (initializationCancelled) return false;
+    const bool motionConfigured = applyRequiredGroup(
+        motionWrites, "motion-defaults", false);
+    if (initializationCancelled) return false;
+    if (!applyOptionalGroup(scan3dGeometryChunkWrites, "scan3d-geometry-chunks")) return false;
+
+    if (!encoderConfigured || !motionConfigured) {
+        logWarning("H8 reference profile: StageInit was skipped because required encoder or motion defaults were not applied completely. Independent processing and optional illumination groups will continue.");
+    } else {
+        logInfo("H8 reference profile: all encoder and motion defaults were verified; executing StageInit.");
+        std::string stageCommandError;
+        if (!executeCommand("StageInit", &stageCommandError)) {
+            recordRequiredFailure("stage-init", stageCommandError.empty()
+                ? std::string("StageInit command failed") : stageCommandError);
+        } else {
+            constexpr auto initializationTimeout = std::chrono::seconds(30);
+            constexpr auto pollInterval = std::chrono::milliseconds(100);
+            const auto deadline = std::chrono::steady_clock::now() + initializationTimeout;
+            std::int64_t initialized = 0;
+            std::size_t pollCount = 0;
+            bool stageStatusReadable = true;
+            do {
+                std::this_thread::sleep_for(pollInterval);
+                if (cancelled("StageInit wait")) return false;
+                std::string stageStatusError;
+                {
+                    std::scoped_lock lock(_stateMutex, _sdkMutex);
+                    if (!_device) {
+                        if (errorMessage) *errorMessage = "Heliotis C4 device disconnected during reference-profile StageInit.";
+                        return false;
+                    }
+                    if (!check(C4Dev_readInteger(_device, "StageInitialized", &initialized), &stageStatusError)) {
+                        stageStatusReadable = false;
+                    }
+                }
+                if (!stageStatusReadable) {
+                    recordRequiredFailure("stage-init-status", stageStatusError);
+                }
+                ++pollCount;
+                if (pollCount == 1 || initialized != 0 || pollCount % 10 == 0) {
+                    logInfo("H8 reference profile: StageInitialized=" + std::to_string(initialized)
+                        + " (poll " + std::to_string(pollCount) + ").");
+                }
+                if (!stageStatusReadable || initialized != 0) break;
+            } while (std::chrono::steady_clock::now() < deadline);
+            if (stageStatusReadable && initialized == 0) {
+                recordRequiredFailure("stage-init", "StageInit did not finish within 30 seconds");
             }
-            if (!check(C4Dev_readInteger(_device, "StageInitialized", &initialized), errorMessage)) return false;
         }
-        ++pollCount;
-        if (pollCount == 1 || initialized != 0 || pollCount % 10 == 0) {
-            logInfo("H8 reference profile: StageInitialized=" + std::to_string(initialized)
-                + " (poll " + std::to_string(pollCount) + ").");
-        }
-        if (initialized != 0) break;
-    } while (std::chrono::steady_clock::now() < deadline);
-    if (initialized == 0) {
-        if (errorMessage) *errorMessage = "H8 reference-profile StageInit did not finish within 30 seconds.";
-        logWarning("H8 reference profile: StageInit timed out after 30 seconds.");
-        return false;
     }
 
-    if (!applyWrites(postStageInitWrites, "post-stage-init")) return false;
+    applyRequiredGroup(postStageInitWrites, "post-stage-init", false);
+    if (initializationCancelled) return false;
     if (!applyOptionalGroup(lightControllerWrites, "light-controller")) return false;
     if (!applyOptionalGroup(userOutputWrites, "user-output")) return false;
+    logConfigurationSnapshot("after");
+    std::string initializedMotionConfiguration;
+    {
+        std::scoped_lock lock(_stateMutex, _sdkMutex);
+        if (!_device) {
+            if (errorMessage) *errorMessage = "Heliotis C4 device disconnected before H8 profile verification.";
+            return false;
+        }
+        initializedMotionConfiguration = deviceMotionConfigurationSummary(_device);
+    }
+    logInfo("H8 initialized encoder/motion readback: {"
+        + initializedMotionConfiguration + "}. Expected defaults: {EncoderSelector=Camera, EncoderInverter=1, ScanPosition=-1.4, ScanRange=0.5, ScanSpeed=5.0, GeneralSpeed=10.0, ScanMode=Down}.");
     TriggerConfigurationSnapshot triggerSnapshot;
     {
         std::scoped_lock lock(_stateMutex, _sdkMutex);
@@ -1459,29 +1813,42 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
         }
         triggerSnapshot = readTriggerConfigurationSnapshot(_device);
     }
-    const std::string completionSummary = "H8 reference profile completed; required Range/Reflectance, multipart identity chunks, motion, and processing are configured. "
-        "Existing trigger configuration is preserved: "
+    const std::string completionSummary = "H8 reference profile completed; required Range/Reflectance, multipart identity chunks, canonical trigger routing, encoder, motion, and processing defaults were requested. "
+        "Resulting trigger configuration: "
         + triggerConfigurationSnapshotSummary(triggerSnapshot) + ".";
-    if (optionalConfigurationWarning) {
+    if (requiredConfigurationFailed) {
+        logWarning(completionSummary + " One or more required groups failed; capture controls remain available for diagnosis or retry.");
+    } else if (optionalConfigurationWarning) {
         logWarning(completionSummary + " Optional capability configuration has warnings; acquisition remains available.");
     } else {
         logInfo(completionSummary + " Optional Scan3d geometry and illumination capabilities are configured.");
     }
     if (!triggerSnapshot.selectorReadable || !triggerSnapshot.restoreSucceeded) {
-        logWarning("H8 trigger readiness could not be verified after profile initialization; acquisition arm will fail closed until all selectors can be inspected and restored.");
+        logWarning("H8 trigger configuration could not be verified after profile initialization; acquisition arm will fail closed until all selectors can be inspected and restored.");
     } else {
         const internal::AcquisitionTriggerPlan triggerPlan = internal::evaluateAcquisitionTriggerPlan(
             triggerSnapshot.acquisitionStart,
             triggerSnapshot.frameStart,
             triggerSnapshot.recordingStart);
         if (!triggerPlan.valid) {
-            logWarning("H8 profile initialization succeeded, but the preserved trigger configuration is not armable: "
+            logWarning("H8 profile initialization completed, but the resulting trigger configuration is not armable: "
                 + triggerPlan.error);
         } else if (!triggerPlan.warning.empty()) {
-            logWarning("H8 preserved trigger plan: " + triggerPlan.summary() + ".");
+            logWarning("H8 initialized trigger plan: " + triggerPlan.summary() + ".");
         } else {
-            logInfo("H8 preserved trigger plan: " + triggerPlan.summary() + ".");
+            logInfo("H8 initialized trigger plan: " + triggerPlan.summary() + ".");
         }
+    }
+    if (requiredConfigurationFailed) {
+        std::ostringstream combinedError;
+        combinedError << "H8 reference-profile initialization completed with "
+                      << requiredErrors.size() << " required group failure(s)";
+        for (std::size_t index = 0; index < requiredErrors.size(); ++index) {
+            combinedError << (index == 0 ? ": " : "; ") << requiredErrors[index];
+        }
+        combinedError << ". Connection and capture controls remain available.";
+        if (errorMessage) *errorMessage = combinedError.str();
+        return false;
     }
     return true;
         }();
@@ -1516,8 +1883,8 @@ bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
             }
             return false;
         }
-        if (_acquiring) {
-            if (errorMessage) *errorMessage = "Heliotis motion cannot be initialized during acquisition.";
+        if (_acquiring || _acquisitionWorkerInstalling) {
+            if (errorMessage) *errorMessage = "Heliotis motion cannot be initialized while acquisition is arming or active.";
             return false;
         }
         if (_initializing) {
@@ -1556,7 +1923,19 @@ bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
                 }
                 initialSnapshot = deviceConfigurationSnapshotSummary(_device);
             }
-            logInfo("Stage Init operation started. Policy: inspect StageInitialized and execute only StageInit when false; no capture-profile or trigger values are written. Initial snapshot: "
+
+            std::string legacyTriggerError;
+            bool legacyTriggerReady = false;
+            {
+                std::scoped_lock lock(_stateMutex, _sdkMutex);
+                legacyTriggerReady = disableLegacyAcquisitionStartIfPresent(
+                    _device, &legacyTriggerError);
+            }
+            if (!legacyTriggerReady) {
+                logWarning("Stage Init could not prepare AcquisitionStart=Off, but motion initialization will continue independently: "
+                    + legacyTriggerError);
+            }
+            logInfo("Stage Init operation started. Policy: attempt legacy AcquisitionStart cleanup when exposed, log the pre-command StageInitialized state, and always execute StageInit so the device StageInitMode controls reinitialization; no other capture-profile, processing, illumination, user-set, or trigger values are written. Initial snapshot: "
                 + initialSnapshot + ".");
 
             const auto cancelled = [this, errorMessage](const char* phase) {
@@ -1567,49 +1946,48 @@ bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
                 logWarning(message);
                 return true;
             };
-            const auto readInitialized = [this, errorMessage](std::int64_t* initialized) {
+            const auto readInitialized = [this](
+                std::int64_t* initialized,
+                std::string* statusError) {
                 std::scoped_lock lock(_stateMutex, _sdkMutex);
                 if (!_device) {
-                    if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
+                    if (statusError) *statusError = "Heliotis C4 device is not connected.";
                     return false;
                 }
                 if (_requiresReconnect) {
-                    if (errorMessage) {
-                        *errorMessage = "The previous acquisition did not stop cleanly. Disconnect and reconnect before motion initialization.";
+                    if (statusError) {
+                        *statusError = "The previous acquisition did not stop cleanly. Disconnect and reconnect before motion initialization.";
                     }
                     return false;
                 }
-                if (_acquiring) {
-                    if (errorMessage) *errorMessage = "Heliotis acquisition started while motion initialization was running.";
+                if (_acquiring || _acquisitionWorkerInstalling) {
+                    if (statusError) *statusError = "Heliotis acquisition started arming while motion initialization was running.";
                     return false;
                 }
                 if (_initializing && _initializationThreadId != std::this_thread::get_id()) {
-                    if (errorMessage) *errorMessage = "Another Heliotis initialization operation owns the device.";
+                    if (statusError) *statusError = "Another Heliotis initialization operation owns the device.";
                     return false;
                 }
-                if (!check(C4Dev_readInteger(_device, "StageInitialized", initialized), errorMessage)) {
-                    if (errorMessage && !errorMessage->empty()) {
-                        *errorMessage = "Could not read H8 StageInitialized: " + *errorMessage;
+                if (!check(C4Dev_readInteger(_device, "StageInitialized", initialized), statusError)) {
+                    if (statusError && !statusError->empty()) {
+                        *statusError = "Could not read H8 StageInitialized: " + *statusError;
                     }
                     return false;
                 }
                 return true;
             };
 
-            if (cancelled("readiness check")) return false;
+            if (cancelled("pre-command diagnostic")) return false;
             std::int64_t initialized = 0;
-            if (!readInitialized(&initialized)) {
-                logWarning("Stage Init availability check failed. The connection and existing capture configuration remain usable: "
-                    + (errorMessage && !errorMessage->empty()
-                        ? *errorMessage
-                        : std::string("StageInitialized is unavailable")) + ".");
-                return false;
-            }
-            logInfo("Stage Init availability check: StageInitialized=" + std::to_string(initialized) + ".");
-            if (initialized != 0) {
-                logInfo("Stage Init skipped because motion is already initialized. No device value was changed. State: "
-                    + initialSnapshot + ".");
-                return true;
+            std::string preCommandStatusError;
+            if (!readInitialized(&initialized, &preCommandStatusError)) {
+                logWarning("StageInitialized pre-command diagnostic is unavailable; StageInit will still execute: "
+                    + (preCommandStatusError.empty()
+                        ? std::string("StageInitialized is unavailable")
+                        : preCommandStatusError) + ".");
+            } else {
+                logInfo("Stage Init pre-command state: StageInitialized=" + std::to_string(initialized)
+                    + ". The command will still execute so StageInitMode remains authoritative.");
             }
 
             const auto commandStarted = std::chrono::steady_clock::now();
@@ -1623,12 +2001,12 @@ bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
                     if (errorMessage) *errorMessage = "H8 motion initialization was cancelled before StageInit.";
                     return false;
                 }
-                logInfo("Executing the StageInit command because StageInitialized is false; the stage may move.");
+                logInfo("Executing the StageInit command; the stage may move. StageInitMode from the device preset determines whether and how reinitialization occurs.");
                 if (!check(C4Dev_executeCommand(_device, "StageInit"), errorMessage)) {
                     if (errorMessage && !errorMessage->empty()) {
                         *errorMessage = "Could not start H8 StageInit: " + *errorMessage;
                     }
-                    logWarning("StageInit command failed; no capture-profile or trigger value was changed. State: "
+                    logWarning("StageInit command failed; no capture-profile or other trigger value was changed. Legacy AcquisitionStart cleanup was handled independently. State: "
                         + motionDeviceStateSummary(_device) + ".");
                     return false;
                 }
@@ -1639,7 +2017,11 @@ bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
             do {
                 std::this_thread::sleep_for(pollInterval);
                 if (cancelled("StageInit wait")) return false;
-                if (!readInitialized(&initialized)) return false;
+                std::string statusError;
+                if (!readInitialized(&initialized, &statusError)) {
+                    if (errorMessage) *errorMessage = statusError;
+                    return false;
+                }
                 ++pollCount;
                 if (pollCount == 1 || initialized != 0 || pollCount % 10 == 0) {
                     std::string pollState;
@@ -1702,8 +2084,8 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
         if (errorMessage) *errorMessage = "Feature refresh is unavailable while H8 initialization is running.";
         return features;
     }
-    if (_acquiring) {
-        if (errorMessage) *errorMessage = "Feature refresh is unavailable while Heliotis acquisition is armed.";
+    if (_acquiring || _acquisitionWorkerInstalling) {
+        if (errorMessage) *errorMessage = "Feature refresh is unavailable while Heliotis acquisition is arming or armed.";
         return features;
     }
     C4_FEATUREINFO* featureList = nullptr;
@@ -1794,8 +2176,8 @@ bool HeliotisC4Device::writeFeature(
         if (errorMessage) *errorMessage = "Feature writes are unavailable while H8 initialization is running.";
         return false;
     }
-    if (_acquiring) {
-        if (errorMessage) *errorMessage = "Feature writes are unavailable while Heliotis acquisition is armed.";
+    if (_acquiring || _acquisitionWorkerInstalling) {
+        if (errorMessage) *errorMessage = "Feature writes are unavailable while Heliotis acquisition is arming or armed.";
         return false;
     }
     FeatureType type = FeatureType::Unknown;
@@ -1888,9 +2270,9 @@ bool HeliotisC4Device::executeCommand(const std::string& name, std::string* erro
         if (errorMessage) *errorMessage = "Commands are unavailable while H8 initialization is running.";
         return false;
     }
-    if (_acquiring) {
+    if (_acquiring || _acquisitionWorkerInstalling) {
         if (errorMessage) {
-            *errorMessage = "Commands are unavailable while Heliotis acquisition is armed; "
+            *errorMessage = "Commands are unavailable while Heliotis acquisition is arming or armed; "
                 "use triggerSoftware() for FrameStart.";
         }
         return false;
@@ -2007,7 +2389,9 @@ bool HeliotisC4Device::startAcquisition(
     C4_DEVICE device = nullptr;
     bool softwareTriggered = false;
     bool softwareTriggerAvailable = false;
+    bool restoreTriggerSelector = false;
     bool restoreAcquisitionMode = false;
+    std::string originalTriggerSelector;
     std::string originalAcquisitionMode;
     std::string triggerDiagnosticSummary;
     std::uint64_t acquisitionId = 0;
@@ -2047,6 +2431,7 @@ bool HeliotisC4Device::startAcquisition(
                   "frame parsing will report any missing semantic metadata.");
         }
         const TriggerConfigurationSnapshot triggerSnapshot = readTriggerConfigurationSnapshot(device);
+        originalTriggerSelector = triggerSnapshot.selectedSelector;
         triggerDiagnosticSummary = triggerConfigurationSnapshotSummary(triggerSnapshot);
         logInfo("Acquisition trigger snapshot: " + triggerDiagnosticSummary + ".");
         if (!triggerSnapshot.selectorReadable) {
@@ -2081,16 +2466,25 @@ bool HeliotisC4Device::startAcquisition(
         }
         softwareTriggerAvailable = triggerPlan.usesHostSoftwareTrigger();
         softwareTriggered = softwareTriggerAvailable;
+        const std::string workerMode = softwareTriggered
+            ? "software-trigger-then-buffer"
+            : "buffer-poll";
         logInfo("Acquisition trigger plan: " + triggerPlan.summary()
-            + ", workerMode=" + (softwareTriggered ? std::string("software-wait") : std::string("buffer-poll"))
+            + ", workerMode=" + workerMode
             + ".");
         if (softwareTriggerAvailable) {
             std::string triggerValidationError;
-            if (!validateFrameStartSoftwareTrigger(device, &triggerValidationError)) {
+            std::string frameStartControlSummary;
+            if (!validateFrameStartSoftwareTrigger(
+                    device, &frameStartControlSummary, &triggerValidationError)) {
                 if (errorMessage) *errorMessage = "TriggerSoftware is unavailable for FrameStart: "
                     + triggerValidationError;
+                logWarning("FrameStart software trigger validation failed: " + triggerValidationError
+                    + " controls={" + frameStartControlSummary + "}.");
                 return false;
             }
+            triggerDiagnosticSummary += ", FrameStartControls={" + frameStartControlSummary + "}";
+            logInfo("FrameStart software trigger controls: " + frameStartControlSummary + ".");
         }
         std::string acquisitionModeError;
         if (!readDeviceEnumerationValue(
@@ -2100,33 +2494,20 @@ bool HeliotisC4Device::startAcquisition(
             }
             return false;
         }
-        const std::string requestedAcquisitionMode = mode == AcquisitionMode::SingleFrame
-            ? "SingleFrame"
-            : "Continuous";
+        // The vendor H8 surface sequence acquires through Continuous mode.
+        // Single is a host completion policy: stop after the first copied buffer.
+        const std::string requestedAcquisitionMode = "Continuous";
         restoreAcquisitionMode = originalAcquisitionMode != requestedAcquisitionMode;
         logInfo("AcquisitionMode policy [arm=" + std::to_string(acquisitionId)
             + "]: original=" + originalAcquisitionMode
-            + ", requested=" + requestedAcquisitionMode
+            + ", deviceRequested=" + requestedAcquisitionMode
+            + ", hostCompletion=" + (mode == AcquisitionMode::SingleFrame
+                ? std::string("first-buffer")
+                : std::string("explicit-stop"))
             + ", changed=" + (restoreAcquisitionMode ? "true" : "false") + ".");
-        if (restoreAcquisitionMode) {
-            std::string modeApplyError;
-            if (!writeAndVerifyEnumeration(
-                    device, "AcquisitionMode", requestedAcquisitionMode, &modeApplyError)) {
-                std::string rollbackError;
-                if (!writeAndVerifyEnumeration(
-                        device, "AcquisitionMode", originalAcquisitionMode, &rollbackError)) {
-                    modeApplyError += "; rollback failed: " + rollbackError;
-                }
-                if (errorMessage) *errorMessage = modeApplyError;
-                logWarning("Acquisition arm failed while applying AcquisitionMode="
-                    + requestedAcquisitionMode + ": " + modeApplyError);
-                return false;
-            }
-        }
-        // h8SurfSimple always starts with four C4Utility-managed receive slots.
-        // A single logical capture still needs this transport queue; it stops
-        // after the first deep-copied frame.
-        constexpr std::int64_t bufferCount = 4;
+        // h8SurfSimple uses four C4Utility-managed receive slots. The
+        // acquisition worker creates that transport queue on the same thread
+        // that later issues triggers, receives buffers, and stops the SDK.
         std::int64_t payloadSize = 0;
         if (C4Dev_readInteger(device, "PayloadSize", &payloadSize) == C4HDL_ERR_SUCCESS) {
             logInfo("H8 acquisition payload size=" + std::to_string(payloadSize) + " byte(s).");
@@ -2135,51 +2516,38 @@ bool HeliotisC4Device::startAcquisition(
         }
         logInfo("Acquisition device state before start [arm=" + std::to_string(acquisitionId)
             + "]: " + acquisitionDeviceStateSummary(device) + ".");
-        logInfo(std::string("Calling C4Dev_startAcquisition [arm=") + std::to_string(acquisitionId)
-            + "] with " + std::to_string(bufferCount)
-            + " C4Utility receive buffer slot(s). triggerState=" + triggerDiagnosticSummary + ".");
-        const auto sdkStartStarted = std::chrono::steady_clock::now();
-        const C4HDL_ERROR startResult = C4Dev_startAcquisition(device, bufferCount);
-        const auto sdkStartElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - sdkStartStarted);
-        if (startResult != C4HDL_ERR_SUCCESS) {
-            const std::string startError = operationError("C4Dev_startAcquisition", startResult);
-            if (errorMessage) *errorMessage = startError;
-            logWarning("C4Dev_startAcquisition failed [arm=" + std::to_string(acquisitionId)
-                + ", elapsedMs=" + std::to_string(sdkStartElapsed.count()) + "]: " + startError
-                + ". Device state: " + acquisitionDeviceStateSummary(device) + ".");
-            if (restoreAcquisitionMode) {
-                std::string restoreError;
-                if (!writeAndVerifyEnumeration(
-                        device, "AcquisitionMode", originalAcquisitionMode, &restoreError)) {
-                    logWarning("AcquisitionMode rollback failed after arm failure: " + restoreError);
-                    if (errorMessage) *errorMessage += "; AcquisitionMode rollback failed: " + restoreError;
-                }
-            }
-            return false;
+        logInfo("Surface recording plan before start [arm=" + std::to_string(acquisitionId)
+            + "]: " + surfaceRecordingPlanSummary(device) + ".");
+        if (softwareTriggered) {
+            restoreTriggerSelector = originalTriggerSelector != "FrameStart";
+            logInfo("TriggerSelector will be pinned to FrameStart by the SDK lifecycle worker [arm="
+                + std::to_string(acquisitionId)
+                + ", original=" + originalTriggerSelector
+                + ", restoreAfterStop=" + (restoreTriggerSelector ? "true" : "false")
+                + "].");
         }
-        logInfo("C4Dev_startAcquisition succeeded [arm=" + std::to_string(acquisitionId)
-            + ", elapsedMs=" + std::to_string(sdkStartElapsed.count())
-            + "]. Device state after start: " + acquisitionDeviceStateSummary(device) + ".");
-
         _stopAcquisitionRequested.store(false);
         {
             std::lock_guard<std::mutex> triggerLock(_triggerMutex);
             _pendingSoftwareTriggers = 0;
             _softwareTriggerInFlight = false;
         }
-        _softwareTriggeredAcquisition = softwareTriggered;
-        _softwareTriggerAvailable = softwareTriggerAvailable;
-        _acquiring = true;
+        _softwareTriggeredAcquisition = false;
+        _softwareTriggerAvailable = false;
+        _acquiring = false;
         _acquisitionWorkerInstalling = true;
-        _activeAcquisitionId = acquisitionId;
+        _activeAcquisitionId = 0;
         _lastAcquisitionError.clear();
     }
+
+    {
+        std::lock_guard<std::mutex> startLock(_acquisitionStartMutex);
+        _acquisitionStartCompleted = false;
+        _acquisitionStartSucceeded = false;
+        _acquisitionStartError.clear();
+        _acquisitionWorkerReleased = false;
+    }
     try {
-        {
-            std::lock_guard<std::mutex> startLock(_acquisitionStartMutex);
-            _acquisitionWorkerReleased = false;
-        }
         std::thread worker(
             &HeliotisC4Device::acquisitionLoop,
             this,
@@ -2188,42 +2556,17 @@ bool HeliotisC4Device::startAcquisition(
             softwareTriggered,
             std::move(triggerDiagnosticSummary),
             acquisitionId,
+            originalTriggerSelector,
+            restoreTriggerSelector,
             originalAcquisitionMode,
             restoreAcquisitionMode,
             std::move(frameCallback));
         {
             std::lock_guard<std::mutex> lock(_stateMutex);
             _acquisitionThread = std::move(worker);
-            _acquisitionWorkerInstalling = false;
         }
-        _acquisitionWorkerCondition.notify_all();
     } catch (const std::exception& exception) {
-        C4HDL_ERROR stopResult = C4HDL_ERR_ERROR;
-        std::string stopError;
-        {
-            std::lock_guard<std::mutex> lock(_sdkMutex);
-            stopResult = C4Dev_stopAcquisition(device);
-            if (stopResult != C4HDL_ERR_SUCCESS) {
-                stopError = operationError("C4Dev_stopAcquisition", stopResult);
-            }
-            if (stopResult == C4HDL_ERR_SUCCESS && restoreAcquisitionMode) {
-                std::string restoreError;
-                if (!writeAndVerifyEnumeration(
-                        device, "AcquisitionMode", originalAcquisitionMode, &restoreError)) {
-                    logWarning("AcquisitionMode rollback failed after worker creation failure: " + restoreError);
-                }
-            } else if (stopResult != C4HDL_ERR_SUCCESS && restoreAcquisitionMode) {
-                logWarning("AcquisitionMode rollback was skipped after worker creation failure because SDK stop failed.");
-            }
-        }
         std::string workerError = exception.what();
-        if (stopResult != C4HDL_ERR_SUCCESS) {
-            {
-                std::lock_guard<std::mutex> stateLock(_stateMutex);
-                _requiresReconnect = true;
-            }
-            workerError += "; " + stopError + ". Reconnect is required.";
-        }
         setAcquisitionError(workerError);
         {
             std::lock_guard<std::mutex> stateLock(_stateMutex);
@@ -2238,6 +2581,46 @@ bool HeliotisC4Device::startAcquisition(
         return false;
     }
 
+    bool sdkStartSucceeded = false;
+    std::string sdkStartError;
+    {
+        std::unique_lock<std::mutex> startLock(_acquisitionStartMutex);
+        _acquisitionStartCondition.wait(startLock, [this] {
+            return _acquisitionStartCompleted;
+        });
+        sdkStartSucceeded = _acquisitionStartSucceeded;
+        sdkStartError = _acquisitionStartError;
+    }
+    if (!sdkStartSucceeded) {
+        std::thread failedWorker;
+        {
+            std::lock_guard<std::mutex> stateLock(_stateMutex);
+            _acquisitionWorkerInstalling = false;
+            _softwareTriggeredAcquisition = false;
+            _softwareTriggerAvailable = false;
+            _acquiring = false;
+            _activeAcquisitionId = 0;
+            if (_acquisitionThread.joinable()) failedWorker = std::move(_acquisitionThread);
+        }
+        _acquisitionWorkerCondition.notify_all();
+        if (failedWorker.joinable()) failedWorker.join();
+        if (sdkStartError.empty()) {
+            sdkStartError = "The Heliotis acquisition worker could not start C4Utility acquisition.";
+        }
+        setAcquisitionError(sdkStartError);
+        if (errorMessage) *errorMessage = sdkStartError;
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> stateLock(_stateMutex);
+        _softwareTriggeredAcquisition = softwareTriggered;
+        _softwareTriggerAvailable = softwareTriggerAvailable;
+        _acquiring = true;
+        _acquisitionWorkerInstalling = false;
+        _activeAcquisitionId = acquisitionId;
+    }
+    _acquisitionWorkerCondition.notify_all();
     {
         std::lock_guard<std::mutex> stateLock(_stateMutex);
         _activeStatusDispatching = true;
@@ -2256,6 +2639,7 @@ bool HeliotisC4Device::startAcquisition(
     _acquisitionStartCondition.notify_all();
     logInfo(std::string("Acquisition arm dispatch completed [arm=") + std::to_string(acquisitionId)
         + "]: mode=" + modeName
+        + ", sdkLifecycleOwner=single-worker-thread"
         + ", active=" + (isAcquiring() ? "true" : "false") + ".");
     return true;
 }
@@ -2274,11 +2658,25 @@ void HeliotisC4Device::requestStopAcquisition() noexcept
         std::lock_guard<std::mutex> triggerLock(_triggerMutex);
         _pendingSoftwareTriggers = 0;
     }
+    _acquisitionStartCondition.notify_all();
     _triggerCondition.notify_all();
 }
 
 void HeliotisC4Device::stopAcquisition()
 {
+    bool callbackThread = false;
+    {
+        std::lock_guard<std::mutex> stateLock(_stateMutex);
+        callbackThread = (_activeStatusDispatching
+                && _activeStatusDispatchThreadId == std::this_thread::get_id())
+            || _acquisitionWorkerThreadId == std::this_thread::get_id();
+    }
+    if (callbackThread) {
+        requestStopAcquisition();
+        logInfo("Synchronous stop was converted to a non-blocking request inside an acquisition callback.");
+        return;
+    }
+
     // Only one teardown owner may move/join the worker and publish the final
     // inactive state. Without this fence, two synchronous callers can let the
     // second one clear the stop flag while the first is still joining.
@@ -2286,18 +2684,28 @@ void HeliotisC4Device::stopAcquisition()
     requestStopAcquisition();
 
     std::thread worker;
+    bool workerStopSignalRequired = false;
     {
         std::unique_lock<std::mutex> lock(_stateMutex);
-        if (_activeStatusDispatching
-            && _activeStatusDispatchThreadId == std::this_thread::get_id()) {
-            logInfo("Synchronous stop was converted to a non-blocking request inside the active status callback.");
-            return;
-        }
         _acquisitionWorkerCondition.wait(lock, [this] {
             return !_acquisitionWorkerInstalling;
         });
         if (!_acquisitionThread.joinable() && !_acquiring) return;
+        // requestStopAcquisition() may have run before the installing thread
+        // was published. Reassert the stop flag after installation so moving
+        // and joining a newly visible worker can never leave it waiting for a
+        // trigger indefinitely.
+        _stopAcquisitionRequested.store(true);
+        workerStopSignalRequired = true;
         worker = std::move(_acquisitionThread);
+    }
+    if (workerStopSignalRequired) {
+        {
+            std::lock_guard<std::mutex> triggerLock(_triggerMutex);
+            _pendingSoftwareTriggers = 0;
+        }
+        _acquisitionStartCondition.notify_all();
+        _triggerCondition.notify_all();
     }
     if (worker.joinable() && worker.get_id() == std::this_thread::get_id()) {
         std::lock_guard<std::mutex> lock(_stateMutex);
@@ -2441,7 +2849,7 @@ bool HeliotisC4Device::copyFrame(
 
         std::vector<std::int64_t> dimensions;
         if (!readBufferPartDimensions(
-                buffer, partIndex, detailedDiagnostics, &dimensions, errorMessage)) return false;
+                buffer, partIndex, &dimensions, errorMessage)) return false;
 
         std::uint64_t expectedSamples = 1;
         for (const std::int64_t dimension : dimensions) {
@@ -2486,7 +2894,6 @@ bool HeliotisC4Device::copyFrame(
         part.height = height;
         part.bitsPerSample = sourceBitsPerSample(pixelFormatName);
         double fixedPointScale = 1.0;
-        bool hasFixedPointScale = false;
         const bool floatingPointSamples = usesFloatingPointSamples(pixelFormatName);
         if (!floatingPointSamples
             && C4Buf_readFloat(buffer, "ChunkPartFixpointScaling", &fixedPointScale) == C4HDL_ERR_SUCCESS) {
@@ -2495,16 +2902,7 @@ bool HeliotisC4Device::copyFrame(
                 return false;
             }
             part.sampleScale = fixedPointScale;
-            hasFixedPointScale = true;
         }
-        const std::string partDiagnosticPrefix = "C4Utility buffer part " + std::to_string(partIndex)
-            + " type=" + partName
-            + ", pixelFormat=" + pixelFormatName
-            + ", reader=" + (floatingPointSamples ? "float" : "uint16")
-            + ", ChunkPartFixpointScaling="
-            + (hasFixedPointScale ? std::to_string(fixedPointScale) : "unavailable")
-            + ", appliedScale=" + std::to_string(part.sampleScale)
-            + ", ";
         std::uint32_t sampleCount = static_cast<std::uint32_t>(expectedSamples);
         if (floatingPointSamples) {
             std::vector<double> samples;
@@ -2516,10 +2914,6 @@ bool HeliotisC4Device::copyFrame(
                     },
                     &samples,
                     errorMessage)) return false;
-            if (detailedDiagnostics) {
-                logInfo(partDiagnosticPrefix + "sourceBits="
-                    + std::to_string(part.bitsPerSample) + ", " + sampleDiagnostics(samples) + ".");
-            }
             part.samples = std::move(samples);
         } else {
             std::vector<std::uint16_t> samples;
@@ -2531,10 +2925,6 @@ bool HeliotisC4Device::copyFrame(
                     },
                     &samples,
                     errorMessage)) return false;
-            if (detailedDiagnostics) {
-                logInfo(partDiagnosticPrefix + "sourceBits="
-                    + std::to_string(part.bitsPerSample) + ", " + sampleDiagnostics(samples) + ".");
-            }
             part.samples = std::move(samples);
         }
         copied.parts.push_back(std::move(part));
@@ -2561,27 +2951,148 @@ void HeliotisC4Device::acquisitionLoop(
     const bool softwareTriggered,
     std::string triggerDiagnosticSummary,
     const std::uint64_t acquisitionId,
+    std::string originalTriggerSelector,
+    const bool restoreTriggerSelector,
     std::string originalAcquisitionMode,
     const bool restoreAcquisitionMode,
     FrameCallback frameCallback)
 {
+    constexpr std::int64_t bufferCount = 4;
+    std::ostringstream workerThreadStream;
+    workerThreadStream << std::this_thread::get_id();
+    const std::string workerThreadId = workerThreadStream.str();
+    {
+        std::lock_guard<std::mutex> stateLock(_stateMutex);
+        _acquisitionWorkerThreadId = std::this_thread::get_id();
+    }
+    logInfo("Acquisition SDK lifecycle worker entered [arm="
+        + std::to_string(acquisitionId)
+        + ", threadId=" + workerThreadId
+        + ", owns=C4Dev_startAcquisition|TriggerSoftware|getBuffer|C4Dev_stopAcquisition].");
+
+    bool sdkStartSucceeded = false;
+    std::string sdkStartError;
+    std::chrono::milliseconds sdkStartElapsed{};
+    bool acquisitionModeApplyAttempted = false;
+    bool triggerSelectorApplyAttempted = false;
+    bool sdkStartAttempted = false;
+    std::string setupFailureStage;
+    {
+        std::lock_guard<std::mutex> lock(_sdkMutex);
+        if (restoreAcquisitionMode) {
+            acquisitionModeApplyAttempted = true;
+            std::string modeApplyError;
+            if (!writeAndVerifyEnumeration(
+                    device, "AcquisitionMode", "Continuous", &modeApplyError)) {
+                setupFailureStage = "AcquisitionMode";
+                sdkStartError = "AcquisitionMode=Continuous apply failed: " + modeApplyError;
+            }
+        }
+        if (sdkStartError.empty() && softwareTriggered) {
+            triggerSelectorApplyAttempted = true;
+            std::string selectorApplyError;
+            if (!writeAndVerifyEnumeration(
+                    device, "TriggerSelector", "FrameStart", &selectorApplyError)) {
+                setupFailureStage = "TriggerSelector";
+                sdkStartError = "TriggerSelector=FrameStart apply failed: " + selectorApplyError;
+            } else {
+                logInfo("TriggerSelector pinned to FrameStart by the SDK lifecycle worker [arm="
+                    + std::to_string(acquisitionId)
+                    + ", threadId=" + workerThreadId
+                    + ", sameThreadAsSdkStart=true, original=" + originalTriggerSelector
+                    + ", restoreAfterStop=" + (restoreTriggerSelector ? "true" : "false")
+                    + "].");
+            }
+        }
+        if (sdkStartError.empty()) {
+            logInfo("Worker-owned acquisition configuration applied [arm="
+                + std::to_string(acquisitionId)
+                + ", threadId=" + workerThreadId
+                + ", AcquisitionMode=" + readDeviceEnumeration(device, "AcquisitionMode")
+                + ", TriggerSelector=" + readDeviceEnumeration(device, "TriggerSelector")
+                + "].");
+            logInfo("Calling worker-owned C4Dev_startAcquisition [arm="
+                + std::to_string(acquisitionId)
+                + ", threadId=" + workerThreadId
+                + ", buffers=" + std::to_string(bufferCount)
+                + ", triggerState=" + triggerDiagnosticSummary + "].");
+            sdkStartAttempted = true;
+            const auto sdkStartStarted = std::chrono::steady_clock::now();
+            const C4HDL_ERROR startResult = C4Dev_startAcquisition(device, bufferCount);
+            sdkStartElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - sdkStartStarted);
+            sdkStartSucceeded = startResult == C4HDL_ERR_SUCCESS;
+            if (!sdkStartSucceeded) {
+                setupFailureStage = "C4Dev_startAcquisition";
+                sdkStartError = operationError("C4Dev_startAcquisition", startResult);
+            }
+        }
+        if (!sdkStartSucceeded) {
+            const std::string startFailureState = acquisitionDeviceStateSummary(device);
+            if (triggerSelectorApplyAttempted && restoreTriggerSelector) {
+                std::string restoreError;
+                if (!writeAndVerifyEnumeration(
+                        device, "TriggerSelector", originalTriggerSelector, &restoreError)) {
+                    sdkStartError += "; TriggerSelector rollback failed: " + restoreError;
+                }
+            }
+            if (acquisitionModeApplyAttempted && restoreAcquisitionMode) {
+                std::string restoreError;
+                if (!writeAndVerifyEnumeration(
+                        device, "AcquisitionMode", originalAcquisitionMode, &restoreError)) {
+                    sdkStartError += "; AcquisitionMode rollback failed: " + restoreError;
+                }
+            }
+            logWarning("Worker-owned acquisition setup failed [arm="
+                + std::to_string(acquisitionId)
+                + ", threadId=" + workerThreadId
+                + ", stage=" + setupFailureStage
+                + ", sdkStartAttempted=" + (sdkStartAttempted ? "true" : "false")
+                + ", elapsedMs=" + std::to_string(sdkStartElapsed.count())
+                + "]: " + sdkStartError
+                + ". Device state: " + startFailureState + ".");
+        }
+    }
+    {
+        std::lock_guard<std::mutex> startLock(_acquisitionStartMutex);
+        _acquisitionStartSucceeded = sdkStartSucceeded;
+        _acquisitionStartError = sdkStartError;
+        _acquisitionStartCompleted = true;
+    }
+    _acquisitionStartCondition.notify_all();
+    if (!sdkStartSucceeded) {
+        std::lock_guard<std::mutex> stateLock(_stateMutex);
+        _acquisitionWorkerThreadId = {};
+        return;
+    }
+
+    logInfo("Worker-owned C4Dev_startAcquisition succeeded [arm="
+        + std::to_string(acquisitionId)
+        + ", threadId=" + workerThreadId
+        + ", elapsedMs=" + std::to_string(sdkStartElapsed.count())
+        + "]. The same worker now owns trigger, buffer, and stop calls; no feature access occurs after SDK start and before a queued software command.");
     {
         std::unique_lock<std::mutex> startLock(_acquisitionStartMutex);
         _acquisitionStartCondition.wait(startLock, [this] {
             return _acquisitionWorkerReleased;
         });
     }
-    // C4Dev_getBuffer takes milliseconds.  Keep the logical acquisition wait
-    // at ten seconds, but poll in short slices so stopAcquisition() can acquire
-    // _sdkMutex between SDK calls instead of waiting for the full timeout.
+    // C4Dev_getBuffer takes milliseconds. The vendor H8 surface sequence calls
+    // TriggerSoftware and immediately enters one uninterrupted ten-second wait.
+    // No feature access or logging may split those two SDK calls. Automatic and
+    // external paths retain short polls for responsive cancellation.
     constexpr auto bufferTimeout = std::chrono::seconds(10);
     constexpr auto bufferPollTimeout = std::chrono::milliseconds(100);
     std::size_t timeoutCount = 0;
     std::size_t receivedFrameCount = 0;
     logInfo(std::string("Acquisition worker started [arm=") + std::to_string(acquisitionId)
+        + ", threadId=" + workerThreadId
+        + ", sdkLifecycleOwner=single-worker-thread"
         + "]: mode="
         + (mode == AcquisitionMode::SingleFrame ? "Single" : "Live")
-        + (softwareTriggered ? ", FrameStart source=Software." : ", device trigger configuration preserved.")
+        + (softwareTriggered
+            ? ", FrameStart source=Software; each request executes the vendor C sample's direct TriggerSoftware-to-getBuffer hot path while the selector remains pinned and no post-start feature access occurs."
+            : ", device trigger configuration preserved.")
         + " triggerState=" + triggerDiagnosticSummary + ".");
     while (!_stopAcquisitionRequested.load()) {
         bool executeSoftwareTrigger = softwareTriggered;
@@ -2602,32 +3113,81 @@ void HeliotisC4Device::acquisitionLoop(
         std::chrono::milliseconds bufferWait{};
         std::chrono::milliseconds copyElapsed{};
         auto logicalWaitStarted = std::chrono::steady_clock::now();
+        const auto sdkBufferWaitTimeout = softwareTriggered
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(bufferTimeout)
+            : bufferPollTimeout;
+        bool bufferWaitPolicyLogged = false;
         bool triggerIssued = !executeSoftwareTrigger;
+        std::string terminalDeviceState;
+        std::string terminalTriggerState;
+        std::string terminalStallDiagnosis;
         while (!_stopAcquisitionRequested.load()) {
             const auto pollStarted = std::chrono::steady_clock::now();
             error.clear();
             result = C4HDL_ERR_SUCCESS;
+            C4HDL_ERROR triggerResult = C4HDL_ERR_SUCCESS;
             C4HDL_ERROR getBufferResult = C4HDL_ERR_SUCCESS;
+            std::chrono::milliseconds sdkSequenceElapsed{};
+            bool triggerAttempted = false;
+            bool getBufferAttempted = false;
             bool getBufferFailed = false;
+            if (!bufferWaitPolicyLogged) {
+                logInfo("Entering C4Utility receive path [arm=" + std::to_string(acquisitionId)
+                    + ", threadId=" + workerThreadId
+                    + ", sameThreadAsSdkStart=true"
+                    + ", timeoutMs=" + std::to_string(sdkBufferWaitTimeout.count())
+                    + ", policy=" + (softwareTriggered
+                        ? std::string("vendor-direct-TriggerSoftware-getBuffer")
+                        : std::string("responsive-automatic-or-external-poll")) + "].");
+                bufferWaitPolicyLogged = true;
+            }
+            if (!triggerIssued) {
+                logInfo("Acquisition worker will execute queued TriggerSoftware with the pre-start FrameStart selector unchanged [arm="
+                    + std::to_string(acquisitionId)
+                    + ", threadId=" + workerThreadId
+                    + ", sameThreadAsSdkStart=true"
+                    + ", selectorWriteBetweenStartAndCommand=none"
+                    + ", featureAccessBetweenStartAndCommand=none"
+                    + ", featureAccessBetweenCommandAndBuffer=none].");
+            }
             {
                 std::lock_guard<std::mutex> lock(_sdkMutex);
                 if (_stopAcquisitionRequested.load()) {
                     result = C4HDL_ERR_ERROR;
                     error = "Acquisition stop requested before the next C4Utility operation.";
                 } else if (!triggerIssued) {
-                    logInfo("Acquisition worker executing queued FrameStart TriggerSoftware [arm="
-                        + std::to_string(acquisitionId) + "].");
-                    const bool triggered = executeFrameStartSoftwareTrigger(device, &error);
+                    logicalWaitStarted = std::chrono::steady_clock::now();
+                    // Match the installed C h8SurfSimple hot path here:
+                    // TriggerSelector was pinned before SDK start, so execute
+                    // the command without another selector write and enter
+                    // getBuffer immediately afterward.
+                    triggerAttempted = true;
                     triggerIssued = true;
-                    if (!triggered) result = C4HDL_ERR_ERROR;
+                    triggerResult = C4Dev_executeCommand(device, "TriggerSoftware");
+                    if (triggerResult != C4HDL_ERR_SUCCESS) {
+                        result = triggerResult;
+                        error = operationError("C4Dev_executeCommand(TriggerSoftware)", triggerResult);
+                    }
                 }
                 if (result == C4HDL_ERR_SUCCESS) {
-                    getBufferResult = C4Dev_getBuffer(device, &buffer, bufferPollTimeout.count());
+                    // Keep this call immediately after TriggerSoftware. In
+                    // particular, do not add feature reads, selector writes, or
+                    // logging between these two SDK operations.
+                    getBufferAttempted = true;
+                    const auto sdkSequenceStarted = triggerAttempted
+                        ? logicalWaitStarted
+                        : std::chrono::steady_clock::now();
+                    getBufferResult = C4Dev_getBuffer(device, &buffer, sdkBufferWaitTimeout.count());
+                    sdkSequenceElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - sdkSequenceStarted);
                     result = getBufferResult;
                     getBufferFailed = getBufferResult != C4HDL_ERR_SUCCESS;
                     if (getBufferFailed) {
                         error = operationError("C4Dev_getBuffer", getBufferResult);
                     }
+                } else if (triggerAttempted) {
+                    sdkSequenceElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - logicalWaitStarted);
                 }
                 if (result == C4HDL_ERR_SUCCESS) {
                     bool copied = false;
@@ -2658,6 +3218,24 @@ void HeliotisC4Device::acquisitionLoop(
 
             bufferWait = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - logicalWaitStarted);
+            if (triggerAttempted) {
+                logInfo("TriggerSoftware/getBuffer hot path completed [arm="
+                    + std::to_string(acquisitionId)
+                    + ", threadId=" + workerThreadId
+                    + ", sameThreadAsSdkStart=true"
+                    + ", selectorWriteBetweenStartAndCommand=none"
+                    + ", triggerCalled=" + (triggerAttempted ? "true" : "false")
+                    + ", triggerSdkCode=" + (triggerAttempted
+                        ? std::to_string(static_cast<long long>(triggerResult))
+                        : std::string("not-called"))
+                    + ", getBufferCalled=" + (getBufferAttempted ? "true" : "false")
+                    + ", getBufferSdkCode=" + (getBufferAttempted
+                        ? std::to_string(static_cast<long long>(getBufferResult))
+                        : std::string("not-called"))
+                    + ", sdkSequenceElapsedMs=" + std::to_string(sdkSequenceElapsed.count())
+                    + ", totalElapsedMsIncludingCopy=" + std::to_string(bufferWait.count())
+                    + ", interveningFeatureAccess=none].");
+            }
             if (result == C4HDL_ERR_SUCCESS) break;
             if (_stopAcquisitionRequested.load()) break;
 
@@ -2667,26 +3245,42 @@ void HeliotisC4Device::acquisitionLoop(
             // metadata, release, and software-command failures must terminate
             // with their real error even when they took longer than one poll.
             if (getBufferFailed
-                && isLikelyTimeoutError(error, getBufferResult, pollWait, bufferPollTimeout)) {
+                && isLikelyTimeoutError(error, getBufferResult, pollWait, sdkBufferWaitTimeout)) {
+                if (softwareTriggered) {
+                    ++timeoutCount;
+                    const std::string sdkTimeoutError = error;
+                    {
+                        // The vendor wait has already completed. Diagnostics are
+                        // safe here because this logical request is now terminal.
+                        std::lock_guard<std::mutex> lock(_sdkMutex);
+                        terminalDeviceState = acquisitionDeviceStateSummary(device);
+                        terminalTriggerState = triggerConfigurationSnapshotSummary(
+                            readTriggerConfigurationSnapshot(device));
+                        terminalStallDiagnosis = acquisitionStallDiagnosis(device);
+                    }
+                    error = "TriggerSoftware succeeded, but C4Dev_getBuffer timed out after "
+                        + std::to_string(sdkBufferWaitTimeout.count())
+                        + " ms; this acquisition is being stopped so the completed request cannot block the next arm. "
+                        + sdkTimeoutError;
+                    logWarning("Software-triggered frame timed out [arm="
+                        + std::to_string(acquisitionId)
+                        + ", logicalWaitMs=" + std::to_string(bufferWait.count())
+                        + ", armTriggerState=" + triggerDiagnosticSummary
+                        + ", currentTriggerState=" + terminalTriggerState
+                        + ", stallDiagnosis=" + terminalStallDiagnosis
+                        + ", deviceState=" + terminalDeviceState + "].");
+                    break;
+                }
                 if (bufferWait >= bufferTimeout) {
                     ++timeoutCount;
                     if (timeoutCount <= 3 || timeoutCount % 20 == 0) {
-                        std::string deviceState;
-                        std::string currentTriggerState;
-                        {
-                            std::lock_guard<std::mutex> lock(_sdkMutex);
-                            deviceState = acquisitionDeviceStateSummary(device);
-                            currentTriggerState = triggerConfigurationSnapshotSummary(
-                                readTriggerConfigurationSnapshot(device));
-                        }
                         logInfo("Acquisition is armed but waiting for a frame/trigger [arm="
                             + std::to_string(acquisitionId)
                             + ", timeouts=" + std::to_string(timeoutCount)
                             + ", logicalWaitMs=" + std::to_string(bufferWait.count())
                             + ", lastPollError=" + error
                             + ", armTriggerState=" + triggerDiagnosticSummary
-                            + ", currentTriggerState=" + currentTriggerState
-                            + ", deviceState=" + deviceState + "].");
+                            + ", activeFeatureDiagnostics=suppressed].");
                     }
                     logicalWaitStarted = std::chrono::steady_clock::now();
                 }
@@ -2695,8 +3289,8 @@ void HeliotisC4Device::acquisitionLoop(
             break;
         }
 
-        // Continuous acquisition may accept the next command as soon as its
-        // frame has been copied. SingleFrame keeps the command in flight until
+        // Host-side Live may accept the next command as soon as its frame has
+        // been copied. Host-side Single keeps the command in flight until
         // disarm so a fast caller cannot queue a second command that the worker
         // would necessarily discard after delivering its one frame.
         if (executeSoftwareTrigger && mode == AcquisitionMode::Continuous) {
@@ -2706,19 +3300,14 @@ void HeliotisC4Device::acquisitionLoop(
 
         if (result != C4HDL_ERR_SUCCESS) {
             if (_stopAcquisitionRequested.load()) break;
-            std::string failureDeviceState;
-            std::string currentTriggerState;
-            {
-                std::lock_guard<std::mutex> lock(_sdkMutex);
-                failureDeviceState = acquisitionDeviceStateSummary(device);
-                currentTriggerState = triggerConfigurationSnapshotSummary(
-                    readTriggerConfigurationSnapshot(device));
-            }
             logWarning("Acquisition buffer wait failed [arm=" + std::to_string(acquisitionId) + "]: "
                 + (error.empty() ? std::string("C4Utility acquisition failed.") : error)
                 + ". armTriggerState=" + triggerDiagnosticSummary
-                + ", currentTriggerState=" + currentTriggerState
-                + ", deviceState=" + failureDeviceState + ".");
+                + (terminalTriggerState.empty()
+                    ? std::string(", active feature diagnostics were suppressed; post-stop state follows.")
+                    : std::string(", currentTriggerState=") + terminalTriggerState
+                        + ", stallDiagnosis=" + terminalStallDiagnosis
+                        + ", deviceState=" + terminalDeviceState + "."));
             setAcquisitionError(error.empty() ? "C4Utility acquisition failed." : error);
             break;
         }
@@ -2760,6 +3349,7 @@ void HeliotisC4Device::acquisitionLoop(
     const bool stopRequested = _stopAcquisitionRequested.load();
     C4HDL_ERROR stopResult = C4HDL_ERR_ERROR;
     std::string sdkStopError;
+    std::string triggerSelectorRestoreError;
     std::string acquisitionModeRestoreError;
     std::string stateAfterStop;
     const auto sdkStopStarted = std::chrono::steady_clock::now();
@@ -2769,11 +3359,18 @@ void HeliotisC4Device::acquisitionLoop(
         if (stopResult != C4HDL_ERR_SUCCESS) {
             sdkStopError = operationError("C4Dev_stopAcquisition", stopResult);
             stateAfterStop = "<not queried after failed SDK stop>";
-            if (restoreAcquisitionMode) {
-                logWarning("AcquisitionMode restore was skipped [arm="
-                    + std::to_string(acquisitionId) + "] because SDK stop failed.");
+            if (restoreTriggerSelector || restoreAcquisitionMode) {
+                logWarning("Feature restoration was skipped [arm="
+                    + std::to_string(acquisitionId)
+                    + "] because SDK stop failed; reconnect is required.");
             }
         } else {
+            if (restoreTriggerSelector
+                && !writeAndVerifyEnumeration(
+                    device, "TriggerSelector", originalTriggerSelector, &triggerSelectorRestoreError)) {
+                logWarning("TriggerSelector restore failed [arm=" + std::to_string(acquisitionId)
+                    + "]: " + triggerSelectorRestoreError);
+            }
             if (restoreAcquisitionMode
                 && !writeAndVerifyEnumeration(
                     device, "AcquisitionMode", originalAcquisitionMode, &acquisitionModeRestoreError)) {
@@ -2792,7 +3389,13 @@ void HeliotisC4Device::acquisitionLoop(
     if (stopResult == C4HDL_ERR_SUCCESS) {
         logInfo("Acquisition worker completed C4Dev_stopAcquisition [arm="
             + std::to_string(acquisitionId)
+            + ", threadId=" + workerThreadId
+            + ", sameThreadAsSdkStart=true"
             + ", elapsedMs=" + std::to_string(sdkStopElapsed.count())
+            + ", restoredTriggerSelector="
+            + (!restoreTriggerSelector
+                ? "not-needed"
+                : (triggerSelectorRestoreError.empty() ? "true" : "false"))
             + ", restoredAcquisitionMode="
             + (!restoreAcquisitionMode
                 ? "not-needed"
@@ -2806,14 +3409,28 @@ void HeliotisC4Device::acquisitionLoop(
         setAcquisitionError("Acquisition stop failed [arm=" + std::to_string(acquisitionId)
             + "]: " + sdkStopError + ". Disconnect and reconnect before re-arming.");
         logWarning("Acquisition worker C4Dev_stopAcquisition failed [arm="
-            + std::to_string(acquisitionId) + ", elapsedMs="
+            + std::to_string(acquisitionId)
+            + ", threadId=" + workerThreadId
+            + ", sameThreadAsSdkStart=true, elapsedMs="
             + std::to_string(sdkStopElapsed.count()) + "]: " + sdkStopError);
     }
-    if (!acquisitionModeRestoreError.empty() && stopResult == C4HDL_ERR_SUCCESS) {
-        setAcquisitionError("AcquisitionMode restore failed [arm=" + std::to_string(acquisitionId)
-            + "]: " + acquisitionModeRestoreError);
+    if (stopResult == C4HDL_ERR_SUCCESS
+        && (!triggerSelectorRestoreError.empty() || !acquisitionModeRestoreError.empty())) {
+        std::string restorationError;
+        if (!triggerSelectorRestoreError.empty()) {
+            restorationError = "TriggerSelector restore failed: " + triggerSelectorRestoreError;
+        }
+        if (!acquisitionModeRestoreError.empty()) {
+            if (!restorationError.empty()) restorationError += "; ";
+            restorationError += "AcquisitionMode restore failed: " + acquisitionModeRestoreError;
+        }
+        const std::string existingError = lastAcquisitionError();
+        setAcquisitionError((existingError.empty() ? std::string() : existingError + "; ")
+            + "Acquisition restoration failed [arm=" + std::to_string(acquisitionId)
+            + "]: " + restorationError);
     }
     logInfo("Acquisition worker finished [arm=" + std::to_string(acquisitionId)
+        + ", threadId=" + workerThreadId
         + "]: frames=" + std::to_string(receivedFrameCount)
         + ", stopRequested=" + (stopRequested ? "true" : "false")
         + ", triggerState=" + triggerDiagnosticSummary + ".");
@@ -2844,6 +3461,12 @@ void HeliotisC4Device::finishAcquisition()
     if (wasAcquiring) dispatchStatus(Status::Acquisition, false);
     if (wasAcquiring) {
         logInfo("Acquisition disarmed [arm=" + std::to_string(acquisitionId) + "].");
+    }
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (_acquisitionWorkerThreadId == std::this_thread::get_id()) {
+            _acquisitionWorkerThreadId = {};
+        }
     }
 }
 
