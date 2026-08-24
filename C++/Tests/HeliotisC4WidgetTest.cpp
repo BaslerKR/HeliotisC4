@@ -21,7 +21,6 @@ heliotis::FeatureDescriptor makeFeature(
     const QString& value)
 {
     return {
-        heliotis::FeatureSection::Device,
         categoryPath.toStdString(),
         displayName.toStdString(),
         value.toStdString(),
@@ -60,7 +59,6 @@ int main(int argc, char** argv)
             QString::number(index)));
     }
     features.push_back({
-        heliotis::FeatureSection::Device,
         "Acquisition Control",
         "TriggerSoftware",
         {},
@@ -70,7 +68,6 @@ int main(int argc, char** argv)
         {},
     });
     features.push_back({
-        heliotis::FeatureSection::Motion,
         "Motion Control",
         "ScanSpeed",
         "5",
@@ -84,8 +81,12 @@ int main(int argc, char** argv)
     widget.setFeatures(features);
     application.processEvents();
 
-    auto* tree = widget.findChild<QTreeWidget*>(QStringLiteral("HeliotisC4DeviceFeatureTree"));
-    if (!require(tree != nullptr, "Heliotis device feature tree was not created.")) return EXIT_FAILURE;
+    auto* tree = widget.findChild<QTreeWidget*>(QStringLiteral("HeliotisC4FeatureTree"));
+    if (!require(tree != nullptr, "Heliotis feature tree was not created.")) return EXIT_FAILURE;
+    if (!require(widget.findChild<QTreeWidget*>(QStringLiteral("HeliotisC4MotionFeatureTree")) == nullptr,
+                 "Heliotis must expose one feature tree instead of a separate Motion tree.")) {
+        return EXIT_FAILURE;
+    }
     auto* deviceRoot = tree->topLevelItem(0);
     if (!require(deviceRoot != nullptr && deviceRoot->text(0) == QStringLiteral("Test H8"),
                  "The connected Heliotis device root is missing.")) {
@@ -103,6 +104,12 @@ int main(int argc, char** argv)
     auto* secondCategory = deviceRoot->child(1);
     if (!require(secondCategory != nullptr && !secondCategory->isExpanded(),
                  "All Heliotis category parents below the device root should be collapsed initially.")) {
+        return EXIT_FAILURE;
+    }
+    const auto motionItems = tree->findItems(
+        QStringLiteral("Motion Control"), Qt::MatchExactly | Qt::MatchRecursive, 0);
+    if (!require(!motionItems.isEmpty(),
+                 "Motion features must be present in the unified Heliotis feature tree.")) {
         return EXIT_FAILURE;
     }
 
@@ -155,19 +162,10 @@ int main(int argc, char** argv)
     auto* liveButton = widget.findChild<QToolButton*>(QStringLiteral("HeliotisC4GrabLiveButton"));
     auto* initializeButton = widget.findChild<QToolButton*>(QStringLiteral("HeliotisC4InitializeButton"));
     auto* messageLabel = widget.findChild<QLabel*>(QStringLiteral("HeliotisC4MessageLabel"));
-    auto* motionTree = widget.findChild<QTreeWidget*>(QStringLiteral("HeliotisC4MotionFeatureTree"));
     if (!require(status != nullptr && refreshButton != nullptr && connectButton != nullptr
                      && grabOneButton != nullptr && liveButton != nullptr && initializeButton != nullptr
-                     && messageLabel != nullptr && motionTree != nullptr,
+                     && messageLabel != nullptr,
                  "The Heliotis connection and acquisition controls are missing.")) {
-        return EXIT_FAILURE;
-    }
-    auto* motionRoot = motionTree->topLevelItem(0);
-    if (!require(motionRoot != nullptr && motionRoot->text(0) == QStringLiteral("Test H8")
-                     && motionRoot->isExpanded()
-                     && motionRoot->child(0) != nullptr
-                     && !motionRoot->child(0)->isExpanded(),
-                 "The Motion tree must use the same connected-device root and collapsed category defaults.")) {
         return EXIT_FAILURE;
     }
     widget.setDiscoveredDevices({{0, 0, "TestInterface", "TestDevice"}});
@@ -246,8 +244,8 @@ int main(int argc, char** argv)
                  "Expected Heliotis feature editors were not created.")) {
         return EXIT_FAILURE;
     }
-    if (!require(tree->isEnabled() && !motionTree->isEnabled(),
-                 "Armed acquisition must retain only the device command tree.")) {
+    if (!require(tree->isEnabled(),
+                 "Armed acquisition must retain the unified feature tree for TriggerSoftware.")) {
         return EXIT_FAILURE;
     }
     if (!require(!normalEditor->isEnabled() && triggerButton->isEnabled(),
@@ -257,20 +255,20 @@ int main(int argc, char** argv)
 
     widget.setAcquisitionState(false, false, false);
     application.processEvents();
-    if (!require(normalEditor->isEnabled() && motionTree->isEnabled() && !triggerButton->isEnabled(),
+    if (!require(normalEditor->isEnabled() && tree->isEnabled() && !triggerButton->isEnabled(),
                  "Stopping acquisition must restore writable editors and disable TriggerSoftware.")) {
         return EXIT_FAILURE;
     }
     widget.setFeatureRefreshPending(true);
     application.processEvents();
-    if (!require(!tree->isEnabled() && !motionTree->isEnabled()
+    if (!require(!tree->isEnabled()
                      && !initializeButton->isEnabled() && !liveButton->isEnabled(),
                  "An asynchronous feature refresh must lock SDK-dependent controls.")) {
         return EXIT_FAILURE;
     }
     widget.setFeatureRefreshPending(false);
     application.processEvents();
-    if (!require(tree->isEnabled() && motionTree->isEnabled()
+    if (!require(tree->isEnabled()
                      && initializeButton->isEnabled() && liveButton->isEnabled(),
                  "SDK-dependent controls must recover after an asynchronous feature refresh.")) {
         return EXIT_FAILURE;
@@ -315,7 +313,7 @@ int main(int argc, char** argv)
     widget.setAcquisitionArmPending(false, false);
     application.processEvents();
     if (!require(status->property("status").toString() == QStringLiteral("connected")
-                     && tree->isEnabled() && motionTree->isEnabled()
+                     && tree->isEnabled()
                      && !triggerButton->isEnabled() && liveButton->isEnabled(),
                   "A rapidly completed SingleFrame arm must settle in the stopped UI state.")) {
         return EXIT_FAILURE;
@@ -375,7 +373,7 @@ int main(int argc, char** argv)
     application.processEvents();
     if (!require(status->text() == QStringLiteral("Stopping")
                      && !grabOneButton->isEnabled() && !liveButton->isEnabled()
-                     && !triggerButton->isEnabled() && !tree->isEnabled() && !motionTree->isEnabled(),
+                     && !triggerButton->isEnabled() && !tree->isEnabled(),
                  "A non-blocking stop request must lock acquisition and feature controls until worker completion.")) {
         return EXIT_FAILURE;
     }
@@ -383,7 +381,7 @@ int main(int argc, char** argv)
     application.processEvents();
     if (!require(status->property("status").toString() == QStringLiteral("connected")
                      && grabOneButton->isEnabled() && liveButton->isEnabled()
-                     && tree->isEnabled() && motionTree->isEnabled(),
+                     && tree->isEnabled(),
                  "Worker completion must recover controls from the stop-pending state.")) {
         return EXIT_FAILURE;
     }
@@ -393,7 +391,7 @@ int main(int argc, char** argv)
     widget.setAcquisitionError(QStringLiteral("late worker error"));
     application.processEvents();
     if (!require(!connectButton->isEnabled() && !liveButton->isEnabled()
-                     && !tree->isEnabled() && !motionTree->isEnabled(),
+                     && !tree->isEnabled(),
                  "A late acquisition error must not unlock controls during asynchronous disconnect.")) {
         return EXIT_FAILURE;
     }

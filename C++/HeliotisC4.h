@@ -29,11 +29,6 @@ enum class FeatureAccess {
     ReadWrite
 };
 
-enum class FeatureSection {
-    Device,
-    Motion
-};
-
 struct DeviceDescriptor {
     std::int64_t interfaceIndex = -1;
     std::int64_t deviceIndex = -1;
@@ -123,7 +118,6 @@ struct Frame {
 
 // A deep-owned, SDK-neutral view of C4 feature metadata for the Qt control tree.
 struct FeatureDescriptor {
-    FeatureSection section = FeatureSection::Device;
     std::string categoryPath;
     std::string displayName;
     std::string valueText;

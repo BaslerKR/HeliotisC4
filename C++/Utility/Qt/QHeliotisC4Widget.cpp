@@ -15,7 +15,6 @@
 #include <QScrollBar>
 #include <QStatusBar>
 #include <QStyle>
-#include <QTabWidget>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -147,24 +146,11 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     topLayout->addLayout(toolLayout);
     rootLayout->addLayout(topLayout);
 
-    _tabs = new QTabWidget(this);
-    _tabs->setObjectName(QStringLiteral("HeliotisC4ControlTabs"));
-
-    auto* devicePage = new QWidget(_tabs);
-    auto* deviceLayout = new QVBoxLayout(devicePage);
-    deviceLayout->setObjectName(QStringLiteral("DeviceTabbedTreePanelLayout"));
-    _deviceFeatureTree = createFeatureTree(devicePage, QStringLiteral("HeliotisC4DeviceFeatureTree"));
-    deviceLayout->addWidget(_deviceFeatureTree);
-    _tabs->addTab(devicePage, tr("Device"));
-
-    auto* motionPage = new QWidget(_tabs);
-    auto* motionLayout = new QVBoxLayout(motionPage);
-    motionLayout->setObjectName(QStringLiteral("DeviceTabbedTreePanelLayout"));
-    _motionFeatureTree = createFeatureTree(motionPage, QStringLiteral("HeliotisC4MotionFeatureTree"));
-    motionLayout->addWidget(_motionFeatureTree);
-    _tabs->addTab(motionPage, tr("Motion"));
-
-    rootLayout->addWidget(_tabs);
+    auto* featureTreeLayout = new QVBoxLayout;
+    featureTreeLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
+    _featureTree = createFeatureTree(this, QStringLiteral("HeliotisC4FeatureTree"));
+    featureTreeLayout->addWidget(_featureTree);
+    rootLayout->addLayout(featureTreeLayout);
 
     _statusBar = new QStatusBar(this);
     _statusBar->setObjectName(QStringLiteral("HeliotisC4StatusBar"));
@@ -226,10 +212,8 @@ void QHeliotisC4Widget::setConnectedDeviceName(const QString& deviceName)
     const QString rootText = _connectedDeviceName.isEmpty()
         ? tr("Heliotis C4")
         : _connectedDeviceName;
-    for (QTreeWidget* tree : {_deviceFeatureTree, _motionFeatureTree}) {
-        if (tree && tree->topLevelItemCount() > 0) {
-            tree->topLevelItem(0)->setText(0, rootText);
-        }
+    if (_featureTree && _featureTree->topLevelItemCount() > 0) {
+        _featureTree->topLevelItem(0)->setText(0, rootText);
     }
 }
 
@@ -309,7 +293,7 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
         _featureRefreshPending = false;
         _featureOperationPending = false;
         _featureAccessCurrent = true;
-        _tabs->setEnabled(true);
+        _featureTree->setEnabled(true);
     }
 
     const QSignalBlocker blocker(_connectButton);
@@ -326,8 +310,7 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
         _deviceSelector->setEnabled(!_devices.empty());
         _refreshButton->setEnabled(true);
         _initializeButton->setEnabled(false);
-        _deviceFeatureTree->setEnabled(false);
-        _motionFeatureTree->setEnabled(false);
+        _featureTree->setEnabled(false);
         setAcquisitionAvailable(false);
         return;
     }
@@ -342,10 +325,8 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
     _initializeButton->setEnabled(connected && !_initializationPending
         && !_acquisitionActive && !_featureOperationPending && !_featureRefreshPending
         && !_acquisitionArmPending);
-    _deviceFeatureTree->setEnabled(connected && !_featureOperationPending
+    _featureTree->setEnabled(connected && !_featureOperationPending
         && !_featureRefreshPending && !_acquisitionArmPending);
-    _motionFeatureTree->setEnabled(connected && !_acquisitionActive
-        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
     if (!connected) setAcquisitionAvailable(false);
     _messageLabel->setText(connected
         ? tr("Heliotis device connected. Press Init to apply the default capture setup and initialize the stage.")
@@ -362,7 +343,7 @@ void QHeliotisC4Widget::setDisconnectionPending()
     _initializeButton->setEnabled(false);
     _grabOneButton->setEnabled(false);
     _grabLiveButton->setEnabled(false);
-    _tabs->setEnabled(false);
+    _featureTree->setEnabled(false);
     _connectionStatus->setText(tr("Stopping"));
     _connectionStatus->setProperty("status", QStringLiteral("idle"));
     _connectionStatus->style()->unpolish(_connectionStatus);
@@ -377,7 +358,7 @@ void QHeliotisC4Widget::setInitializationPending(const bool pending)
 {
     _initializationPending = pending;
     if (pending) {
-        _tabs->setEnabled(false);
+        _featureTree->setEnabled(false);
         _connectButton->setEnabled(false);
         _initializeButton->setEnabled(false);
         setAcquisitionAvailable(_acquisitionAvailable);
@@ -388,7 +369,7 @@ void QHeliotisC4Widget::setInitializationPending(const bool pending)
         return;
     }
 
-    _tabs->setEnabled(!_acquisitionArmPending && !_featureRefreshPending
+    _featureTree->setEnabled(!_acquisitionArmPending && !_featureRefreshPending
         && !_featureOperationPending);
     _connectButton->setEnabled(!_acquisitionArmPending
         && (_connectButton->isChecked() || !_devices.empty()));
@@ -404,7 +385,7 @@ void QHeliotisC4Widget::setInitializationPending(const bool pending)
 void QHeliotisC4Widget::setInitializationError(const QString& message)
 {
     _initializationPending = false;
-    _tabs->setEnabled(!_acquisitionArmPending && !_featureRefreshPending
+    _featureTree->setEnabled(!_acquisitionArmPending && !_featureRefreshPending
         && !_featureOperationPending);
     _connectButton->setEnabled(!_acquisitionArmPending
         && (_connectButton->isChecked() || !_devices.empty()));
@@ -483,10 +464,8 @@ void QHeliotisC4Widget::setAcquisitionArmPending(const bool pending, const bool 
         _initializeButton->setEnabled(false);
         _grabOneButton->setEnabled(false);
         _grabLiveButton->setEnabled(false);
-        _tabs->setEnabled(false);
-        _deviceFeatureTree->setEnabled(false);
-        _motionFeatureTree->setEnabled(false);
-        for (auto* editor : _deviceFeatureEditors) {
+        _featureTree->setEnabled(false);
+        for (auto* editor : _featureEditors) {
             if (editor) editor->setEnabled(false);
         }
         setSoftwareTriggerAvailable(false);
@@ -512,16 +491,12 @@ void QHeliotisC4Widget::setAcquisitionArmPending(const bool pending, const bool 
         _grabLiveButton->setChecked(false);
     }
     _continuousAcquisition = false;
-    _tabs->setEnabled(!_initializationPending && !_featureRefreshPending
-        && !_featureOperationPending);
     _connectButton->setEnabled(_connected || !_devices.empty());
     _initializeButton->setEnabled(_connected && !_initializationPending
         && !_featureRefreshPending && !_featureOperationPending);
-    _deviceFeatureTree->setEnabled(_connected && !_featureRefreshPending
-        && !_featureOperationPending);
-    _motionFeatureTree->setEnabled(_connected && !_featureRefreshPending
-        && !_featureOperationPending);
-    for (auto* editor : _deviceFeatureEditors) {
+    _featureTree->setEnabled(_connected && !_initializationPending
+        && !_featureRefreshPending && !_featureOperationPending);
+    for (auto* editor : _featureEditors) {
         if (editor) {
             editor->setEnabled(editor->property(featureWritableProperty).toBool()
                 && !_featureRefreshPending && !_featureOperationPending);
@@ -545,9 +520,7 @@ void QHeliotisC4Widget::setAcquisitionStopPending()
     _initializeButton->setEnabled(false);
     _grabOneButton->setEnabled(false);
     _grabLiveButton->setEnabled(false);
-    _tabs->setEnabled(false);
-    _deviceFeatureTree->setEnabled(false);
-    _motionFeatureTree->setEnabled(false);
+    _featureTree->setEnabled(false);
     setSoftwareTriggerAvailable(false);
     _connectionStatus->setText(tr("Stopping"));
     _connectionStatus->setProperty("status", QStringLiteral("idle"));
@@ -587,16 +560,12 @@ void QHeliotisC4Widget::setAcquisitionState(
     // Keep the feature tree available so an armed TriggerSoftware command can
     // be delivered to the SDK. All other editors remain locked below.
     _featureAccessCurrent = !acquiring;
-    _tabs->setEnabled(_connected && !_initializationPending && !_featureOperationPending
-        && !_featureRefreshPending && !_acquisitionArmPending && !_acquisitionStopPending);
     _connectButton->setEnabled(!_initializationPending && !_featureOperationPending
         && !_featureRefreshPending && !_acquisitionArmPending && !_acquisitionStopPending
         && (_connected || !_devices.empty()));
-    _deviceFeatureTree->setEnabled(_connected && !_featureOperationPending
-        && !_featureRefreshPending && !_acquisitionArmPending);
-    _motionFeatureTree->setEnabled(_connected && !acquiring
-        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
-    for (auto* editor : _deviceFeatureEditors) {
+    _featureTree->setEnabled(_connected && !_initializationPending && !_featureOperationPending
+        && !_featureRefreshPending && !_acquisitionArmPending && !_acquisitionStopPending);
+    for (auto* editor : _featureEditors) {
         if (editor) {
             editor->setEnabled(editor->property(featureWritableProperty).toBool()
                 && !acquiring && !_featureOperationPending && !_featureRefreshPending
@@ -652,17 +621,13 @@ void QHeliotisC4Widget::setSoftwareTriggerAvailable(const bool available)
 void QHeliotisC4Widget::setFeatureRefreshPending(const bool pending)
 {
     _featureRefreshPending = pending;
-    _tabs->setEnabled(!pending && !_initializationPending && !_featureOperationPending
-        && !_acquisitionArmPending);
     _connectButton->setEnabled(!pending && !_acquisitionArmPending
         && (_connected || !_devices.empty()));
     _initializeButton->setEnabled(_connected && !pending && !_initializationPending
         && !_featureOperationPending && !_acquisitionActive && !_acquisitionArmPending);
-    _deviceFeatureTree->setEnabled(_connected && !pending && !_featureOperationPending
-        && !_acquisitionArmPending);
-    _motionFeatureTree->setEnabled(_connected && !pending
-        && !_featureOperationPending && !_acquisitionActive && !_acquisitionArmPending);
-    for (auto* editor : _deviceFeatureEditors) {
+    _featureTree->setEnabled(_connected && !pending && !_initializationPending
+        && !_featureOperationPending && !_acquisitionArmPending);
+    for (auto* editor : _featureEditors) {
         if (editor) {
             editor->setEnabled(editor->property(featureWritableProperty).toBool()
                 && !pending && !_featureOperationPending && !_acquisitionActive
@@ -690,17 +655,12 @@ void QHeliotisC4Widget::setFeatureOperationPending(const bool pending)
     _connectButton->setEnabled(!pending && !_featureRefreshPending
         && !_acquisitionArmPending && !_acquisitionStopPending
         && (_connected || !_devices.empty()));
-    _tabs->setEnabled(!pending && !_initializationPending && !_featureRefreshPending
-        && !_acquisitionArmPending && !_acquisitionStopPending);
     _initializeButton->setEnabled(_connected && !pending && !_initializationPending
         && !_acquisitionActive && !_featureRefreshPending && !_acquisitionArmPending
         && !_acquisitionStopPending);
-    _deviceFeatureTree->setEnabled(_connected && !pending && !_featureRefreshPending
-        && !_acquisitionArmPending && !_acquisitionStopPending);
-    _motionFeatureTree->setEnabled(_connected && !pending
-        && !_acquisitionActive && !_featureRefreshPending && !_acquisitionArmPending
-        && !_acquisitionStopPending);
-    for (auto* editor : _deviceFeatureEditors) {
+    _featureTree->setEnabled(_connected && !pending && !_initializationPending
+        && !_featureRefreshPending && !_acquisitionArmPending && !_acquisitionStopPending);
+    for (auto* editor : _featureEditors) {
         if (editor) {
             editor->setEnabled(editor->property(featureWritableProperty).toBool()
                 && !pending && !_acquisitionActive && !_featureRefreshPending
@@ -770,21 +730,9 @@ void QHeliotisC4Widget::setIdleState(const QString& message)
 void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& features)
 {
     _featureAccessCurrent = !_acquisitionActive;
-    _deviceFeatureTree->setEnabled(_connected && !_featureOperationPending
+    _featureTree->setEnabled(_connected && !_featureOperationPending
         && !_featureRefreshPending && !_acquisitionArmPending);
-    _motionFeatureTree->setEnabled(_connected && !_acquisitionActive
-        && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
-    heliotis::HeliotisC4::FeatureList deviceFeatures;
-    heliotis::HeliotisC4::FeatureList motionFeatures;
-    for (const auto& feature : features) {
-        if (feature.section == heliotis::FeatureSection::Motion) {
-            motionFeatures.push_back(feature);
-        } else {
-            deviceFeatures.push_back(feature);
-        }
-    }
-    populateTree(_deviceFeatureTree, _deviceCategories, deviceFeatures);
-    populateTree(_motionFeatureTree, _motionCategories, motionFeatures);
+    populateTree(_featureTree, _categories, features);
     setSoftwareTriggerAvailable(_acquisitionActive && _acquisitionAvailable && _softwareTriggerAvailable);
 }
 
@@ -797,10 +745,8 @@ void QHeliotisC4Widget::populateTree(
 
     tree->clear();
     categories.clear();
-    if (tree == _deviceFeatureTree) {
-        _softwareTriggerButtons.clear();
-        _deviceFeatureEditors.clear();
-    }
+    _softwareTriggerButtons.clear();
+    _featureEditors.clear();
     QTreeWidgetItem* rootItem = nullptr;
     if (!features.empty()) {
         const QString rootText = _connectedDeviceName.isEmpty()
@@ -831,8 +777,8 @@ void QHeliotisC4Widget::populateTree(
             tree->setItemWidget(item, 1, executeButton);
             if (isSoftwareTrigger) {
                 _softwareTriggerButtons.push_back(executeButton);
-            } else if (tree == _deviceFeatureTree) {
-                _deviceFeatureEditors.push_back(executeButton);
+            } else {
+                _featureEditors.push_back(executeButton);
             }
             continue;
         }
@@ -846,7 +792,7 @@ void QHeliotisC4Widget::populateTree(
                 emit featureWriteRequested(featureName, checked ? QStringLiteral("1") : QStringLiteral("0"));
             });
             tree->setItemWidget(item, 1, checkBox);
-            if (tree == _deviceFeatureTree) _deviceFeatureEditors.push_back(checkBox);
+            _featureEditors.push_back(checkBox);
             continue;
         }
 
@@ -862,7 +808,7 @@ void QHeliotisC4Widget::populateTree(
                 emit featureWriteRequested(featureName, value);
             });
             tree->setItemWidget(item, 1, comboBox);
-            if (tree == _deviceFeatureTree) _deviceFeatureEditors.push_back(comboBox);
+            _featureEditors.push_back(comboBox);
             continue;
         }
 
@@ -878,7 +824,7 @@ void QHeliotisC4Widget::populateTree(
             emit featureWriteRequested(featureName, lineEdit->text());
         });
         tree->setItemWidget(item, 1, lineEdit);
-        if (tree == _deviceFeatureTree) _deviceFeatureEditors.push_back(lineEdit);
+        _featureEditors.push_back(lineEdit);
     }
     restoreTreeState(tree, categories, state);
 }

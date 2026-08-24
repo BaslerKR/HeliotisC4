@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Present all feature metadata in one connected-device tree instead of separate Device and Motion tabs.
+- Remove the heuristic Device/Motion classification from the SDK-neutral feature contract.
 - Add a connected-device root to the feature trees, expand only that root initially, and keep category parents collapsed while preserving tree state across refreshes.
 - Keep the complete C4Utility acquisition lifecycle on one dedicated worker thread: worker-owned SDK start, software trigger, buffer receive/release, stop, and feature restoration now match the vendor sample's thread ownership while callers wait only for the arm handshake.
 - Match the vendor H8 acquisition order by issuing exactly one `FrameStart` software command per request, including the `RecordingStart=On/Stage` route, before waiting for its buffer.

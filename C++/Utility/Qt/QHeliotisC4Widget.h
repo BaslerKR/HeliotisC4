@@ -18,7 +18,6 @@ class QStatusBar;
 class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
-class QTabWidget;
 
 class QHeliotisC4Widget final : public QWidget {
     Q_OBJECT
@@ -28,7 +27,7 @@ public:
 
     void setDiscoveredDevices(const std::vector<heliotis::DeviceDescriptor>& devices);
     /**
-     * Sets the connected device label shown as the root of both feature trees.
+     * Sets the connected device label shown as the root of the feature tree.
      *
      * @param deviceName SDK-reported name of the currently connected device.
      * @note An empty name uses the module's generic Heliotis C4 label.
@@ -101,7 +100,7 @@ public:
     /** Locks competing controls and restores capture after an asynchronous feature operation and refresh. */
     void setFeatureOperationPending(bool pending);
     void setFeatureError(const QString& message);
-    /** Rebuilds both trees while preserving scroll, selection, and acquisition locks. */
+    /** Rebuilds the feature tree while preserving scroll, selection, and acquisition locks. */
     void setFeatures(const heliotis::HeliotisC4::FeatureList& features);
 
 signals:
@@ -148,7 +147,6 @@ private:
     /** Refreshes the operator message from the authoritative acquisition flags. */
     void updateAcquisitionMessage();
 
-    QTabWidget* _tabs = nullptr;
     QComboBox* _deviceSelector = nullptr;
     QToolButton* _refreshButton = nullptr;
     QToolButton* _connectButton = nullptr;
@@ -158,12 +156,10 @@ private:
     QLabel* _connectionStatus = nullptr;
     QLabel* _messageLabel = nullptr;
     QStatusBar* _statusBar = nullptr;
-    QTreeWidget* _deviceFeatureTree = nullptr;
-    QTreeWidget* _motionFeatureTree = nullptr;
-    QHash<QString, QTreeWidgetItem*> _deviceCategories;
-    QHash<QString, QTreeWidgetItem*> _motionCategories;
+    QTreeWidget* _featureTree = nullptr;
+    QHash<QString, QTreeWidgetItem*> _categories;
     std::vector<QPushButton*> _softwareTriggerButtons;
-    std::vector<QWidget*> _deviceFeatureEditors;
+    std::vector<QWidget*> _featureEditors;
     std::vector<heliotis::DeviceDescriptor> _devices;
     QString _connectedDeviceName;
     bool _discoveryPending = false;

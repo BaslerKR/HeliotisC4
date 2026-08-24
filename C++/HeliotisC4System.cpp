@@ -251,18 +251,6 @@ FeatureAccess featureAccess(const AccessMode_e value)
     }
 }
 
-bool isMotionFeature(const std::string& category, const std::string& name)
-{
-    std::string value = category + "/" + name;
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
-        return static_cast<char>(std::tolower(character));
-    });
-    return value.find("stage") != std::string::npos
-        || value.find("scan") != std::string::npos
-        || value.find("motion") != std::string::npos
-        || value.find("encoder") != std::string::npos;
-}
-
 std::string lowerCase(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char character) {
@@ -2126,7 +2114,6 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
                 &enumError));
         }
         features.push_back({
-            isMotionFeature(category, name) ? FeatureSection::Motion : FeatureSection::Device,
             category,
             name,
             type == FeatureType::Command ? std::string("Execute")
