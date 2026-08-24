@@ -220,6 +220,19 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     setConnectionState(false);
 }
 
+void QHeliotisC4Widget::setConnectedDeviceName(const QString& deviceName)
+{
+    _connectedDeviceName = deviceName.trimmed();
+    const QString rootText = _connectedDeviceName.isEmpty()
+        ? tr("Heliotis C4")
+        : _connectedDeviceName;
+    for (QTreeWidget* tree : {_deviceFeatureTree, _motionFeatureTree}) {
+        if (tree && tree->topLevelItemCount() > 0) {
+            tree->topLevelItem(0)->setText(0, rootText);
+        }
+    }
+}
+
 void QHeliotisC4Widget::setDiscoveredDevices(const std::vector<heliotis::DeviceDescriptor>& devices)
 {
     _devices = devices;
@@ -291,6 +304,7 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
     _acquisitionStopPending = false;
     _softwareTriggerPending = false;
     if (!connected) {
+        _connectedDeviceName.clear();
         _initializationPending = false;
         _featureRefreshPending = false;
         _featureOperationPending = false;
@@ -334,7 +348,7 @@ void QHeliotisC4Widget::setConnectionState(const bool connected)
         && !_featureOperationPending && !_featureRefreshPending && !_acquisitionArmPending);
     if (!connected) setAcquisitionAvailable(false);
     _messageLabel->setText(connected
-        ? tr("Heliotis device connected.")
+        ? tr("Heliotis device connected. Press Init to apply the default capture setup and initialize the stage.")
         : tr("Heliotis device disconnected."));
     _messageLabel->setProperty("messageState", QStringLiteral("normal"));
     _messageLabel->style()->unpolish(_messageLabel);
@@ -787,9 +801,17 @@ void QHeliotisC4Widget::populateTree(
         _softwareTriggerButtons.clear();
         _deviceFeatureEditors.clear();
     }
+    QTreeWidgetItem* rootItem = nullptr;
+    if (!features.empty()) {
+        const QString rootText = _connectedDeviceName.isEmpty()
+            ? tr("Heliotis C4")
+            : _connectedDeviceName;
+        rootItem = new QTreeWidgetItem(tree, QStringList() << rootText);
+        rootItem->setData(0, featureTreeIdRole, QStringLiteral("root"));
+    }
     for (const auto& feature : features) {
-        auto* parent = ensureCategory(tree, categories, QString::fromStdString(feature.categoryPath));
-        auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
+        auto* parent = ensureCategory(rootItem, categories, QString::fromStdString(feature.categoryPath));
+        auto* item = new QTreeWidgetItem(parent ? parent : rootItem);
         item->setData(0, featureTreeIdRole, featureItemId(feature));
         item->setText(0, QString::fromStdString(feature.displayName));
         item->setToolTip(0, QString::fromStdString(feature.description));
@@ -867,6 +889,9 @@ QHeliotisC4Widget::TreeState QHeliotisC4Widget::captureTreeState(
 {
     TreeState state;
     state.hadItems = tree->topLevelItemCount() > 0;
+    if (state.hadItems) {
+        state.rootExpanded = tree->topLevelItem(0)->isExpanded();
+    }
     for (auto iterator = categories.cbegin(); iterator != categories.cend(); ++iterator) {
         if (iterator.value() && iterator.value()->isExpanded()) {
             state.expandedCategories.insert(iterator.key());
@@ -889,9 +914,12 @@ void QHeliotisC4Widget::restoreTreeState(
     const QHash<QString, QTreeWidgetItem*>& categories,
     const TreeState& state) const
 {
+    if (tree->topLevelItemCount() > 0) {
+        tree->topLevelItem(0)->setExpanded(state.hadItems ? state.rootExpanded : true);
+    }
     if (!state.hadItems) {
-        // Keep the initial tree compact: show each top-level category's direct
-        // children, while leaving deeper category levels collapsed.
+        // Keep the initial tree compact: expand only the device root, while
+        // leaving first-level and deeper category parents collapsed.
         tree->expandToDepth(0);
     } else {
         for (auto iterator = categories.cbegin(); iterator != categories.cend(); ++iterator) {
@@ -924,19 +952,20 @@ void QHeliotisC4Widget::restoreTreeState(
 }
 
 QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(
-    QTreeWidget* tree,
+    QTreeWidgetItem* rootItem,
     QHash<QString, QTreeWidgetItem*>& categories,
     const QString& categoryPath)
 {
-    if (categoryPath.isEmpty()) return nullptr;
+    if (!rootItem) return nullptr;
+    if (categoryPath.isEmpty()) return rootItem;
 
-    QTreeWidgetItem* parent = nullptr;
+    QTreeWidgetItem* parent = rootItem;
     QString currentPath;
     for (const auto& segment : categoryPath.split('/', Qt::SkipEmptyParts)) {
         currentPath += currentPath.isEmpty() ? segment : QStringLiteral("/") + segment;
         auto* category = categories.value(currentPath);
         if (!category) {
-            category = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
+            category = new QTreeWidgetItem(parent);
             category->setData(0, featureTreeIdRole, categoryItemId(currentPath));
             category->setText(0, segment);
             category->setFlags(Qt::ItemIsEnabled);

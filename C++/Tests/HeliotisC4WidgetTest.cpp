@@ -80,26 +80,33 @@ int main(int argc, char** argv)
         {},
     });
 
+    widget.setConnectedDeviceName(QStringLiteral("Test H8"));
     widget.setFeatures(features);
     application.processEvents();
 
     auto* tree = widget.findChild<QTreeWidget*>(QStringLiteral("HeliotisC4DeviceFeatureTree"));
     if (!require(tree != nullptr, "Heliotis device feature tree was not created.")) return EXIT_FAILURE;
-    auto* mainCategory = tree->topLevelItem(0);
-    if (!require(mainCategory != nullptr && mainCategory->text(0) == QStringLiteral("Main"),
-                 "The expected top-level Heliotis category is missing.")) {
+    auto* deviceRoot = tree->topLevelItem(0);
+    if (!require(deviceRoot != nullptr && deviceRoot->text(0) == QStringLiteral("Test H8"),
+                 "The connected Heliotis device root is missing.")) {
         return EXIT_FAILURE;
     }
-    auto* childCategory = mainCategory->child(0);
-    if (!require(mainCategory->isExpanded(), "Top-level Heliotis categories should be expanded initially.")) {
+    auto* mainCategory = deviceRoot->child(0);
+    if (!require(deviceRoot->isExpanded(), "The connected Heliotis device root should be expanded initially.")) {
         return EXIT_FAILURE;
     }
-    if (!require(childCategory != nullptr && !childCategory->isExpanded(),
-                 "Nested Heliotis categories should be collapsed initially.")) {
+    if (!require(mainCategory != nullptr && mainCategory->text(0) == QStringLiteral("Main")
+                     && !mainCategory->isExpanded(),
+                 "First-level Heliotis categories should be collapsed initially.")) {
+        return EXIT_FAILURE;
+    }
+    auto* secondCategory = deviceRoot->child(1);
+    if (!require(secondCategory != nullptr && !secondCategory->isExpanded(),
+                 "All Heliotis category parents below the device root should be collapsed initially.")) {
         return EXIT_FAILURE;
     }
 
-    tree->setCurrentItem(tree->topLevelItem(20));
+    tree->setCurrentItem(deviceRoot->child(20));
     tree->verticalScrollBar()->setValue(tree->verticalScrollBar()->maximum() / 2);
     application.processEvents();
     auto* topBefore = tree->itemAt(tree->viewport()->rect().topLeft());
@@ -153,6 +160,14 @@ int main(int argc, char** argv)
                      && grabOneButton != nullptr && liveButton != nullptr && initializeButton != nullptr
                      && messageLabel != nullptr && motionTree != nullptr,
                  "The Heliotis connection and acquisition controls are missing.")) {
+        return EXIT_FAILURE;
+    }
+    auto* motionRoot = motionTree->topLevelItem(0);
+    if (!require(motionRoot != nullptr && motionRoot->text(0) == QStringLiteral("Test H8")
+                     && motionRoot->isExpanded()
+                     && motionRoot->child(0) != nullptr
+                     && !motionRoot->child(0)->isExpanded(),
+                 "The Motion tree must use the same connected-device root and collapsed category defaults.")) {
         return EXIT_FAILURE;
     }
     widget.setDiscoveredDevices({{0, 0, "TestInterface", "TestDevice"}});

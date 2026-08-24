@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a connected-device root to the feature trees, expand only that root initially, and keep category parents collapsed while preserving tree state across refreshes.
 - Keep the complete C4Utility acquisition lifecycle on one dedicated worker thread: worker-owned SDK start, software trigger, buffer receive/release, stop, and feature restoration now match the vendor sample's thread ownership while callers wait only for the arm handshake.
 - Match the vendor H8 acquisition order by issuing exactly one `FrameStart` software command per request, including the `RecordingStart=On/Stage` route, before waiting for its buffer.
 - Match the working vendor H8 C sample's software receive sequence: pin `TriggerSelector=FrameStart` before SDK start, perform no feature access after start and before an accepted request, and follow each `TriggerSoftware` immediately with one uninterrupted ten-second `C4Dev_getBuffer()`. This removes both the extra per-command selector write and the post-start `FrameTriggerWait` polling that are absent from the sample while preserving post-timeout diagnostics and cursor restoration.
@@ -9,7 +10,7 @@
 - Terminate and disarm a software-trigger arm after its one buffer timeout so stale requests cannot block later Single or Live captures; reject non-unit trigger divider/multiplier presets and log device identity, calculated recording/motion values, exact command/buffer codes, post-wait acquisition/transfer/stage state, and a derived stall-stage diagnosis without treating a terminal FrameTriggerWait snapshot as proof that the earlier command was not consumed.
 - Restore Single and Live controls after a successful feature write completes its nested feature-tree refresh and cover the ordering with a widget regression test.
 - Treat disconnect as an acquisition UI session boundary: clear the Single stop icon, Live toggle, software-trigger pending state, and stale mode flags before reconnect, and ignore late worker state after the device is disconnected.
-- Follow a successful integrated connection with asynchronous motion-only Stage Init while preserving the existing capture preset and keeping connection and capture available when motion initialization fails.
+- Keep the integrated connection open-only: preserve the existing capture preset and do not initialize motion or execute StageInit during connect. The explicit Init action remains the path that applies the default H8 capture profile and initializes the stage.
 - Expand the explicit Init action to apply the C4Utility H8 capture profile, including canonical `RecordingStart=On/Stage`, `AcquisitionStart=Off` when exposed, and `FrameStart=On/Software` routing, before refreshing feature state.
 - Reset explicit Init to the complete C4Utility h8SurfSimple defaults, including encoder and scan-motion values, log their final readback, and skip StageInit when those required writes are incomplete.
 - Continue independent required profile groups after local failures and report one aggregate error; log the final configuration readback and keep optional Scan3d geometry, light-controller, and user-output failures warning-only.

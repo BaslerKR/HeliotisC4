@@ -27,6 +27,13 @@ public:
     explicit QHeliotisC4Widget(QWidget* parent = nullptr);
 
     void setDiscoveredDevices(const std::vector<heliotis::DeviceDescriptor>& devices);
+    /**
+     * Sets the connected device label shown as the root of both feature trees.
+     *
+     * @param deviceName SDK-reported name of the currently connected device.
+     * @note An empty name uses the module's generic Heliotis C4 label.
+     */
+    void setConnectedDeviceName(const QString& deviceName);
     /** Locks discovery-dependent controls while a background device scan runs. */
     void setDiscoveryPending(bool pending);
     void setDiscoveryError(const QString& message);
@@ -112,6 +119,7 @@ signals:
 private:
     struct TreeState {
         bool hadItems = false;
+        bool rootExpanded = true;
         QSet<QString> expandedCategories;
         QString currentItem;
         QString topVisibleItem;
@@ -132,7 +140,7 @@ private:
         const QHash<QString, QTreeWidgetItem*>& categories,
         const TreeState& state) const;
     QTreeWidgetItem* ensureCategory(
-        QTreeWidget* tree,
+        QTreeWidgetItem* rootItem,
         QHash<QString, QTreeWidgetItem*>& categories,
         const QString& categoryPath);
     void setIdleState(const QString& message);
@@ -157,6 +165,7 @@ private:
     std::vector<QPushButton*> _softwareTriggerButtons;
     std::vector<QWidget*> _deviceFeatureEditors;
     std::vector<heliotis::DeviceDescriptor> _devices;
+    QString _connectedDeviceName;
     bool _discoveryPending = false;
     bool _connected = false;
     bool _connectionPending = false;
