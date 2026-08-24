@@ -2449,7 +2449,7 @@ bool HeliotisC4Device::startAcquisition(
             return false;
         }
         if (!triggerPlan.warning.empty()) {
-            logWarning("Acquisition trigger plan warning: " + triggerPlan.warning);
+            logInfo("Acquisition trigger plan note: " + triggerPlan.warning);
         }
         softwareTriggerAvailable = triggerPlan.usesHostSoftwareTrigger();
         softwareTriggered = softwareTriggerAvailable;

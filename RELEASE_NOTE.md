@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep expected stage/external-gated acquisition trigger diagnostics at informational log level while preserving the condition and guidance.
 - Present all feature metadata in one connected-device tree instead of separate Device and Motion tabs.
 - Remove the heuristic Device/Motion classification from the SDK-neutral feature contract.
 - Add a connected-device root to the feature trees, expand only that root initially, and keep category parents collapsed while preserving tree state across refreshes.
