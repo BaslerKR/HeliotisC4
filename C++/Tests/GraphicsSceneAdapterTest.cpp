@@ -52,6 +52,8 @@ int main()
     const auto& range = *scene->rangeFrame;
     if (range.width != 2 || range.height != 2
         || range.zValues.size() != 4U || range.intensity.size() != 4U
+        || range.rangeField.displayName != "Range"
+        || range.intensityField.displayName != "Intensity"
         || std::fabs(range.zValues.at(3) - 4.5F) > 0.0000001F
         || std::fabs(range.intensity.at(1) - 10.0F) > 0.0001F
         || range.intensityBits != 16U

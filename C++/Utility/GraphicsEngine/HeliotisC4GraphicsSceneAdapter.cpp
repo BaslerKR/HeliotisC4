@@ -55,6 +55,48 @@ namespace {
         : static_cast<std::uint8_t>(std::min<std::uint16_t>(part.bitsPerSample, 255U));
 }
 
+[[nodiscard]] std::string lowerCase(std::string value);
+
+[[nodiscard]] MeasurementFieldDescriptor fieldDescriptor(
+    const heliotis::FramePart& part,
+    const char* fallbackName,
+    const MeasurementValueDomain domain)
+{
+    const std::string displayName = part.name.empty() ? std::string(fallbackName) : part.name;
+    return {
+        std::string("heliotis.") + lowerCase(displayName),
+        displayName,
+        "",
+        domain,
+        MeasurementSampleKind::GridSample,
+        graphicsBitDepth(part)};
+}
+
+[[nodiscard]] std::vector<std::uint8_t> finiteValidityMask(const std::vector<float>& values)
+{
+    std::vector<std::uint8_t> mask;
+    bool allValid = true;
+    for (const float value : values)
+    {
+        if (!std::isfinite(value))
+        {
+            allValid = false;
+            break;
+        }
+    }
+    if (allValid)
+    {
+        return mask;
+    }
+
+    mask.resize(values.size(), 0U);
+    for (std::size_t index = 0; index < values.size(); ++index)
+    {
+        mask[index] = std::isfinite(values[index]) ? 1U : 0U;
+    }
+    return mask;
+}
+
 [[nodiscard]] std::string lowerCase(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char character) {
@@ -105,6 +147,11 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
     range.width = static_cast<int>(rangePart->width);
     range.height = static_cast<int>(rangePart->height);
     range.zValues = toFloatSamples(*rangePart);
+    range.rangeField = fieldDescriptor(
+        *rangePart,
+        "Range",
+        MeasurementValueDomain::Calibrated);
+    range.validMask = finiteValidityMask(range.zValues);
     range.rangeRaw = rawUint16Samples(*rangePart);
     range.rangeBits = graphicsBitDepth(*rangePart);
     range.zScale = 1.0;
@@ -174,6 +221,11 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
             intensityPart && hasCompatibleDimensions(*intensityPart, range.width, range.height))
         {
             range.intensity = toFloatSamples(*intensityPart);
+            range.intensityField = fieldDescriptor(
+                *intensityPart,
+                "Intensity",
+                MeasurementValueDomain::Native);
+            range.intensityValidMask = finiteValidityMask(range.intensity);
             range.intensityRaw = rawUint16Samples(*intensityPart);
             range.intensityBits = graphicsBitDepth(*intensityPart);
         }
@@ -182,6 +234,11 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
             confidencePart && hasCompatibleDimensions(*confidencePart, range.width, range.height))
         {
             range.confidence = toFloatSamples(*confidencePart);
+            range.confidenceField = fieldDescriptor(
+                *confidencePart,
+                "Confidence",
+                MeasurementValueDomain::Native);
+            range.confidenceValidMask = finiteValidityMask(range.confidence);
             range.confidenceRaw = rawUint16Samples(*confidencePart);
             range.confidenceBits = graphicsBitDepth(*confidencePart);
         }

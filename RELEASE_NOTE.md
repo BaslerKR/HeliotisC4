@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve multipart payload names such as Range, Reflectance, Amplitude, and Intensity as semantic field metadata, and keep finite validity independent for auxiliary channels.
 - Keep expected stage/external-gated acquisition trigger diagnostics at informational log level while preserving the condition and guidance.
 - Present all feature metadata in one connected-device tree instead of separate Device and Motion tabs.
 - Remove the heuristic Device/Motion classification from the SDK-neutral feature contract.
