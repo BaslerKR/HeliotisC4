@@ -35,6 +35,7 @@ enum class RecordingStartRoute {
  */
 struct AcquisitionTriggerPlan {
     bool valid = false;
+    bool acquisitionStartEnabled = false;
     FrameStartRoute frameStartRoute = FrameStartRoute::Automatic;
     RecordingStartRoute recordingStartRoute = RecordingStartRoute::Automatic;
     std::string frameStartSource;
@@ -57,9 +58,10 @@ struct AcquisitionTriggerPlan {
  * @param frameStart FrameStart selector state.
  * @param recordingStart RecordingStart selector state.
  * @return A valid plan or an actionable configuration error.
- * @note AcquisitionStart must be Off because C4Utility documents it as
- *       deprecated. RecordingStart software control is rejected because the
- *       host exposes one software-command path dedicated to FrameStart.
+ * @note AcquisitionStart is preserved as a device-owned trigger gate. An
+ *       enabled AcquisitionStart route is therefore not free-run. RecordingStart
+ *       software control is rejected because the host exposes one software-command
+ *       path dedicated to FrameStart.
  */
 [[nodiscard]] AcquisitionTriggerPlan evaluateAcquisitionTriggerPlan(
     const TriggerSelectorState& acquisitionStart,

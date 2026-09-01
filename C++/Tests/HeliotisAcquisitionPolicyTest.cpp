@@ -76,11 +76,11 @@ int main()
         return EXIT_FAILURE;
     }
 
-    const auto deprecatedAcquisition = evaluateAcquisitionTriggerPlan(
+    const auto enabledAcquisition = evaluateAcquisitionTriggerPlan(
         triggerState("On", "DIO1"), triggerState("Off"), triggerState("Off"));
-    if (!require(!deprecatedAcquisition.valid
-            && deprecatedAcquisition.error.find("AcquisitionStart=On") != std::string::npos,
-            "Every enabled deprecated AcquisitionStart route must be rejected.")) {
+    if (!require(enabledAcquisition.valid && !enabledAcquisition.isFreeRun()
+            && enabledAcquisition.summary().find("AcquisitionStart=on") != std::string::npos,
+            "An enabled AcquisitionStart route must remain available and not be labelled free-run.")) {
         return EXIT_FAILURE;
     }
 

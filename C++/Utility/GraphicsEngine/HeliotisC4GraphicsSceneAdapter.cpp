@@ -39,6 +39,26 @@ namespace {
     }, part.samples);
 }
 
+[[nodiscard]] std::size_t sampleCount(const heliotis::FramePart& part) noexcept
+{
+    return std::visit([](const auto& values) { return values.size(); }, part.samples);
+}
+
+[[nodiscard]] bool hasRepresentableSamples(const heliotis::FramePart& part) noexcept
+{
+    return part.isValid()
+        && sampleCount(part) != 0
+        && sampleCount(part) <= static_cast<std::size_t>((std::numeric_limits<int>::max)());
+}
+
+[[nodiscard]] bool hasRepresentableDimensions(const heliotis::FramePart& part) noexcept
+{
+    return part.width != 0
+        && part.height != 0
+        && part.width <= static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
+        && part.height <= static_cast<std::uint32_t>((std::numeric_limits<int>::max)());
+}
+
 [[nodiscard]] std::vector<std::uint16_t> rawUint16Samples(const heliotis::FramePart& part)
 {
     if (const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples))
@@ -119,6 +139,21 @@ namespace {
     return lowerCase(outputMode) == "rectifiedc";
 }
 
+[[nodiscard]] bool hasUsableScan3dGeometry(const heliotis::Scan3dGeometry& geometry) noexcept
+{
+    if (!distanceUnit(geometry.distanceUnit).has_value()
+        || !std::isfinite(geometry.zScale)
+        || !std::isfinite(geometry.zOffset))
+    {
+        return false;
+    }
+    return !isRectifiedOutput(geometry.outputMode)
+        || (std::isfinite(geometry.xScale)
+            && std::isfinite(geometry.yScale)
+            && std::isfinite(geometry.xOffset)
+            && std::isfinite(geometry.yOffset));
+}
+
 } // namespace
 
 namespace heliotis {
@@ -127,7 +162,7 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
     const Frame& frame,
     const GraphicsScene3DRequest& request) const
 {
-    if (!frame.isValid()
+    if (frame.parts.empty()
         || (!hasScene3DContent(request.content, GraphicsScene3DContent::RangeFrame)
             && !hasScene3DContent(request.content, GraphicsScene3DContent::PointCloud)
             && !hasScene3DContent(request.content, GraphicsScene3DContent::SurfaceMesh)))
@@ -135,22 +170,46 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
         return std::nullopt;
     }
 
-    const FramePart* rangePart = findPart(frame, FramePartKind::Range);
-    if (!rangePart
-        || rangePart->width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
-        || rangePart->height > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()))
+    const FramePart* typedRangePart = findPart(frame, FramePartKind::Range);
+    const FramePart* rangePart = nullptr;
+    bool rawPartPreview = true;
+    if (typedRangePart && hasRepresentableSamples(*typedRangePart))
+    {
+        rangePart = typedRangePart;
+        rawPartPreview = frame.scan3dGeometry.has_value()
+            && !hasUsableScan3dGeometry(*frame.scan3dGeometry);
+    }
+    if (!rangePart || !hasRepresentableSamples(*rangePart))
+    {
+        rangePart = nullptr;
+        for (const FramePart& part : frame.parts)
+        {
+            if (hasRepresentableSamples(part))
+            {
+                rangePart = &part;
+                break;
+            }
+        }
+    }
+    if (!rangePart)
     {
         return std::nullopt;
     }
+    if (rangePart != typedRangePart) rawPartPreview = true;
+
+    const bool oneRowPreview = !hasRepresentableDimensions(*rangePart);
+    rawPartPreview = rawPartPreview || oneRowPreview;
 
     RangeFrame range;
-    range.width = static_cast<int>(rangePart->width);
-    range.height = static_cast<int>(rangePart->height);
+    range.width = oneRowPreview
+        ? static_cast<int>(sampleCount(*rangePart))
+        : static_cast<int>(rangePart->width);
+    range.height = oneRowPreview ? 1 : static_cast<int>(rangePart->height);
     range.zValues = toFloatSamples(*rangePart);
     range.rangeField = fieldDescriptor(
         *rangePart,
-        "Range",
-        MeasurementValueDomain::Calibrated);
+        rawPartPreview ? "Raw Part" : "Range",
+        rawPartPreview ? MeasurementValueDomain::Native : MeasurementValueDomain::Calibrated);
     range.validMask = finiteValidityMask(range.zValues);
     range.rangeRaw = rawUint16Samples(*rangePart);
     range.rangeBits = graphicsBitDepth(*rangePart);
@@ -160,7 +219,7 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
     range.yScale = std::numeric_limits<double>::quiet_NaN();
     range.xOffset = std::numeric_limits<double>::quiet_NaN();
     range.yOffset = std::numeric_limits<double>::quiet_NaN();
-    if (frame.scan3dGeometry)
+    if (!rawPartPreview && frame.scan3dGeometry)
     {
         const Scan3dGeometry& geometry = *frame.scan3dGeometry;
         const std::optional<GraphicsLengthUnit> unit = distanceUnit(geometry.distanceUnit);
@@ -204,11 +263,13 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
             range.xyCoordinateMode = RangeFrameXYCoordinateMode::ImagePixels;
         }
     }
-    range.sensorType = frame.scan3dGeometry
-        ? (range.xyCoordinateMode == RangeFrameXYCoordinateMode::ImagePixels
-            ? "Heliotis H8 (CalibratedC pixel grid)"
-            : "Heliotis H8")
-        : "Heliotis H8 (raw range)";
+    range.sensorType = rawPartPreview
+        ? "Heliotis H8 (raw part preview)"
+        : (frame.scan3dGeometry
+            ? (range.xyCoordinateMode == RangeFrameXYCoordinateMode::ImagePixels
+                ? "Heliotis H8 (CalibratedC pixel grid)"
+                : "Heliotis H8")
+            : "Heliotis H8 (raw range)");
     range.frameId = frame.frameId;
     if (!range.isValid())
     {

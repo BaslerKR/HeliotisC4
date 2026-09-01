@@ -70,7 +70,7 @@ bool AcquisitionTriggerPlan::usesHostSoftwareTrigger() const noexcept
 
 bool AcquisitionTriggerPlan::isFreeRun() const noexcept
 {
-    return valid
+    return valid && !acquisitionStartEnabled
         && frameStartRoute == FrameStartRoute::Automatic
         && recordingStartRoute == RecordingStartRoute::Automatic;
 }
@@ -79,7 +79,7 @@ std::string AcquisitionTriggerPlan::summary() const
 {
     if (!valid) return "invalid=" + error;
     std::ostringstream stream;
-    stream << "AcquisitionStart=off"
+    stream << "AcquisitionStart=" << (acquisitionStartEnabled ? "on" : "off")
            << ", FrameStart=" << frameStartRouteName(*this)
            << ", RecordingStart=" << recordingStartRouteName(*this)
            << ", hostSoftwareTrigger=" << (usesHostSoftwareTrigger() ? "true" : "false")
@@ -100,11 +100,7 @@ AcquisitionTriggerPlan evaluateAcquisitionTriggerPlan(
         return plan;
     }
 
-    if (acquisitionStart.mode != "Off") {
-        plan.error = "AcquisitionStart=On is unsupported because C4Utility documents this selector as "
-            "deprecated. Set AcquisitionStart=Off and use FrameStart for frame triggering.";
-        return plan;
-    }
+    plan.acquisitionStartEnabled = acquisitionStart.mode == "On";
 
     if (frameStart.mode == "Off") {
         plan.frameStartRoute = FrameStartRoute::Automatic;

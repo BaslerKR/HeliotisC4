@@ -48,8 +48,13 @@ bool checkBufferOperation(
     return false;
 }
 
+enum class SampleStorage {
+    Uint16,
+    Float64,
+};
+
 template <typename Sample, typename Reader>
-bool copyBufferPartSamples(
+std::optional<std::uint32_t> copyBufferPartSamples(
     const std::uint32_t expectedSamples,
     const char* operation,
     Reader&& reader,
@@ -58,27 +63,44 @@ bool copyBufferPartSamples(
 {
     if (expectedSamples > (std::numeric_limits<std::uint32_t>::max)() / sizeof(Sample)) {
         if (errorMessage) *errorMessage = std::string(operation) + " exceeds C4Utility's 32-bit byte-capacity limit.";
-        return false;
+        return std::nullopt;
     }
     std::uint32_t capacity = expectedSamples * static_cast<std::uint32_t>(sizeof(Sample));
     for (int attempt = 0; attempt != 2; ++attempt) {
-        samples->resize((capacity + sizeof(Sample) - 1) / sizeof(Sample));
+        const auto allocatedSamples = (static_cast<std::uint64_t>(capacity) + sizeof(Sample) - 1)
+            / sizeof(Sample);
+        if (allocatedSamples == 0 || allocatedSamples > (std::numeric_limits<std::size_t>::max)()) {
+            if (errorMessage) *errorMessage = std::string(operation) + " returned an unsupported byte capacity.";
+            return std::nullopt;
+        }
+        samples->resize(static_cast<std::size_t>(allocatedSamples));
         const C4HDL_ERROR result = reader(samples->data(), &capacity);
         if (result == C4HDL_ERR_SUCCESS) {
-            if (capacity != expectedSamples * sizeof(Sample)) {
+            if (capacity == 0 || capacity > static_cast<std::uint64_t>(allocatedSamples * sizeof(Sample))) {
                 if (errorMessage) {
                     *errorMessage = std::string(operation) + " returned " + std::to_string(capacity)
-                        + " byte(s), but the part geometry requires "
-                        + std::to_string(expectedSamples * sizeof(Sample)) + " byte(s).";
+                        + " byte(s), exceeding the allocated receive capacity.";
                 }
-                return false;
+                return std::nullopt;
             }
-            samples->resize(expectedSamples);
-            return true;
+            if (capacity % sizeof(Sample) != 0) {
+                if (errorMessage) {
+                    *errorMessage = std::string(operation) + " returned a non-integral sample byte count ("
+                        + std::to_string(capacity) + ").";
+                }
+                return std::nullopt;
+            }
+            const auto actualSamples = static_cast<std::uint32_t>(capacity / sizeof(Sample));
+            if (actualSamples == 0) {
+                if (errorMessage) *errorMessage = std::string(operation) + " returned zero samples.";
+                return std::nullopt;
+            }
+            samples->resize(actualSamples);
+            return actualSamples;
         }
         if (result != C4HDL_ERR_SMALL_BUFFER || capacity == 0) {
             if (errorMessage) *errorMessage = operationError(operation, result);
-            return false;
+            return std::nullopt;
         }
         logInfo(std::string(operation) + " requested receive capacity "
             + std::to_string(capacity) + " byte(s); retrying with the SDK-required size.");
@@ -86,7 +108,41 @@ bool copyBufferPartSamples(
     if (errorMessage) {
         *errorMessage = std::string(operation) + " still reports an insufficient buffer after retrying with the SDK-required size.";
     }
-    return false;
+    return std::nullopt;
+}
+
+/** Queries a part's sample count through the C API size probe. */
+template <typename Sample, typename Reader>
+std::optional<std::uint32_t> queryBufferPartSampleCount(
+    const char* operation,
+    Reader&& reader,
+    std::string* diagnosticMessage)
+{
+    std::uint32_t requiredBytes = 0;
+    const C4HDL_ERROR result = reader(nullptr, &requiredBytes);
+    if (result != C4HDL_ERR_SMALL_BUFFER && result != C4HDL_ERR_SUCCESS) {
+        if (diagnosticMessage) *diagnosticMessage = operationError(operation, result);
+        return std::nullopt;
+    }
+    if (requiredBytes == 0) {
+        if (diagnosticMessage) *diagnosticMessage = std::string(operation) + " returned zero bytes.";
+        return std::nullopt;
+    }
+    if (requiredBytes % sizeof(Sample) != 0) {
+        if (diagnosticMessage) {
+            *diagnosticMessage = std::string(operation) + " reported "
+                + std::to_string(requiredBytes) + " byte(s), not an integral sample count.";
+        }
+        return std::nullopt;
+    }
+    const std::uint64_t sampleCount = requiredBytes / sizeof(Sample);
+    if (sampleCount == 0 || sampleCount > (std::numeric_limits<std::uint32_t>::max)()) {
+        if (diagnosticMessage && diagnosticMessage->empty()) {
+            *diagnosticMessage = std::string(operation) + " returned an unsupported sample byte count.";
+        }
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(sampleCount);
 }
 
 /** Reads one part's complete dimension vector. */
@@ -94,33 +150,60 @@ bool readBufferPartDimensions(
     const C4_BUFFER buffer,
     const std::int64_t partIndex,
     std::vector<std::int64_t>* dimensions,
-    std::string* errorMessage)
+    std::string* diagnosticMessage)
 {
+    dimensions->clear();
     std::uint32_t dimensionBytes = 2 * static_cast<std::uint32_t>(sizeof(std::int64_t));
     dimensions->resize(dimensionBytes / sizeof(std::int64_t));
     C4HDL_ERROR result = C4Buf_getPartDimension(buffer, partIndex, dimensions->data(), &dimensionBytes);
     if (result == C4HDL_ERR_SMALL_BUFFER && dimensionBytes != 0) {
-        if (dimensionBytes % sizeof(std::int64_t) != 0) {
-            if (errorMessage) *errorMessage = "C4Utility returned a non-integral byte size for buffer dimensions.";
+        const std::uint64_t roundedBytes = ((static_cast<std::uint64_t>(dimensionBytes)
+            + sizeof(std::int64_t) - 1) / sizeof(std::int64_t)) * sizeof(std::int64_t);
+        if (roundedBytes > (std::numeric_limits<std::uint32_t>::max)()) {
+            if (diagnosticMessage) *diagnosticMessage = "C4Utility returned an excessive dimension byte count.";
             return false;
         }
+        if (dimensionBytes % sizeof(std::int64_t) != 0 && diagnosticMessage) {
+            *diagnosticMessage = "C4Utility returned a non-integral dimension byte count ("
+                + std::to_string(dimensionBytes) + "); retrying with "
+                + std::to_string(roundedBytes) + " bytes.";
+        }
         logInfo("C4Buf_getPartDimension part " + std::to_string(partIndex)
-            + " requested " + std::to_string(dimensionBytes) + " byte(s); retrying.");
-        dimensions->resize(dimensionBytes / sizeof(std::int64_t));
+            + " requested " + std::to_string(dimensionBytes) + " byte(s); retrying with "
+            + std::to_string(roundedBytes) + " byte(s).");
+        dimensions->assign(static_cast<std::size_t>(roundedBytes / sizeof(std::int64_t)), 0);
+        dimensionBytes = static_cast<std::uint32_t>(roundedBytes);
         result = C4Buf_getPartDimension(buffer, partIndex, dimensions->data(), &dimensionBytes);
     }
-    if (!checkBufferOperation(result, "C4Buf_getPartDimension", errorMessage)) return false;
-    if (dimensionBytes % sizeof(std::int64_t) != 0) {
-        if (errorMessage) *errorMessage = "C4Utility returned a non-integral byte size for buffer dimensions.";
+    if (result != C4HDL_ERR_SUCCESS) {
+        if (diagnosticMessage) *diagnosticMessage = operationError("C4Buf_getPartDimension", result);
         return false;
     }
-    dimensions->resize(dimensionBytes / sizeof(std::int64_t));
-    if (dimensions->size() < 2) {
-        if (errorMessage) *errorMessage = "C4Utility returned fewer than two dimensions for a buffer part.";
+    if (dimensionBytes == 0) {
+        if (diagnosticMessage) *diagnosticMessage = "C4Utility returned zero dimension bytes.";
+        return false;
+    }
+    if (dimensionBytes % sizeof(std::int64_t) != 0) {
+        if (diagnosticMessage && diagnosticMessage->empty()) {
+            *diagnosticMessage = "C4Utility returned a non-integral dimension byte count ("
+                + std::to_string(dimensionBytes) + "); using the allocated dimension slots.";
+        }
+    }
+    const std::size_t reportedDimensionCount = static_cast<std::size_t>(
+        (static_cast<std::uint64_t>(dimensionBytes) + sizeof(std::int64_t) - 1)
+        / sizeof(std::int64_t));
+    if (reportedDimensionCount < dimensions->size()) {
+        dimensions->resize(reportedDimensionCount);
+    } else if (reportedDimensionCount > dimensions->size()) {
+        if (diagnosticMessage && diagnosticMessage->empty()) {
+            *diagnosticMessage = "C4Utility reported more dimensions than the successful receive capacity.";
+        }
         return false;
     }
 
-    return true;
+    while (dimensions->size() > 1 && dimensions->back() <= 0) dimensions->pop_back();
+
+    return !dimensions->empty();
 }
 
 bool check(const C4HDL_ERROR result, std::string* errorMessage)
@@ -329,53 +412,6 @@ bool findFeatureMetadata(
     return found;
 }
 
-/** Reads the advertised entries of one enumeration feature. */
-bool readDeviceEnumerationEntries(
-    const C4_DEVICE device,
-    const std::string& requestedName,
-    std::vector<std::string>* entries,
-    std::string* errorMessage)
-{
-    if (entries) entries->clear();
-    C4_FEATUREINFO* featureList = nullptr;
-    if (!check(C4Dev_getFeatureList(device, &featureList), errorMessage)) return false;
-    if (!featureList) {
-        if (errorMessage) *errorMessage = "C4Utility returned an empty feature list.";
-        return false;
-    }
-
-    bool found = false;
-    bool succeeded = false;
-    constexpr std::size_t maximumFeatureCount = 4096;
-    for (std::size_t index = 0; index < maximumFeatureCount && featureList[index] != nullptr; ++index) {
-        const C4_FEATUREINFO feature = featureList[index];
-        std::string metadataError;
-        const std::string name = readSdkString(
-            [feature](char* buffer, std::size_t* size) { return C4Ftr_getName(feature, buffer, size); },
-            &metadataError);
-        if (!metadataError.empty() || name != requestedName) continue;
-
-        found = true;
-        const std::string entryList = readSdkString(
-            [feature](char* buffer, std::size_t* size) {
-                return C4Ftr_getEnumEntryList(feature, buffer, size);
-            },
-            &metadataError);
-        if (!metadataError.empty()) {
-            if (errorMessage) *errorMessage = std::move(metadataError);
-            break;
-        }
-        if (entries) *entries = splitEnumEntries(entryList);
-        succeeded = true;
-        break;
-    }
-    C4Ftr_release(featureList);
-    if (!found && errorMessage && errorMessage->empty()) {
-        *errorMessage = "Heliotis feature is not available: " + requestedName;
-    }
-    return succeeded;
-}
-
 /** Reads an enumeration while preserving the SDK error separately from its value. */
 bool readDeviceEnumerationValue(
     const C4_DEVICE device,
@@ -394,106 +430,6 @@ bool readDeviceEnumerationValue(
         return false;
     }
     if (value) *value = readValue;
-    return true;
-}
-
-/** Disables the deprecated AcquisitionStart route when the firmware exposes it. */
-bool disableLegacyAcquisitionStartIfPresent(
-    const C4_DEVICE device,
-    std::string* errorMessage)
-{
-    if (!device) {
-        if (errorMessage) *errorMessage = "Heliotis C4 device is not connected.";
-        return false;
-    }
-
-    std::string originalSelector;
-    std::string selectorReadError;
-    if (!readDeviceEnumerationValue(
-            device, "TriggerSelector", &originalSelector, &selectorReadError)) {
-        if (errorMessage) {
-            *errorMessage = "Could not read TriggerSelector before legacy cleanup: " + selectorReadError;
-        }
-        return false;
-    }
-
-    std::vector<std::string> selectors;
-    std::string entriesError;
-    if (readDeviceEnumerationEntries(device, "TriggerSelector", &selectors, &entriesError)) {
-        if (std::find(selectors.begin(), selectors.end(), "AcquisitionStart") == selectors.end()) {
-            logInfo("TriggerSelector does not expose AcquisitionStart; legacy trigger cleanup is not required.");
-            return true;
-        }
-    } else {
-        logWarning("Could not enumerate TriggerSelector entries before legacy cleanup; direct selector access will be attempted: "
-            + entriesError + ".");
-    }
-
-    const C4HDL_ERROR selectResult = C4Dev_writeEnumeration(
-        device, "TriggerSelector", "AcquisitionStart");
-    if (selectResult != C4HDL_ERR_SUCCESS) {
-        if (errorMessage) {
-            *errorMessage = operationError(
-                "C4Dev_writeEnumeration(TriggerSelector=AcquisitionStart)", selectResult);
-        }
-        return false;
-    }
-
-    bool succeeded = true;
-    bool changed = false;
-    std::string operationFailure;
-    std::string currentMode;
-    std::string modeReadError;
-    if (!readDeviceEnumerationValue(device, "TriggerMode", &currentMode, &modeReadError)) {
-        succeeded = false;
-        operationFailure = "Could not read AcquisitionStart TriggerMode: " + modeReadError;
-    } else if (currentMode != "Off") {
-        const C4HDL_ERROR writeResult = C4Dev_writeEnumeration(device, "TriggerMode", "Off");
-        if (writeResult != C4HDL_ERR_SUCCESS) {
-            succeeded = false;
-            operationFailure = operationError(
-                "C4Dev_writeEnumeration(TriggerMode=Off for AcquisitionStart)", writeResult);
-        } else {
-            changed = true;
-            std::string readback;
-            std::string readbackError;
-            if (!readDeviceEnumerationValue(device, "TriggerMode", &readback, &readbackError)) {
-                succeeded = false;
-                operationFailure = "AcquisitionStart TriggerMode=Off was written but could not be verified: "
-                    + readbackError;
-            } else if (readback != "Off") {
-                succeeded = false;
-                operationFailure = "AcquisitionStart TriggerMode did not retain Off; readback="
-                    + readback + ".";
-            }
-        }
-    }
-
-    std::string restoreFailure;
-    if (originalSelector != "AcquisitionStart") {
-        const C4HDL_ERROR restoreResult = C4Dev_writeEnumeration(
-            device, "TriggerSelector", originalSelector.c_str());
-        if (restoreResult != C4HDL_ERR_SUCCESS) {
-            restoreFailure = operationError(
-                "C4Dev_writeEnumeration(TriggerSelector restore)", restoreResult);
-            succeeded = false;
-        }
-    }
-
-    if (!succeeded) {
-        if (errorMessage) {
-            *errorMessage = operationFailure;
-            if (!restoreFailure.empty()) {
-                if (!errorMessage->empty()) *errorMessage += "; ";
-                *errorMessage += restoreFailure;
-            }
-        }
-        return false;
-    }
-
-    logInfo(std::string("Legacy AcquisitionStart selector normalized: TriggerMode=Off, changed=")
-        + (changed ? "true" : "false")
-        + ", restoredSelector=" + originalSelector + ".");
     return true;
 }
 
@@ -920,7 +856,7 @@ bool writeAndVerifyEnumeration(
     return true;
 }
 
-/** Validates one-command-per-frame TriggerSoftware access while the cursor is FrameStart. */
+/** Validates TriggerSoftware access while the cursor is FrameStart. */
 bool validateFrameStartSoftwareTrigger(
     const C4_DEVICE device,
     std::string* diagnosticSummary,
@@ -968,17 +904,6 @@ bool validateFrameStartSoftwareTrigger(
                 : "<unavailable: " + operationError("C4Dev_readInteger(TriggerMultiplier)", multiplierResult) + ">");
     }
 
-    std::string pulseRatioError;
-    if (dividerResult == C4HDL_ERR_SUCCESS && triggerDivider != 1) {
-        pulseRatioError = "FrameStart TriggerDivider=" + std::to_string(triggerDivider)
-            + " is incompatible with the one-command-per-frame host contract; set it to 1.";
-    }
-    if (multiplierResult == C4HDL_ERR_SUCCESS && triggerMultiplier != 1) {
-        if (!pulseRatioError.empty()) pulseRatioError += " ";
-        pulseRatioError += "FrameStart TriggerMultiplier=" + std::to_string(triggerMultiplier)
-            + " is incompatible with the one-command-per-frame host contract; set it to 1.";
-    }
-
     std::string restoreError;
     if (selectorChanged) {
         const C4HDL_ERROR restoreResult = C4Dev_writeEnumeration(
@@ -989,13 +914,12 @@ bool validateFrameStartSoftwareTrigger(
     }
 
     if (!metadataAvailable || triggerType != FeatureType::Command || !isWritable(triggerAccess)
-        || !pulseRatioError.empty() || !restoreError.empty()) {
+        || !restoreError.empty()) {
         if (errorMessage) {
-            *errorMessage = !metadataAvailable
-                ? metadataError
-                : (triggerType != FeatureType::Command || !isWritable(triggerAccess)
-                    ? std::string("TriggerSoftware is not an executable FrameStart command.")
-                    : pulseRatioError);
+            if (!metadataAvailable) *errorMessage = metadataError;
+            else if (triggerType != FeatureType::Command || !isWritable(triggerAccess)) {
+                *errorMessage = "TriggerSoftware is not an executable FrameStart command.";
+            }
             if (!restoreError.empty()) {
                 if (!errorMessage->empty()) *errorMessage += "; ";
                 *errorMessage += restoreError;
@@ -1709,18 +1633,6 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
     if (initializationCancelled) return false;
     applyRequiredGroup(recordingTriggerWrites, "trigger-recording-start", true);
     if (initializationCancelled) return false;
-    {
-        std::string legacyTriggerError;
-        bool legacyTriggerReady = false;
-        {
-            std::scoped_lock lock(_stateMutex, _sdkMutex);
-            legacyTriggerReady = disableLegacyAcquisitionStartIfPresent(_device, &legacyTriggerError);
-        }
-        if (!legacyTriggerReady) {
-            recordRequiredFailure("trigger-acquisition-start",
-                "AcquisitionStart=Off failed: " + legacyTriggerError);
-        }
-    }
     applyRequiredGroup(frameTriggerWrites, "trigger-frame-start", true);
     if (initializationCancelled) return false;
     const bool encoderConfigured = applyRequiredGroup(
@@ -1912,18 +1824,7 @@ bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
                 initialSnapshot = deviceConfigurationSnapshotSummary(_device);
             }
 
-            std::string legacyTriggerError;
-            bool legacyTriggerReady = false;
-            {
-                std::scoped_lock lock(_stateMutex, _sdkMutex);
-                legacyTriggerReady = disableLegacyAcquisitionStartIfPresent(
-                    _device, &legacyTriggerError);
-            }
-            if (!legacyTriggerReady) {
-                logWarning("Stage Init could not prepare AcquisitionStart=Off, but motion initialization will continue independently: "
-                    + legacyTriggerError);
-            }
-            logInfo("Stage Init operation started. Policy: attempt legacy AcquisitionStart cleanup when exposed, log the pre-command StageInitialized state, and always execute StageInit so the device StageInitMode controls reinitialization; no other capture-profile, processing, illumination, user-set, or trigger values are written. Initial snapshot: "
+            logInfo("Stage Init operation started. Policy: log the pre-command StageInitialized state and always execute StageInit so the device StageInitMode controls reinitialization; no capture-profile, processing, illumination, user-set, or trigger values are written. Initial snapshot: "
                 + initialSnapshot + ".");
 
             const auto cancelled = [this, errorMessage](const char* phase) {
@@ -1994,7 +1895,7 @@ bool HeliotisC4Device::initializeMotion(std::string* errorMessage)
                     if (errorMessage && !errorMessage->empty()) {
                         *errorMessage = "Could not start H8 StageInit: " + *errorMessage;
                     }
-                    logWarning("StageInit command failed; no capture-profile or other trigger value was changed. Legacy AcquisitionStart cleanup was handled independently. State: "
+                    logWarning("StageInit command failed; no capture-profile or other trigger value was changed. State: "
                         + motionDeviceStateSummary(_device) + ".");
                     return false;
                 }
@@ -2757,11 +2658,12 @@ bool HeliotisC4Device::copyFrame(
     std::int64_t chunkPartCount = 0;
     const C4HDL_ERROR chunkPartCountResult = C4Buf_readInteger(buffer, "ChunkPartCount", &chunkPartCount);
     if (chunkPartCountResult == C4HDL_ERR_SUCCESS && chunkPartCount != partCount) {
-        if (errorMessage) {
-            *errorMessage = "C4Utility buffer ChunkPartCount=" + std::to_string(chunkPartCount)
-                + " does not match C4Buf_getNumParts=" + std::to_string(partCount) + ".";
+        if (detailedDiagnostics) {
+            logWarning("C4Utility multipart count mismatch: ChunkPartCount="
+                + std::to_string(chunkPartCount) + ", C4Buf_getNumParts="
+                + std::to_string(partCount)
+                + "; continuing with authoritative C4Buf_getNumParts.");
         }
-        return false;
     }
     if (detailedDiagnostics) {
         if (chunkPartCountResult == C4HDL_ERR_SUCCESS) {
@@ -2776,7 +2678,7 @@ bool HeliotisC4Device::copyFrame(
 
     // h8SurfSimple requires only multipart identity chunks.  Geometry chunks
     // are optional: preserve them when the device emits them, but never reject
-    // an otherwise valid Range/Reflectance frame because they are absent.
+    // an otherwise valid payload because they are absent.
     Scan3dGeometry scan3dGeometry;
     std::string scan3dGeometryError;
     const bool hasScan3dGeometry = readScan3dGeometry(
@@ -2799,7 +2701,6 @@ bool HeliotisC4Device::copyFrame(
         copied.timestampNs = static_cast<std::uint64_t>(chunkTimestamp);
     }
     copied.parts.reserve(static_cast<std::size_t>(partCount));
-    bool hasRangePart = false;
     for (std::int64_t partIndex = 0; partIndex < partCount; ++partIndex) {
         const C4HDL_ERROR partSelectorResult = C4Buf_writeInteger(buffer, "ChunkPartSelector", partIndex);
         if (partSelectorResult != C4HDL_ERR_SUCCESS) {
@@ -2814,115 +2715,240 @@ bool HeliotisC4Device::copyFrame(
                 return C4Buf_readString(buffer, "ChunkPartType", text, size);
             },
             &metadataError);
-        if (!metadataError.empty() || partName.empty()) {
-            if (errorMessage) {
-                *errorMessage = "C4Utility buffer part " + std::to_string(partIndex)
-                    + " is missing ChunkPartType metadata"
-                    + (metadataError.empty() ? std::string() : ": " + metadataError)
-                    + ". Enable ChunkPartType in the device preset/profile; Stage Init intentionally does not change payload settings.";
-            }
-            return false;
+        const bool hasPartType = metadataError.empty() && !partName.empty();
+        if (!hasPartType && detailedDiagnostics) {
+            logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
+                + "] has no usable ChunkPartType; preserving raw samples as Unknown."
+                + (metadataError.empty() ? std::string() : " Detail: " + metadataError));
+        }
+        FramePartKind partKind = hasPartType
+            ? framePartKind(partName)
+            : FramePartKind::Unknown;
+        if (hasPartType && partKind == FramePartKind::Unknown && detailedDiagnostics) {
+            logWarning("Preserving unsupported C4Utility chunk part [index="
+                + std::to_string(partIndex) + ", type=" + partName + "] as Unknown.");
         }
 
-        const FramePartKind partKind = framePartKind(partName);
-        if (partKind == FramePartKind::Unknown) {
-            if (detailedDiagnostics) {
-                logWarning("Skipping unsupported C4Utility chunk part [index="
-                    + std::to_string(partIndex) + ", type=" + partName
-                    + "]; known Range data in the same frame will still be delivered.");
+        std::int64_t pixelFormat = 0;
+        std::string pixelFormatName;
+        std::string pixelFormatDiagnostic;
+        bool sampleStorageKnown = false;
+        SampleStorage sampleStorage = SampleStorage::Uint16;
+        const C4HDL_ERROR pixelFormatResult = C4Buf_getPartPixelformat(
+            buffer, partIndex, &pixelFormat);
+        if (pixelFormatResult == C4HDL_ERR_SUCCESS) {
+            std::string pixelFormatError;
+            pixelFormatName = readSdkString(
+                [buffer, pixelFormat](char* text, std::size_t* size) {
+                    return C4Buf_getPixelformatName(buffer, pixelFormat, text, size);
+                },
+                &pixelFormatError);
+            if (!pixelFormatError.empty() || pixelFormatName.empty()) {
+                pixelFormatDiagnostic = pixelFormatError.empty()
+                    ? "C4Utility returned an empty pixel-format name."
+                    : pixelFormatError;
+            } else if (usesFloatingPointSamples(pixelFormatName)) {
+                sampleStorage = SampleStorage::Float64;
+                sampleStorageKnown = true;
+            } else if (sourceBitsPerSample(pixelFormatName) != 0
+                       || lowerCase(pixelFormatName).find("mono") != std::string::npos
+                       || lowerCase(pixelFormatName).find("uint") != std::string::npos
+                       || lowerCase(pixelFormatName).find("int") != std::string::npos) {
+                sampleStorage = SampleStorage::Uint16;
+                sampleStorageKnown = true;
+            } else {
+                pixelFormatDiagnostic = "C4Utility returned an unsupported pixel-format name: "
+                    + pixelFormatName + ".";
             }
-            continue;
+        } else {
+            pixelFormatDiagnostic = operationError("C4Buf_getPartPixelformat", pixelFormatResult);
+        }
+        if (!sampleStorageKnown && detailedDiagnostics) {
+            logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
+                + "] has no reliable pixel-format metadata; probing both typed data getters."
+                + (pixelFormatDiagnostic.empty() ? std::string() : " Detail: " + pixelFormatDiagnostic));
         }
 
         std::vector<std::int64_t> dimensions;
-        if (!readBufferPartDimensions(
-                buffer, partIndex, &dimensions, errorMessage)) return false;
-
+        std::string dimensionDiagnostic;
+        const bool dimensionsRead = readBufferPartDimensions(
+            buffer, partIndex, &dimensions, &dimensionDiagnostic);
         std::uint64_t expectedSamples = 1;
-        for (const std::int64_t dimension : dimensions) {
-            if (dimension <= 0
-                || dimension > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())
-                || expectedSamples > (std::numeric_limits<std::uint32_t>::max)() / static_cast<std::uint64_t>(dimension)) {
-                if (errorMessage) *errorMessage = "C4Utility returned unsupported buffer dimensions.";
-                return false;
+        bool usableDimensions = dimensionsRead && !dimensions.empty();
+        if (usableDimensions) {
+            for (const std::int64_t dimension : dimensions) {
+                if (dimension <= 0
+                    || dimension > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())
+                    || expectedSamples > (std::numeric_limits<std::uint32_t>::max)() / static_cast<std::uint64_t>(dimension)) {
+                    usableDimensions = false;
+                    break;
+                }
+                expectedSamples *= static_cast<std::uint64_t>(dimension);
             }
-            expectedSamples *= static_cast<std::uint64_t>(dimension);
+            usableDimensions = usableDimensions && expectedSamples > 0;
         }
-        if (expectedSamples == 0 || expectedSamples > (std::numeric_limits<std::uint32_t>::max)()) {
-            if (errorMessage) *errorMessage = "C4Utility buffer part exceeds the supported sample count.";
-            return false;
+        std::optional<std::uint32_t> probedSampleCount;
+        if (!sampleStorageKnown) {
+            std::string uint16Diagnostic;
+            std::string floatDiagnostic;
+            const auto uint16SampleCount = queryBufferPartSampleCount<std::uint16_t>(
+                "C4Buf_getDataPartUint16",
+                [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
+                    return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
+                },
+                &uint16Diagnostic);
+            const auto floatSampleCount = queryBufferPartSampleCount<double>(
+                "C4Buf_getDataPartFloat",
+                [buffer, partIndex](double* data, std::uint32_t* capacity) {
+                    return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
+                },
+                &floatDiagnostic);
+            if (uint16SampleCount.has_value() == floatSampleCount.has_value()) {
+                const std::string reason = uint16SampleCount.has_value()
+                    ? "both typed data getters accepted the probe"
+                    : "neither typed data getter supplied a usable size";
+                if (detailedDiagnostics) {
+                    logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
+                        + "] because sample storage is ambiguous or unavailable: " + reason + "."
+                        + (uint16Diagnostic.empty() ? std::string() : " Uint16: " + uint16Diagnostic)
+                        + (floatDiagnostic.empty() ? std::string() : " Float: " + floatDiagnostic));
+                }
+                continue;
+            }
+            sampleStorageKnown = true;
+            sampleStorage = uint16SampleCount.has_value()
+                ? SampleStorage::Uint16
+                : SampleStorage::Float64;
+            probedSampleCount = uint16SampleCount.has_value()
+                ? uint16SampleCount
+                : floatSampleCount;
+        }
+        if (!usableDimensions) {
+            std::string sampleCountDiagnostic;
+            const auto sampleCount = probedSampleCount.has_value()
+                ? probedSampleCount
+                : (sampleStorage == SampleStorage::Float64
+                ? queryBufferPartSampleCount<double>(
+                    "C4Buf_getDataPartFloat",
+                    [buffer, partIndex](double* data, std::uint32_t* capacity) {
+                        return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
+                    },
+                    &sampleCountDiagnostic)
+                : queryBufferPartSampleCount<std::uint16_t>(
+                    "C4Buf_getDataPartUint16",
+                    [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
+                        return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
+                    },
+                    &sampleCountDiagnostic));
+            if (!sampleCount) {
+                if (detailedDiagnostics) {
+                    logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
+                        + "] because dimensions and data size are unusable."
+                        + (dimensionDiagnostic.empty() ? std::string() : " Dimensions: " + dimensionDiagnostic)
+                        + (sampleCountDiagnostic.empty() ? std::string() : " Data: " + sampleCountDiagnostic));
+                }
+                continue;
+            }
+            expectedSamples = *sampleCount;
+            dimensions = {static_cast<std::int64_t>(expectedSamples)};
+            if (detailedDiagnostics) {
+                logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
+                    + "] has unusable dimensions; using " + std::to_string(expectedSamples)
+                    + " copied samples as a one-row raw preview."
+                    + (dimensionDiagnostic.empty() ? std::string() : " Detail: " + dimensionDiagnostic));
+            }
+        } else if (!dimensionDiagnostic.empty() && detailedDiagnostics) {
+            logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
+                + "] dimension metadata was accepted with warning: " + dimensionDiagnostic);
         }
 
-        const auto width = static_cast<std::uint32_t>(dimensions[0]);
-        const auto height = static_cast<std::uint32_t>(expectedSamples / width);
-
-        std::int64_t pixelFormat = 0;
-        if (!checkBufferOperation(
-                C4Buf_getPartPixelformat(buffer, partIndex, &pixelFormat),
-                "C4Buf_getPartPixelformat",
-                errorMessage)) return false;
-        std::string pixelFormatError;
-        const std::string pixelFormatName = readSdkString(
-            [buffer, pixelFormat](char* text, std::size_t* size) {
-                return C4Buf_getPixelformatName(buffer, pixelFormat, text, size);
-            },
-            &pixelFormatError);
-        if (!pixelFormatError.empty()) {
-            if (errorMessage) *errorMessage = pixelFormatError;
-            return false;
-        }
-
-        FramePart part;
-        part.kind = partKind;
-        hasRangePart = hasRangePart || part.kind == FramePartKind::Range;
-        part.name = partName;
-        part.pixelFormat = pixelFormatName;
-        part.width = width;
-        part.height = height;
-        part.bitsPerSample = sourceBitsPerSample(pixelFormatName);
         double fixedPointScale = 1.0;
-        const bool floatingPointSamples = usesFloatingPointSamples(pixelFormatName);
-        if (!floatingPointSamples
+        if (sampleStorage == SampleStorage::Uint16
             && C4Buf_readFloat(buffer, "ChunkPartFixpointScaling", &fixedPointScale) == C4HDL_ERR_SUCCESS) {
             if (!std::isfinite(fixedPointScale)) {
-                if (errorMessage) *errorMessage = "C4Utility returned an invalid ChunkPartFixpointScaling value.";
-                return false;
+                if (partKind == FramePartKind::Range) {
+                    if (detailedDiagnostics) {
+                        logWarning("Preserving typed Range part [index=" + std::to_string(partIndex)
+                            + "] as an uncalibrated raw preview because ChunkPartFixpointScaling is not finite.");
+                    }
+                    partKind = FramePartKind::Unknown;
+                }
+                else if (detailedDiagnostics) {
+                    logWarning("Ignoring non-finite ChunkPartFixpointScaling for raw/non-Range part [index="
+                        + std::to_string(partIndex) + "]; using scale 1.0.");
+                }
+                fixedPointScale = 1.0;
             }
-            part.sampleScale = fixedPointScale;
         }
         std::uint32_t sampleCount = static_cast<std::uint32_t>(expectedSamples);
-        if (floatingPointSamples) {
+        std::uint32_t copiedSampleCount = 0;
+        FramePart part;
+        if (sampleStorage == SampleStorage::Float64) {
             std::vector<double> samples;
-            if (!copyBufferPartSamples<double>(
+            const auto copied = copyBufferPartSamples<double>(
                     sampleCount,
                     "C4Buf_getDataPartFloat",
                     [buffer, partIndex](double* data, std::uint32_t* capacity) {
                         return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
                     },
                     &samples,
-                    errorMessage)) return false;
+                    &pixelFormatDiagnostic);
+            if (!copied) {
+                if (detailedDiagnostics) {
+                    logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
+                        + "] because float samples could not be copied: " + pixelFormatDiagnostic);
+                }
+                continue;
+            }
+            copiedSampleCount = *copied;
             part.samples = std::move(samples);
         } else {
             std::vector<std::uint16_t> samples;
-            if (!copyBufferPartSamples<std::uint16_t>(
+            const auto copied = copyBufferPartSamples<std::uint16_t>(
                     sampleCount,
                     "C4Buf_getDataPartUint16",
                     [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
                         return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
                     },
                     &samples,
-                    errorMessage)) return false;
+                    &pixelFormatDiagnostic);
+            if (!copied) {
+                if (detailedDiagnostics) {
+                    logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
+                        + "] because Uint16 samples could not be copied: " + pixelFormatDiagnostic);
+                }
+                continue;
+            }
+            copiedSampleCount = *copied;
             part.samples = std::move(samples);
         }
+        const bool geometryMatchesCopy = copiedSampleCount == expectedSamples;
+        if (!geometryMatchesCopy && detailedDiagnostics) {
+            logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
+                + "] returned " + std::to_string(copiedSampleCount)
+                + " samples instead of the metadata count " + std::to_string(expectedSamples)
+                + "; presenting the copied data as a one-row raw preview.");
+        }
+        part.kind = partKind;
+        part.name = partName;
+        part.pixelFormat = pixelFormatName;
+        part.width = geometryMatchesCopy
+            ? static_cast<std::uint32_t>(dimensions[0])
+            : copiedSampleCount;
+        part.height = geometryMatchesCopy
+            ? static_cast<std::uint32_t>(expectedSamples / static_cast<std::uint64_t>(dimensions[0]))
+            : 1U;
+        part.bitsPerSample = sourceBitsPerSample(pixelFormatName);
+        part.sampleScale = fixedPointScale;
         copied.parts.push_back(std::move(part));
     }
 
-    if (!hasRangePart) {
-        if (errorMessage) *errorMessage = "C4Utility frame contains no supported Range/Surface part.";
+    if (copied.parts.empty()) {
+        if (errorMessage) *errorMessage = "C4Utility returned no safely copyable data parts.";
         return false;
     }
     if (!copied.isValid()) {
-        if (errorMessage) *errorMessage = "C4Utility produced an invalid frame payload.";
+        if (errorMessage) *errorMessage = "C4Utility produced an invalid frame payload after part filtering.";
         return false;
     }
     if (hasScan3dGeometry) {

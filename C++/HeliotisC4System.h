@@ -85,12 +85,11 @@ public:
     /**
      * Applies the complete H8 surface capture defaults, including components,
      * chunks, canonical RecordingStart/FrameStart routing, encoder, scan motion,
-     * processing, and illumination. It disables the deprecated AcquisitionStart
-     * route when the firmware exposes it.
+     * processing, and illumination. Existing AcquisitionStart routing is
+     * preserved.
      *
      * @param errorMessage Optional failure detail.
-     * @return True when every required group and the legacy-trigger cleanup
-     *         succeeded; an absent AcquisitionStart and optional capability
+     * @return True when every required group succeeds; optional capability
      *         failures are treated as compatible.
      * @note The caller must establish stage clearance before invoking this method.
      *       Encoder and motion values are reset to the C4Utility h8SurfSimple
@@ -106,11 +105,9 @@ public:
      *
      * @param errorMessage Optional failure detail.
      * @return True when StageInit completes; false when its command or completion
-     *         status fails. Legacy trigger cleanup failure is logged separately.
+     *         status fails.
      * @note This operation is serialized against profile initialization and
-     *       acquisition and may move the stage. It attempts to disable the
-     *       deprecated AcquisitionStart route when exposed, but cleanup failure
-     *       does not block StageInit. StageInit always executes so the device
+     *       acquisition and may move the stage. StageInit always executes so the
      *       StageInitMode owns reinitialization policy. Other trigger values and
      *       all capture, processing, illumination, and user-set values are preserved.
      */
@@ -190,15 +187,18 @@ public:
 
 private:
     /**
-     * Deep-copies supported multipart data before releasing the SDK buffer.
+     * Deep-copies multipart data before releasing the SDK buffer.
      *
      * @param buffer Live C4Utility buffer.
      * @param detailedDiagnostics Whether to emit sampled metadata warnings.
      * @param frame Destination deep-owned frame.
      * @param errorMessage Optional copy failure detail.
-     * @return True when a valid frame containing Range data was copied.
-     * @note The C API part count is authoritative. ChunkPartCount is checked
-     *       when present, while ChunkPartType remains required for semantic data.
+     * @return True when a valid frame with one or more copied parts was copied.
+     * @note The C API part count is authoritative. ChunkPartCount is reported
+     *       when it disagrees but does not block copying. ChunkPartType is
+     *       classification metadata; missing or unknown types remain available
+     *       as raw Unknown parts. Dimensions are best-effort; when unusable,
+     *       the data API size probe supplies a one-row raw preview shape.
      */
     [[nodiscard]] bool copyFrame(
         C4_BUFFER buffer,

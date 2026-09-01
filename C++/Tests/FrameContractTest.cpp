@@ -33,5 +33,13 @@ int main()
         return 1;
     }
 
+    frame.parts.front().kind = heliotis::FramePartKind::Unknown;
+    frame.parts.front().samples = std::vector<std::uint16_t>{1U, 2U, 3U, 4U};
+    if (!frame.isValid())
+    {
+        std::cerr << "A structurally valid unknown part must remain deliverable.\n";
+        return 1;
+    }
+
     return 0;
 }

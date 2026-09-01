@@ -94,12 +94,70 @@ int main()
         return 1;
     }
 
+    frame.scan3dGeometry = heliotis::Scan3dGeometry{
+        "RectifiedC",
+        "unsupported-unit",
+        2.0,
+        3.0,
+        0.5,
+        100.0,
+        200.0,
+        -10.0
+    };
+    const auto invalidGeometryScene = adapter.convert(frame, {});
+    if (!invalidGeometryScene || !invalidGeometryScene->rangeFrame
+        || invalidGeometryScene->rangeFrame->rangeField.domain != MeasurementValueDomain::Native
+        || std::isfinite(invalidGeometryScene->rangeFrame->xScale)
+        || std::isfinite(invalidGeometryScene->rangeFrame->yScale))
+    {
+        std::cerr << "Invalid Scan3d geometry must fall back to a raw range preview.\n";
+        return 1;
+    }
+
     GraphicsScene3DRequest rangeOnlyRequest;
     rangeOnlyRequest.includeRangeAuxiliaryChannels = false;
     const auto rangeOnlyScene = adapter.convert(frame, rangeOnlyRequest);
     if (!rangeOnlyScene || !rangeOnlyScene->rangeFrame || !rangeOnlyScene->rangeFrame->intensity.empty())
     {
         std::cerr << "Auxiliary channels must follow the GraphicsEngine scene request.\n";
+        return 1;
+    }
+
+    heliotis::Frame rawFrame;
+    rawFrame.sequence = 8;
+    rawFrame.parts = {
+        {
+            heliotis::FramePartKind::Unknown,
+            {},
+            "Mono16",
+            2,
+            2,
+            16,
+            std::vector<std::uint16_t>{11U, 22U, 33U, 44U}
+        }
+    };
+    const auto rawPreview = adapter.convert(rawFrame, {});
+    if (!rawPreview || !rawPreview->rangeFrame
+        || rawPreview->rangeFrame->rangeField.displayName != "Raw Part"
+        || rawPreview->rangeFrame->zValues.size() != 4U
+        || std::fabs(rawPreview->rangeFrame->zValues.at(2) - 33.0F) > 0.0001F)
+    {
+        std::cerr << "A valid unclassified H8 part must still produce a raw preview.\n";
+        return 1;
+    }
+
+    rawFrame.parts.push_back({
+        heliotis::FramePartKind::Intensity,
+        "Intensity",
+        "Mono16",
+        0,
+        0,
+        16,
+        std::vector<std::uint16_t>{}
+    });
+    if (rawFrame.isValid() || !adapter.convert(rawFrame, {}).has_value())
+    {
+        std::cerr << "An invalid auxiliary part must not hide a valid displayable part.\n";
         return 1;
     }
 
