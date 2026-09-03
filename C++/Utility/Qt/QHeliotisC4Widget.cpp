@@ -14,6 +14,7 @@
 #include <QSignalBlocker>
 #include <QScrollBar>
 #include <QStatusBar>
+#include <QStringList>
 #include <QStyle>
 #include <QTimer>
 #include <QToolButton>
@@ -55,6 +56,83 @@ void collectTreeItems(
     for (int index = 0; index < item->childCount(); ++index) {
         collectTreeItems(item->child(index), items);
     }
+}
+
+void appendTreeIds(const QTreeWidgetItem* item, QStringList& ids)
+{
+    if (!item) return;
+
+    const QString id = itemId(item);
+    if (!id.isEmpty()) ids.append(id);
+    for (int index = 0; index < item->childCount(); ++index) {
+        appendTreeIds(item->child(index), ids);
+    }
+}
+
+QStringList currentTreeIds(const QTreeWidget* tree)
+{
+    QStringList ids;
+    for (int index = 0; index < tree->topLevelItemCount(); ++index) {
+        appendTreeIds(tree->topLevelItem(index), ids);
+    }
+    return ids;
+}
+
+QStringList expectedTreeIds(const heliotis::HeliotisC4::FeatureList& features)
+{
+    QStringList ids;
+    if (features.empty()) return ids;
+
+    ids.append(QStringLiteral("root"));
+    QSet<QString> seenCategories;
+    for (const auto& feature : features) {
+        QString currentPath;
+        for (const auto& segment : QString::fromStdString(feature.categoryPath)
+                 .split(QLatin1Char('/'), Qt::SkipEmptyParts)) {
+            currentPath += currentPath.isEmpty() ? segment : QStringLiteral("/") + segment;
+            if (!seenCategories.contains(currentPath)) {
+                seenCategories.insert(currentPath);
+                ids.append(categoryItemId(currentPath));
+            }
+        }
+        ids.append(featureItemId(feature));
+    }
+    return ids;
+}
+
+[[nodiscard]] bool isFeatureWritable(const heliotis::FeatureDescriptor& feature)
+{
+    return feature.access == heliotis::FeatureAccess::ReadWrite
+        || feature.access == heliotis::FeatureAccess::WriteOnly;
+}
+
+[[nodiscard]] bool editorMatchesFeature(
+    const QTreeWidget* tree,
+    const QTreeWidgetItem* item,
+    const heliotis::FeatureDescriptor& feature)
+{
+    QWidget* editor = tree->itemWidget(const_cast<QTreeWidgetItem*>(item), 1);
+    if (!editor) return false;
+
+    if (feature.type == heliotis::FeatureType::Command) {
+        return qobject_cast<QPushButton*>(editor) != nullptr;
+    }
+    if (feature.type == heliotis::FeatureType::Boolean) {
+        return qobject_cast<QCheckBox*>(editor) != nullptr;
+    }
+    if (feature.type == heliotis::FeatureType::Enumeration && !feature.enumEntries.empty()) {
+        auto* comboBox = qobject_cast<QComboBox*>(editor);
+        if (!comboBox || comboBox->count() != static_cast<int>(feature.enumEntries.size())) {
+            return false;
+        }
+        for (int index = 0; index < comboBox->count(); ++index) {
+            if (comboBox->itemText(index) != QString::fromStdString(feature.enumEntries[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return qobject_cast<QLineEdit*>(editor) != nullptr;
 }
 
 QTreeWidget* createFeatureTree(QWidget* parent, const QString& objectName)
@@ -741,7 +819,13 @@ void QHeliotisC4Widget::populateTree(
     QHash<QString, QTreeWidgetItem*>& categories,
     const heliotis::HeliotisC4::FeatureList& features)
 {
+    if (tryUpdateTreeInPlace(tree, features)) {
+        return;
+    }
+
     const TreeState state = captureTreeState(tree, categories);
+    const bool restoreUpdates = tree->updatesEnabled();
+    tree->setUpdatesEnabled(false);
 
     tree->clear();
     categories.clear();
@@ -757,76 +841,158 @@ void QHeliotisC4Widget::populateTree(
     }
     for (const auto& feature : features) {
         auto* parent = ensureCategory(rootItem, categories, QString::fromStdString(feature.categoryPath));
-        auto* item = new QTreeWidgetItem(parent ? parent : rootItem);
-        item->setData(0, featureTreeIdRole, featureItemId(feature));
-        item->setText(0, QString::fromStdString(feature.displayName));
-        item->setToolTip(0, QString::fromStdString(feature.description));
-        const QString featureName = QString::fromStdString(feature.displayName);
-        const bool writable = feature.access == heliotis::FeatureAccess::ReadWrite
-            || feature.access == heliotis::FeatureAccess::WriteOnly;
-
-        if (feature.type == heliotis::FeatureType::Command) {
-            auto* executeButton = new QPushButton(tr("Execute"), tree);
-            const bool isSoftwareTrigger = featureName == QStringLiteral("TriggerSoftware");
-            executeButton->setProperty(featureWritableProperty, writable);
-            executeButton->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending
-                && (!isSoftwareTrigger || _acquisitionActive));
-            connect(executeButton, &QPushButton::clicked, this, [this, featureName] {
-                emit featureCommandRequested(featureName);
-            });
-            tree->setItemWidget(item, 1, executeButton);
-            if (isSoftwareTrigger) {
-                _softwareTriggerButtons.push_back(executeButton);
-            } else {
-                _featureEditors.push_back(executeButton);
-            }
-            continue;
-        }
-
-        if (feature.type == heliotis::FeatureType::Boolean) {
-            auto* checkBox = new QCheckBox(tree);
-            checkBox->setProperty(featureWritableProperty, writable);
-            checkBox->setChecked(feature.valueText == "1" || feature.valueText == "true");
-            checkBox->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
-            connect(checkBox, &QCheckBox::toggled, this, [this, featureName](const bool checked) {
-                emit featureWriteRequested(featureName, checked ? QStringLiteral("1") : QStringLiteral("0"));
-            });
-            tree->setItemWidget(item, 1, checkBox);
-            _featureEditors.push_back(checkBox);
-            continue;
-        }
-
-        if (feature.type == heliotis::FeatureType::Enumeration && !feature.enumEntries.empty()) {
-            auto* comboBox = new QComboBox(tree);
-            comboBox->setProperty(featureWritableProperty, writable);
-            for (const auto& entry : feature.enumEntries) {
-                comboBox->addItem(QString::fromStdString(entry));
-            }
-            comboBox->setCurrentText(QString::fromStdString(feature.valueText));
-            comboBox->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
-            connect(comboBox, &QComboBox::textActivated, this, [this, featureName](const QString& value) {
-                emit featureWriteRequested(featureName, value);
-            });
-            tree->setItemWidget(item, 1, comboBox);
-            _featureEditors.push_back(comboBox);
-            continue;
-        }
-
-        auto* lineEdit = new QLineEdit(tree);
-        lineEdit->setProperty(featureWritableProperty, writable);
-        if (feature.access == heliotis::FeatureAccess::WriteOnly) {
-            lineEdit->setPlaceholderText(tr("Enter value"));
-        } else {
-            lineEdit->setText(QString::fromStdString(feature.valueText));
-        }
-        lineEdit->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
-        connect(lineEdit, &QLineEdit::editingFinished, this, [this, featureName, lineEdit] {
-            emit featureWriteRequested(featureName, lineEdit->text());
-        });
-        tree->setItemWidget(item, 1, lineEdit);
-        _featureEditors.push_back(lineEdit);
+        createFeatureItem(tree, parent ? parent : rootItem, feature);
     }
     restoreTreeState(tree, categories, state);
+    tree->setUpdatesEnabled(restoreUpdates);
+}
+
+bool QHeliotisC4Widget::tryUpdateTreeInPlace(
+    QTreeWidget* tree,
+    const heliotis::HeliotisC4::FeatureList& features)
+{
+    if (features.empty() || tree->topLevelItemCount() == 0) {
+        return false;
+    }
+    if (currentTreeIds(tree) != expectedTreeIds(features)) {
+        return false;
+    }
+
+    QHash<QString, QTreeWidgetItem*> items;
+    for (int index = 0; index < tree->topLevelItemCount(); ++index) {
+        collectTreeItems(tree->topLevelItem(index), items);
+    }
+    for (const auto& feature : features) {
+        QTreeWidgetItem* item = items.value(featureItemId(feature));
+        if (!item || !editorMatchesFeature(tree, item, feature)) {
+            return false;
+        }
+    }
+    for (const auto& feature : features) {
+        updateFeatureEditor(tree, items.value(featureItemId(feature)), feature);
+    }
+    return true;
+}
+
+void QHeliotisC4Widget::createFeatureItem(
+    QTreeWidget* tree,
+    QTreeWidgetItem* parent,
+    const heliotis::FeatureDescriptor& feature)
+{
+    auto* item = new QTreeWidgetItem(parent);
+    item->setData(0, featureTreeIdRole, featureItemId(feature));
+    item->setText(0, QString::fromStdString(feature.displayName));
+    item->setToolTip(0, QString::fromStdString(feature.description));
+    const QString featureName = QString::fromStdString(feature.displayName);
+    const bool writable = isFeatureWritable(feature);
+
+    if (feature.type == heliotis::FeatureType::Command) {
+        auto* executeButton = new QPushButton(tr("Execute"), tree);
+        const bool isSoftwareTrigger = featureName == QStringLiteral("TriggerSoftware");
+        executeButton->setProperty(featureWritableProperty, writable);
+        executeButton->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending
+            && (!isSoftwareTrigger || _acquisitionActive));
+        connect(executeButton, &QPushButton::clicked, this, [this, featureName] {
+            emit featureCommandRequested(featureName);
+        });
+        tree->setItemWidget(item, 1, executeButton);
+        if (isSoftwareTrigger) {
+            _softwareTriggerButtons.push_back(executeButton);
+        } else {
+            _featureEditors.push_back(executeButton);
+        }
+        return;
+    }
+
+    if (feature.type == heliotis::FeatureType::Boolean) {
+        auto* checkBox = new QCheckBox(tree);
+        checkBox->setProperty(featureWritableProperty, writable);
+        checkBox->setChecked(feature.valueText == "1" || feature.valueText == "true");
+        checkBox->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
+        connect(checkBox, &QCheckBox::toggled, this, [this, featureName](const bool checked) {
+            emit featureWriteRequested(featureName, checked ? QStringLiteral("1") : QStringLiteral("0"));
+        });
+        tree->setItemWidget(item, 1, checkBox);
+        _featureEditors.push_back(checkBox);
+        return;
+    }
+
+    if (feature.type == heliotis::FeatureType::Enumeration && !feature.enumEntries.empty()) {
+        auto* comboBox = new QComboBox(tree);
+        comboBox->setProperty(featureWritableProperty, writable);
+        for (const auto& entry : feature.enumEntries) {
+            comboBox->addItem(QString::fromStdString(entry));
+        }
+        comboBox->setCurrentText(QString::fromStdString(feature.valueText));
+        comboBox->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
+        connect(comboBox, &QComboBox::textActivated, this, [this, featureName](const QString& value) {
+            emit featureWriteRequested(featureName, value);
+        });
+        tree->setItemWidget(item, 1, comboBox);
+        _featureEditors.push_back(comboBox);
+        return;
+    }
+
+    auto* lineEdit = new QLineEdit(tree);
+    lineEdit->setProperty(featureWritableProperty, writable);
+    if (feature.access == heliotis::FeatureAccess::WriteOnly) {
+        lineEdit->setPlaceholderText(tr("Enter value"));
+    } else {
+        lineEdit->setText(QString::fromStdString(feature.valueText));
+    }
+    lineEdit->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
+    connect(lineEdit, &QLineEdit::editingFinished, this, [this, featureName, lineEdit] {
+        emit featureWriteRequested(featureName, lineEdit->text());
+    });
+    tree->setItemWidget(item, 1, lineEdit);
+    _featureEditors.push_back(lineEdit);
+}
+
+void QHeliotisC4Widget::updateFeatureEditor(
+    QTreeWidget* tree,
+    QTreeWidgetItem* item,
+    const heliotis::FeatureDescriptor& feature)
+{
+    if (!item) return;
+
+    item->setText(0, QString::fromStdString(feature.displayName));
+    item->setToolTip(0, QString::fromStdString(feature.description));
+    QWidget* editor = tree->itemWidget(item, 1);
+    if (!editor) return;
+
+    const QString featureName = QString::fromStdString(feature.displayName);
+    const bool writable = isFeatureWritable(feature);
+    const bool editorEnabled = writable && _featureAccessCurrent && !_featureOperationPending;
+    editor->setProperty(featureWritableProperty, writable);
+
+    if (auto* executeButton = qobject_cast<QPushButton*>(editor)) {
+        const bool isSoftwareTrigger = featureName == QStringLiteral("TriggerSoftware");
+        executeButton->setEnabled(editorEnabled && (!isSoftwareTrigger || _acquisitionActive));
+        return;
+    }
+    if (auto* checkBox = qobject_cast<QCheckBox*>(editor)) {
+        const QSignalBlocker blocker(checkBox);
+        checkBox->setChecked(feature.valueText == "1" || feature.valueText == "true");
+        checkBox->setEnabled(editorEnabled);
+        return;
+    }
+    if (auto* comboBox = qobject_cast<QComboBox*>(editor)) {
+        const QSignalBlocker blocker(comboBox);
+        comboBox->setCurrentText(QString::fromStdString(feature.valueText));
+        comboBox->setEnabled(editorEnabled);
+        return;
+    }
+    if (auto* lineEdit = qobject_cast<QLineEdit*>(editor)) {
+        const QSignalBlocker blocker(lineEdit);
+        if (feature.access == heliotis::FeatureAccess::WriteOnly) {
+            lineEdit->clear();
+            lineEdit->setPlaceholderText(tr("Enter value"));
+        } else {
+            lineEdit->setPlaceholderText(QString());
+            lineEdit->setText(QString::fromStdString(feature.valueText));
+        }
+        lineEdit->setEnabled(editorEnabled);
+    }
 }
 
 QHeliotisC4Widget::TreeState QHeliotisC4Widget::captureTreeState(
@@ -875,10 +1041,14 @@ void QHeliotisC4Widget::restoreTreeState(
         }
     }
 
+    tree->doItemsLayout();
+
     QHash<QString, QTreeWidgetItem*> items;
     for (int index = 0; index < tree->topLevelItemCount(); ++index) {
         collectTreeItems(tree->topLevelItem(index), items);
     }
+    const bool restoreAutoScroll = tree->hasAutoScroll();
+    tree->setAutoScroll(false);
     if (!state.currentItem.isEmpty()) {
         if (QTreeWidgetItem* currentItem = items.value(state.currentItem)) {
             tree->setCurrentItem(currentItem);
@@ -895,6 +1065,7 @@ void QHeliotisC4Widget::restoreTreeState(
         tree->verticalScrollBar()->setValue(state.verticalScrollValue);
     }
     tree->horizontalScrollBar()->setValue(state.horizontalScrollValue);
+    tree->setAutoScroll(restoreAutoScroll);
 }
 
 QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(

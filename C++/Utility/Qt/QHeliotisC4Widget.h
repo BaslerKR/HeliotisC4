@@ -100,7 +100,13 @@ public:
     /** Locks competing controls and restores capture after an asynchronous feature operation and refresh. */
     void setFeatureOperationPending(bool pending);
     void setFeatureError(const QString& message);
-    /** Rebuilds the feature tree while preserving scroll, selection, and acquisition locks. */
+    /**
+     * Applies a complete feature snapshot.
+     *
+     * Same-structure refreshes update existing editors in place. Selector-style
+     * add, remove, type, or enum-list changes rebuild the tree while preserving
+     * expansion, selection, and the top-visible viewport anchor.
+     */
     void setFeatures(const heliotis::HeliotisC4::FeatureList& features);
 
 signals:
@@ -131,6 +137,21 @@ private:
         QTreeWidget* tree,
         QHash<QString, QTreeWidgetItem*>& categories,
         const heliotis::HeliotisC4::FeatureList& features);
+    /**
+     * Updates existing editors when identity, types, enum lists, and category
+     * layout match so a value-only snapshot cannot move the viewport.
+     */
+    bool tryUpdateTreeInPlace(
+        QTreeWidget* tree,
+        const heliotis::HeliotisC4::FeatureList& features);
+    void createFeatureItem(
+        QTreeWidget* tree,
+        QTreeWidgetItem* parent,
+        const heliotis::FeatureDescriptor& feature);
+    void updateFeatureEditor(
+        QTreeWidget* tree,
+        QTreeWidgetItem* item,
+        const heliotis::FeatureDescriptor& feature);
     TreeState captureTreeState(
         QTreeWidget* tree,
         const QHash<QString, QTreeWidgetItem*>& categories) const;

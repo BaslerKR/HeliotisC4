@@ -1,6 +1,9 @@
 #include "Utility/Qt/QHeliotisC4Widget.h"
 
+#include <QAbstractItemView>
 #include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDebug>
 #include <QLabel>
 #include <QLineEdit>
@@ -10,6 +13,7 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 
@@ -76,6 +80,31 @@ int main(int argc, char** argv)
         heliotis::FeatureAccess::ReadWrite,
         {},
     });
+    features.push_back({
+        "Inspect",
+        "Mode",
+        "A",
+        {},
+        heliotis::FeatureType::Enumeration,
+        heliotis::FeatureAccess::ReadWrite,
+        {"A", "B", "C"},
+    });
+    features.push_back({
+        "Inspect",
+        "Enabled",
+        "1",
+        {},
+        heliotis::FeatureType::Boolean,
+        heliotis::FeatureAccess::ReadWrite,
+        {},
+    });
+    features.push_back(makeFeature(QStringLiteral("Inspect"), QStringLiteral("Threshold"), QStringLiteral("10")));
+    for (int index = 0; index < 20; ++index) {
+        features.push_back(makeFeature(
+            QStringLiteral("Inspect"),
+            QStringLiteral("Sample%1").arg(index),
+            QString::number(index)));
+    }
 
     widget.setConnectedDeviceName(QStringLiteral("Test H8"));
     widget.setFeatures(features);
@@ -152,6 +181,107 @@ int main(int argc, char** argv)
     if (!require(tree->currentItem() != nullptr
                      && tree->currentItem()->data(0, Qt::UserRole).toString() == currentBeforeId,
                  "The current Heliotis tree item changed after a feature refresh.")) {
+        return EXIT_FAILURE;
+    }
+
+    const auto inspectItems = tree->findItems(
+        QStringLiteral("Inspect"), Qt::MatchExactly | Qt::MatchRecursive, 0);
+    if (!require(!inspectItems.isEmpty(), "The Inspect category is missing.")) return EXIT_FAILURE;
+    inspectItems.front()->setExpanded(true);
+    application.processEvents();
+
+    const auto thresholdItems = tree->findItems(
+        QStringLiteral("Threshold"), Qt::MatchExactly | Qt::MatchRecursive, 0);
+    const auto modeItems = tree->findItems(
+        QStringLiteral("Mode"), Qt::MatchExactly | Qt::MatchRecursive, 0);
+    const auto enabledItems = tree->findItems(
+        QStringLiteral("Enabled"), Qt::MatchExactly | Qt::MatchRecursive, 0);
+    const auto sampleItems = tree->findItems(
+        QStringLiteral("Sample10"), Qt::MatchExactly | Qt::MatchRecursive, 0);
+    auto* thresholdEditor = thresholdItems.isEmpty()
+        ? nullptr
+        : qobject_cast<QLineEdit*>(tree->itemWidget(thresholdItems.front(), 1));
+    auto* modeEditor = modeItems.isEmpty()
+        ? nullptr
+        : qobject_cast<QComboBox*>(tree->itemWidget(modeItems.front(), 1));
+    auto* enabledEditor = enabledItems.isEmpty()
+        ? nullptr
+        : qobject_cast<QCheckBox*>(tree->itemWidget(enabledItems.front(), 1));
+    if (!require(thresholdEditor != nullptr && modeEditor != nullptr && enabledEditor != nullptr
+                     && !sampleItems.isEmpty(),
+                 "Mixed Inspect editors were not created.")) {
+        return EXIT_FAILURE;
+    }
+
+    tree->scrollToItem(sampleItems.front(), QAbstractItemView::PositionAtTop);
+    application.processEvents();
+    auto* mixedTopBefore = tree->itemAt(tree->viewport()->rect().topLeft());
+    if (!require(mixedTopBefore != nullptr, "A top-visible Inspect item was not found.")) {
+        return EXIT_FAILURE;
+    }
+    const QString mixedTopBeforeId = mixedTopBefore->data(0, Qt::UserRole).toString();
+    const int mixedTopBeforeOffset = tree->visualItemRect(mixedTopBefore).top();
+
+    auto sameStructure = updatedFeatures;
+    for (auto& feature : sameStructure) {
+        if (feature.displayName == "Mode") feature.valueText = "B";
+        else if (feature.displayName == "Enabled") feature.valueText = "0";
+        else if (feature.displayName == "Threshold") feature.valueText = "99";
+    }
+
+    bool writeEmitted = false;
+    QObject::connect(&widget, &QHeliotisC4Widget::featureWriteRequested, &widget,
+        [&writeEmitted](const QString&, const QString&) {
+            writeEmitted = true;
+        });
+    widget.setFeatures(sameStructure);
+    application.processEvents();
+    application.processEvents();
+    if (!require(!writeEmitted, "An in-place snapshot must not emit feature writes.")) {
+        return EXIT_FAILURE;
+    }
+    if (!require(tree->itemWidget(thresholdItems.front(), 1) == thresholdEditor
+                     && tree->itemWidget(modeItems.front(), 1) == modeEditor
+                     && tree->itemWidget(enabledItems.front(), 1) == enabledEditor,
+                 "A same-structure refresh must keep existing mixed editors.")) {
+        return EXIT_FAILURE;
+    }
+    if (!require(thresholdEditor->text() == QStringLiteral("99")
+                     && modeEditor->currentText() == QStringLiteral("B")
+                     && !enabledEditor->isChecked(),
+                 "A same-structure refresh must apply the complete snapshot values.")) {
+        return EXIT_FAILURE;
+    }
+    auto* mixedTopAfter = tree->itemAt(tree->viewport()->rect().topLeft());
+    if (!require(mixedTopAfter != nullptr
+                     && mixedTopAfter->data(0, Qt::UserRole).toString() == mixedTopBeforeId
+                     && tree->visualItemRect(mixedTopAfter).top() == mixedTopBeforeOffset,
+                 "A same-structure refresh must keep the top-visible viewport anchor.")) {
+        return EXIT_FAILURE;
+    }
+
+    auto structural = sameStructure;
+    structural.erase(std::remove_if(structural.begin(), structural.end(),
+                         [](const heliotis::FeatureDescriptor& feature) {
+                             return feature.displayName == "Sample19";
+                         }),
+        structural.end());
+    structural.insert(
+        structural.end(),
+        makeFeature(QStringLiteral("Inspect"), QStringLiteral("ExtraSibling"), QStringLiteral("new")));
+    widget.setFeatures(structural);
+    application.processEvents();
+    application.processEvents();
+    auto* structuralTop = tree->itemAt(tree->viewport()->rect().topLeft());
+    if (!require(structuralTop != nullptr
+                     && structuralTop->data(0, Qt::UserRole).toString() == mixedTopBeforeId
+                     && tree->visualItemRect(structuralTop).top() == mixedTopBeforeOffset,
+                 "A selector-style add/remove rebuild must keep the top-visible viewport anchor.")) {
+        return EXIT_FAILURE;
+    }
+    if (!require(tree->findItems(QStringLiteral("ExtraSibling"), Qt::MatchExactly | Qt::MatchRecursive, 0).size() == 1
+                     && tree->findItems(QStringLiteral("Sample19"), Qt::MatchExactly | Qt::MatchRecursive, 0).isEmpty(),
+                 "A structural refresh must add and remove selector-dependent features.")) {
         return EXIT_FAILURE;
     }
 
