@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <exception>
 #include <limits>
+#include <utility>
 
 namespace {
 
@@ -311,6 +313,60 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     result.metadata.frameId = frame.frameId;
     result.metadata.frameIndex = frame.sequence;
     return result;
+}
+
+namespace {
+
+[[nodiscard]] GraphicsFrameRequest heliotisGraphicsFrameRequest() noexcept
+{
+    GraphicsFrameRequest request;
+    request.components = GraphicsFrameComponent::Range | GraphicsFrameComponent::PointCloud;
+    request.includeRangeAuxiliaryChannels = true;
+    request.includePointCloudColors = false;
+    return request;
+}
+
+} // namespace
+
+HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
+    HeliotisC4Device* device,
+    GraphicsFrameCallback callback)
+    : _device(device), _callback(std::move(callback))
+{
+}
+
+bool HeliotisGraphicsFrameStream::start(
+    const HeliotisC4Device::AcquisitionMode mode,
+    std::string* errorMessage)
+{
+    if (!_device || !_callback)
+    {
+        if (errorMessage) *errorMessage = "Heliotis GraphicsFrame stream is unavailable.";
+        return false;
+    }
+
+    return _device->startAcquisition(mode,
+        [this](Frame&& sourceFrame) {
+            try
+            {
+                auto frame = _adapter.convertFrame(sourceFrame, heliotisGraphicsFrameRequest());
+                if (frame.has_value()) _callback(std::move(*frame), 0U);
+            }
+            catch (...)
+            {
+                // Do not let host conversion or consumer exceptions cross the SDK callback.
+            }
+        }, errorMessage);
+}
+
+void HeliotisGraphicsFrameStream::requestStop() noexcept
+{
+    if (_device) _device->requestStopAcquisition();
+}
+
+void HeliotisGraphicsFrameStream::stop()
+{
+    if (_device) _device->stopAcquisition();
 }
 
 } // namespace heliotis

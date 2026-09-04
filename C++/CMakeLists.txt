@@ -72,7 +72,6 @@ if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
         Utility/GraphicsEngine/HeliotisC4GraphicsFrameAdapter.h
         Utility/GraphicsEngine/HeliotisC4GraphicsFrameAdapter.cpp
     )
-    find_package(Qt6 REQUIRED COMPONENTS Gui)
     add_library(HeliotisC4::GraphicsEngineAdapter ALIAS HeliotisC4GraphicsEngineAdapter)
     target_compile_features(HeliotisC4GraphicsEngineAdapter PUBLIC cxx_std_17)
     target_include_directories(HeliotisC4GraphicsEngineAdapter
@@ -83,7 +82,6 @@ if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
         PUBLIC
             HeliotisC4::Core
             GraphicsEngine::Contracts
-            Qt6::Gui
     )
     message(STATUS "[HeliotisC4] HeliotisC4::GraphicsEngineAdapter enabled.")
 endif()

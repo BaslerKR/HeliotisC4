@@ -104,7 +104,7 @@ int main()
         200.0,
         -10.0
     };
-    const auto invalidGeometryScene = adapter.convert(frame, {});
+    const auto invalidGeometryScene = adapter.convertFrame(frame, {});
     if (!invalidGeometryScene || !invalidGeometryScene->rangeFrame
         || invalidGeometryScene->rangeFrame->rangeField.domain != MeasurementValueDomain::Native
         || std::isfinite(invalidGeometryScene->rangeFrame->xScale)
@@ -156,7 +156,7 @@ int main()
         16,
         std::vector<std::uint16_t>{}
     });
-    if (rawFrame.isValid() || !adapter.convert(rawFrame, {}).has_value())
+    if (rawFrame.isValid() || !adapter.convertFrame(rawFrame, {}).has_value())
     {
         std::cerr << "An invalid auxiliary part must not hide a valid displayable part.\n";
         return 1;

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Move SDK acquisition callback conversion into the module adapter stream; the parent receives only owned GraphicsFrame values.
+- Keep the GraphicsFrame adapter target independent of Qt GUI.
+- Align the adapter regression test with the public `convertFrame` entry point.
 - Route Heliotis 3D handoff through the host-owned `GraphicsFrame` payload contract.
 - Keep the feature-tree viewport in place across post-write snapshot refreshes: update existing editors when identity, types, and enum lists are unchanged, and restore expansion, selection, and the top-visible anchor when selector writes add or remove nodes.
 - Preserve every structurally valid multipart buffer even when `ChunkPartType` is missing or unknown, and show the first unclassified part as a raw preview until semantic mapping is available.
