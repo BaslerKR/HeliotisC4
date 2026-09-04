@@ -31,7 +31,7 @@ class HeliotisGraphicsFrameStream final
 {
 public:
     HeliotisGraphicsFrameStream(HeliotisC4Device* device, GraphicsFrameCallback callback);
-    ~HeliotisGraphicsFrameStream() = default;
+    ~HeliotisGraphicsFrameStream();
 
     HeliotisGraphicsFrameStream(const HeliotisGraphicsFrameStream&) = delete;
     HeliotisGraphicsFrameStream& operator=(const HeliotisGraphicsFrameStream&) = delete;
@@ -46,6 +46,7 @@ private:
     HeliotisC4Device* _device = nullptr;
     GraphicsFrameCallback _callback;
     HeliotisC4GraphicsFrameAdapter _adapter;
+    GraphicsFrameCallbackGate _callbackGate;
 };
 
 } // namespace heliotis

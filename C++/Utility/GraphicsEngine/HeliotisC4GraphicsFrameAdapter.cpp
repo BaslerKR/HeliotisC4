@@ -335,6 +335,25 @@ HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
 {
 }
 
+HeliotisGraphicsFrameStream::~HeliotisGraphicsFrameStream()
+{
+    _callbackGate.beginShutdown();
+    if (_device)
+    {
+        _device->requestStopAcquisition();
+        try
+        {
+            _device->stopAcquisition();
+        }
+        catch (...)
+        {
+            // Destruction must remain non-throwing; the gate still drains
+            // callbacks already admitted before the SDK stop attempt.
+        }
+    }
+    _callbackGate.waitForDrain();
+}
+
 bool HeliotisGraphicsFrameStream::start(
     const HeliotisC4Device::AcquisitionMode mode,
     std::string* errorMessage)
@@ -345,8 +364,11 @@ bool HeliotisGraphicsFrameStream::start(
         return false;
     }
 
+    const auto callbackToken = _callbackGate.token();
     return _device->startAcquisition(mode,
-        [this](Frame&& sourceFrame) {
+        [this, callbackToken](Frame&& sourceFrame) {
+            GraphicsFrameCallbackGate::Lease lease(callbackToken);
+            if (!lease) return;
             try
             {
                 auto frame = _adapter.convertFrame(sourceFrame, heliotisGraphicsFrameRequest());
