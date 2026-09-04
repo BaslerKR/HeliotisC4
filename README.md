@@ -8,7 +8,7 @@ HeliotisC4 is a C++17 device-runtime module for Heliotis heliInspect H8 systems 
 - `HELIOTISC4_ENABLE_SDK=ON` adds the Windows C4Utility implementation.
 - `HELIOTISC4_BUILD_QT_UI=ON` adds the optional `HeliotisC4::QtWidget` static target and requires Qt 6 Widgets.
 - `HELIOTISC4_BUILD_TESTS=ON` builds the standalone contract and SDK-layout tests.
-- An optional scene adapter can be enabled only when a neutral scene-contract target is already available; it does not require the visualization renderer.
+- An optional GraphicsFrame adapter can be enabled only when the neutral GraphicsEngine contract target is available; it does not require the visualization renderer.
 
 No proprietary SDK binary is stored in this repository.
 

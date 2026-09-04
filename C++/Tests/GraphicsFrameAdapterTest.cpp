@@ -1,4 +1,4 @@
-#include "HeliotisC4GraphicsSceneAdapter.h"
+#include "HeliotisC4GraphicsFrameAdapter.h"
 
 #include <cmath>
 #include <cstdint>
@@ -41,8 +41,8 @@ int main()
     };
     frame.parts.at(1).sampleScale = 0.5;
 
-    heliotis::HeliotisC4GraphicsSceneAdapter adapter;
-    const auto scene = adapter.convert(frame, {});
+    heliotis::HeliotisC4GraphicsFrameAdapter adapter;
+    const auto scene = adapter.convertFrame(frame, {});
     if (!scene || !scene->rangeFrame)
     {
         std::cerr << "A valid H8 range part must produce a GraphicsEngine range scene.\n";
@@ -67,16 +67,16 @@ int main()
         || std::fabs(range.worldXAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.102F) > 0.0000001F
         || std::fabs(range.worldYAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.203F) > 0.0000001F
         || std::fabs(range.worldZAt(3, GraphicsLengthUnit::Millimeter) + 0.00775F) > 0.0000001F
-        || scene->meta.frameIndex != 7U)
+        || scene->metadata.frameIndex != 7U)
     {
         std::cerr << "The GraphicsEngine scene must preserve H8 frame geometry, values, and metadata.\n";
         return 1;
     }
 
     frame.scan3dGeometry->outputMode = "CalibratedC";
-    const auto calibratedScene = adapter.convert(frame, {});
+    const auto calibratedScene = adapter.convertFrame(frame, {});
     if (!calibratedScene || !calibratedScene->rangeFrame
-        || calibratedScene->rangeFrame->xyCoordinateMode != RangeFrameXYCoordinateMode::ImagePixels
+        || calibratedScene->rangeFrame->xyCoordinateMode != RangeFrameXYCoordinateMode::PixelGrid
         || std::fabs(calibratedScene->rangeFrame->xScale - 1.0) > 0.0000001
         || std::fabs(calibratedScene->rangeFrame->yScale - 1.0) > 0.0000001)
     {
@@ -85,7 +85,7 @@ int main()
     }
 
     frame.scan3dGeometry.reset();
-    const auto rawScene = adapter.convert(frame, {});
+    const auto rawScene = adapter.convertFrame(frame, {});
     if (!rawScene || !rawScene->rangeFrame
         || std::isfinite(rawScene->rangeFrame->xScale)
         || std::isfinite(rawScene->rangeFrame->yScale))
@@ -114,9 +114,10 @@ int main()
         return 1;
     }
 
-    GraphicsScene3DRequest rangeOnlyRequest;
+    GraphicsFrameRequest rangeOnlyRequest;
+    rangeOnlyRequest.components = GraphicsFrameComponent::Range;
     rangeOnlyRequest.includeRangeAuxiliaryChannels = false;
-    const auto rangeOnlyScene = adapter.convert(frame, rangeOnlyRequest);
+    const auto rangeOnlyScene = adapter.convertFrame(frame, rangeOnlyRequest);
     if (!rangeOnlyScene || !rangeOnlyScene->rangeFrame || !rangeOnlyScene->rangeFrame->intensity.empty())
     {
         std::cerr << "Auxiliary channels must follow the GraphicsEngine scene request.\n";
@@ -136,7 +137,7 @@ int main()
             std::vector<std::uint16_t>{11U, 22U, 33U, 44U}
         }
     };
-    const auto rawPreview = adapter.convert(rawFrame, {});
+    const auto rawPreview = adapter.convertFrame(rawFrame, {});
     if (!rawPreview || !rawPreview->rangeFrame
         || rawPreview->rangeFrame->rangeField.displayName != "Raw Part"
         || rawPreview->rangeFrame->zValues.size() != 4U

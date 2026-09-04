@@ -1,4 +1,4 @@
-#include "HeliotisC4GraphicsSceneAdapter.h"
+#include "HeliotisC4GraphicsFrameAdapter.h"
 
 #include <algorithm>
 #include <cctype>
@@ -158,14 +158,14 @@ namespace {
 
 namespace heliotis {
 
-std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
+std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFrame(
     const Frame& frame,
-    const GraphicsScene3DRequest& request) const
+    const GraphicsFrameRequest& request) const
 {
     if (frame.parts.empty()
-        || (!hasScene3DContent(request.content, GraphicsScene3DContent::RangeFrame)
-            && !hasScene3DContent(request.content, GraphicsScene3DContent::PointCloud)
-            && !hasScene3DContent(request.content, GraphicsScene3DContent::SurfaceMesh)))
+        || (!hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::Range)
+            && !hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::PointCloud)
+            && !hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::Surface)))
     {
         return std::nullopt;
     }
@@ -260,13 +260,13 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
             range.yScale = previewPixelPitch;
             range.xOffset = 0.0;
             range.yOffset = 0.0;
-            range.xyCoordinateMode = RangeFrameXYCoordinateMode::ImagePixels;
+            range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
         }
     }
     range.sensorType = rawPartPreview
         ? "Heliotis H8 (raw part preview)"
         : (frame.scan3dGeometry
-            ? (range.xyCoordinateMode == RangeFrameXYCoordinateMode::ImagePixels
+            ? (range.xyCoordinateMode == RangeFrameXYCoordinateMode::PixelGrid
                 ? "Heliotis H8 (CalibratedC pixel grid)"
                 : "Heliotis H8")
             : "Heliotis H8 (raw range)");
@@ -305,14 +305,12 @@ std::optional<GraphicsScene3D> HeliotisC4GraphicsSceneAdapter::convertScene3D(
         }
     }
 
-    GraphicsScene3D scene;
-    scene.content = GraphicsScene3DContent::RangeFrame;
-    scene.rangeFrame = std::move(range);
-    scene.meta.sourceName = "Heliotis C4";
-    scene.meta.frameId = frame.frameId;
-    scene.meta.frameIndex = frame.sequence;
-    scene.meta.retainSurfaceMesh = request.retainSurfaceMesh;
-    return scene;
+    GraphicsFrame result;
+    result.rangeFrame = std::move(range);
+    result.metadata.sourceName = "Heliotis C4";
+    result.metadata.frameId = frame.frameId;
+    result.metadata.frameIndex = frame.sequence;
+    return result;
 }
 
 } // namespace heliotis
