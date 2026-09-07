@@ -29,6 +29,12 @@ enum class FeatureAccess {
     ReadWrite
 };
 
+/** Selects host-side Single or Live completion; device acquisition stays Continuous. */
+enum class AcquisitionMode {
+    SingleFrame,
+    Continuous
+};
+
 struct DeviceDescriptor {
     std::int64_t interfaceIndex = -1;
     std::int64_t deviceIndex = -1;

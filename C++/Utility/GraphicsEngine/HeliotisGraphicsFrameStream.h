@@ -5,7 +5,7 @@
  * @brief Owns Heliotis acquisition callbacks and publishes owned GraphicsFrame values.
  */
 
-#include "HeliotisC4System.h"
+#include "HeliotisC4.h"
 #include "engine/GraphicsFrameAdapter.h"
 
 #include <functional>
@@ -13,6 +13,8 @@
 #include <string>
 
 namespace heliotis {
+
+class HeliotisC4Device;
 
 /** Owns Heliotis SDK frame callback conversion and emits only owned GraphicsFrame values. */
 class HeliotisGraphicsFrameStream final
@@ -33,7 +35,7 @@ public:
     HeliotisGraphicsFrameStream& operator=(const HeliotisGraphicsFrameStream&) = delete;
 
     [[nodiscard]] bool start(
-        HeliotisC4Device::AcquisitionMode mode,
+        AcquisitionMode mode,
         std::string* errorMessage = nullptr);
     void requestStop() noexcept;
     void stop();

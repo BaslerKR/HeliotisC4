@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep `HeliotisGraphicsFrameStream.h` on the SDK-neutral frame contract; C4Utility headers stay in the stream translation unit.
 - Publish GraphicsFrame through `HeliotisGraphicsFrameStream`; the converter header stays in the adapter translation unit.
 
 - Notify consumers of raw frame receipt before conversion, including frames that cannot be converted.

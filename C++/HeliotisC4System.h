@@ -57,12 +57,7 @@ public:
     };
     using StatusCallback = std::function<void(Status status, bool connected)>;
     using FrameCallback = std::function<void(Frame&& frame)>;
-
-    /** Selects host-side completion while device acquisition remains Continuous. */
-    enum class AcquisitionMode {
-        SingleFrame,
-        Continuous
-    };
+    using AcquisitionMode = heliotis::AcquisitionMode;
 
     explicit HeliotisC4Device(HeliotisC4System* system);
     ~HeliotisC4Device();

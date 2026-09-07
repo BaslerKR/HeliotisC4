@@ -1,6 +1,7 @@
 #include "HeliotisGraphicsFrameStream.h"
 
 #include "HeliotisC4GraphicsFrameAdapter.h"
+#include "HeliotisC4System.h"
 
 #include <memory>
 #include <utility>
@@ -33,7 +34,7 @@ public:
     Impl& operator=(const Impl&) = delete;
 
     [[nodiscard]] bool start(
-        HeliotisC4Device::AcquisitionMode mode,
+        AcquisitionMode mode,
         std::string* errorMessage);
     void requestStop() noexcept;
     void stop();
@@ -74,7 +75,7 @@ HeliotisGraphicsFrameStream::Impl::~Impl()
 }
 
 bool HeliotisGraphicsFrameStream::Impl::start(
-    const HeliotisC4Device::AcquisitionMode mode,
+    const AcquisitionMode mode,
     std::string* errorMessage)
 {
     if (!_device || !_callback)
@@ -138,7 +139,7 @@ HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
 HeliotisGraphicsFrameStream::~HeliotisGraphicsFrameStream() = default;
 
 bool HeliotisGraphicsFrameStream::start(
-    const HeliotisC4Device::AcquisitionMode mode,
+    const AcquisitionMode mode,
     std::string* errorMessage)
 {
     return _impl->start(mode, errorMessage);
