@@ -4,6 +4,7 @@
 #include "HeliotisC4System.h"
 #include "engine/GraphicsFrameAdapter.h"
 
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -30,7 +31,15 @@ private:
 class HeliotisGraphicsFrameStream final
 {
 public:
+    /** Receives one acquisition-worker notification before any frame conversion. */
+    using FrameReceiptCallback = std::function<void()>;
+
     HeliotisGraphicsFrameStream(HeliotisC4Device* device, GraphicsFrameCallback callback);
+    /** Notifies receipt even when conversion fails; neither callback may destroy the stream. */
+    HeliotisGraphicsFrameStream(
+        HeliotisC4Device* device,
+        GraphicsFrameCallback callback,
+        FrameReceiptCallback receiptCallback);
     ~HeliotisGraphicsFrameStream();
 
     HeliotisGraphicsFrameStream(const HeliotisGraphicsFrameStream&) = delete;
@@ -45,6 +54,7 @@ public:
 private:
     HeliotisC4Device* _device = nullptr;
     GraphicsFrameCallback _callback;
+    FrameReceiptCallback _receiptCallback;
     HeliotisC4GraphicsFrameAdapter _adapter;
     GraphicsFrameCallbackGate _callbackGate;
 };

@@ -331,7 +331,15 @@ namespace {
 HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
     HeliotisC4Device* device,
     GraphicsFrameCallback callback)
-    : _device(device), _callback(std::move(callback))
+    : HeliotisGraphicsFrameStream(device, std::move(callback), {})
+{
+}
+
+HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
+    HeliotisC4Device* device,
+    GraphicsFrameCallback callback,
+    FrameReceiptCallback receiptCallback)
+    : _device(device), _callback(std::move(callback)), _receiptCallback(std::move(receiptCallback))
 {
 }
 
@@ -369,6 +377,16 @@ bool HeliotisGraphicsFrameStream::start(
         [this, callbackToken](Frame&& sourceFrame) {
             GraphicsFrameCallbackGate::Lease lease(callbackToken);
             if (!lease) return;
+            if (_receiptCallback) {
+                try
+                {
+                    _receiptCallback();
+                }
+                catch (...)
+                {
+                    // Receipt notification must not affect frame conversion.
+                }
+            }
             try
             {
                 auto frame = _adapter.convertFrame(sourceFrame, heliotisGraphicsFrameRequest());

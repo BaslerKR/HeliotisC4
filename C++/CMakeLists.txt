@@ -140,6 +140,9 @@ if(HELIOTISC4_BUILD_TESTS)
             NAME heliotis_c4_graphics_adapter
             COMMAND heliotis_c4_graphics_adapter_test
         )
+        add_executable(heliotis_c4_graphics_stream_test Tests/GraphicsFrameStreamTest.cpp)
+        target_link_libraries(heliotis_c4_graphics_stream_test PRIVATE HeliotisC4::GraphicsEngineAdapter)
+        add_test(NAME heliotis_c4_graphics_stream COMMAND heliotis_c4_graphics_stream_test)
     endif()
 
     if(HELIOTISC4_BUILD_QT_UI)
