@@ -71,6 +71,8 @@ if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
     add_library(HeliotisC4GraphicsEngineAdapter STATIC
         Utility/GraphicsEngine/HeliotisC4GraphicsFrameAdapter.h
         Utility/GraphicsEngine/HeliotisC4GraphicsFrameAdapter.cpp
+        Utility/GraphicsEngine/HeliotisGraphicsFrameStream.h
+        Utility/GraphicsEngine/HeliotisGraphicsFrameStream.cpp
     )
     add_library(HeliotisC4::GraphicsEngineAdapter ALIAS HeliotisC4GraphicsEngineAdapter)
     target_compile_features(HeliotisC4GraphicsEngineAdapter PUBLIC cxx_std_17)

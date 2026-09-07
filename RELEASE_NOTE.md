@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Publish GraphicsFrame through `HeliotisGraphicsFrameStream`; the converter header stays in the adapter translation unit.
+
 - Notify consumers of raw frame receipt before conversion, including frames that cannot be converted.
 - Drain in-flight GraphicsFrame adapter callbacks before stream destruction and keep teardown non-throwing.
 - Move SDK acquisition callback conversion into the module adapter stream; the parent receives only owned GraphicsFrame values.
