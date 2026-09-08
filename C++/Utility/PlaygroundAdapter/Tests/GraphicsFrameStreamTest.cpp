@@ -1,4 +1,5 @@
-#include "HeliotisC4GraphicsFrameAdapter.h"
+#include "HeliotisGraphicsFrameStream.h"
+#include "HeliotisC4System.h"
 
 #include <iostream>
 #include <stdexcept>

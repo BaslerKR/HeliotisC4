@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix the hardware-free stream regression test's device and stream includes.
 - Link `Playground::DevicePlugin` for the `IDevicePlugin` MODULE.
 - Own package identity in `C++/Utility/PlaygroundAdapter/Package/Package.cmake`; the host emits `plugin.json` from `DevicePluginPackage.h`.
 - Keep the session source controller in `C++/Utility/PlaygroundAdapter/Source` as `HeliotisC4SourceController`.
