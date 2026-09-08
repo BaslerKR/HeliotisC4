@@ -17,8 +17,10 @@ set(HELIOTISC4_C4UTILITY_ROOT "C:/Program Files/C4Utility" CACHE PATH
     "C4Utility installation root used by the SDK-enabled implementation")
 option(HELIOTISC4_ENABLE_SDK "Resolve C4HdlC for implementation work" OFF)
 option(HELIOTISC4_BUILD_QT_UI "Build the optional Qt HeliotisC4 feature-tree widget" OFF)
-option(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER
-    "Build the optional HeliotisC4-to-GraphicsEngine adapter target." OFF)
+option(HELIOTISC4_BUILD_PLAYGROUND_ADAPTER
+    "Build the optional HeliotisC4 Playground adapter target." OFF)
+option(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN
+    "Build the HeliotisC4 Playground device plugin MODULE." OFF)
 option(HELIOTISC4_BUILD_TESTS "Build the standalone HeliotisC4 module tests" OFF)
 
 if(HELIOTISC4_BUILD_QT_UI)
@@ -60,32 +62,106 @@ if(HELIOTISC4_ENABLE_SDK)
     target_link_libraries(heliotis_c4_core PUBLIC C4Hdl::C4HdlC)
 endif()
 
-if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
+if(HELIOTISC4_BUILD_PLAYGROUND_ADAPTER)
     if(NOT TARGET GraphicsEngine::Contracts)
         message(FATAL_ERROR
-            "[HeliotisC4] HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER=ON requires "
+            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_ADAPTER=ON requires "
             "GraphicsEngine::Contracts. Add GraphicsEngine first or disable the adapter."
         )
     endif()
 
-    add_library(HeliotisC4GraphicsEngineAdapter STATIC
-        Utility/GraphicsEngine/HeliotisC4GraphicsFrameAdapter.h
-        Utility/GraphicsEngine/HeliotisC4GraphicsFrameAdapter.cpp
-        Utility/GraphicsEngine/HeliotisGraphicsFrameStream.h
-        Utility/GraphicsEngine/HeliotisGraphicsFrameStream.cpp
+    add_library(HeliotisC4PlaygroundAdapter STATIC
+        Utility/PlaygroundAdapter/HeliotisC4GraphicsFrameAdapter.h
+        Utility/PlaygroundAdapter/HeliotisC4GraphicsFrameAdapter.cpp
+        Utility/PlaygroundAdapter/HeliotisGraphicsFrameStream.h
+        Utility/PlaygroundAdapter/HeliotisGraphicsFrameStream.cpp
     )
-    add_library(HeliotisC4::GraphicsEngineAdapter ALIAS HeliotisC4GraphicsEngineAdapter)
-    target_compile_features(HeliotisC4GraphicsEngineAdapter PUBLIC cxx_std_17)
-    target_include_directories(HeliotisC4GraphicsEngineAdapter
+    add_library(HeliotisC4::PlaygroundAdapter ALIAS HeliotisC4PlaygroundAdapter)
+    target_compile_features(HeliotisC4PlaygroundAdapter PUBLIC cxx_std_17)
+    target_include_directories(HeliotisC4PlaygroundAdapter
         PUBLIC
-            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/GraphicsEngine"
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter"
     )
-    target_link_libraries(HeliotisC4GraphicsEngineAdapter
+    target_link_libraries(HeliotisC4PlaygroundAdapter
         PUBLIC
             HeliotisC4::Core
             GraphicsEngine::Contracts
     )
-    message(STATUS "[HeliotisC4] HeliotisC4::GraphicsEngineAdapter enabled.")
+    message(STATUS "[HeliotisC4] HeliotisC4::PlaygroundAdapter enabled.")
+endif()
+
+if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
+    if(NOT HELIOTISC4_BUILD_PLAYGROUND_ADAPTER)
+        message(FATAL_ERROR
+            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires "
+            "HELIOTISC4_BUILD_PLAYGROUND_ADAPTER."
+        )
+    endif()
+    if(NOT HELIOTISC4_BUILD_QT_UI)
+        message(FATAL_ERROR
+            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires "
+            "HELIOTISC4_BUILD_QT_UI."
+        )
+    endif()
+    if(NOT HELIOTISC4_ENABLE_SDK)
+        message(FATAL_ERROR
+            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires "
+            "HELIOTISC4_ENABLE_SDK."
+        )
+    endif()
+    if(NOT TARGET Playground::DevicePlugin)
+        message(FATAL_ERROR
+            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires "
+            "Playground::DevicePlugin."
+        )
+    endif()
+    if(NOT TARGET Qt6::Widgets)
+        message(FATAL_ERROR
+            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires Qt 6."
+        )
+    endif()
+    find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Concurrent)
+
+    file(TO_CMAKE_PATH "${HELIOTISC4_C4UTILITY_ROOT}" heliotis_c4_plugin_sdk_root)
+    add_library(HeliotisC4Plugin MODULE
+        Utility/PlaygroundAdapter/Plugin/HeliotisC4Plugin.cpp
+        Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.h
+        Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.cpp
+    )
+    set_target_properties(HeliotisC4Plugin PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME HeliotisC4Plugin
+        AUTOMOC ON
+        PLAYGROUND_PLUGIN_PACKAGE
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
+    )
+    target_compile_features(HeliotisC4Plugin PRIVATE cxx_std_17)
+    target_include_directories(HeliotisC4Plugin PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
+    )
+    target_compile_definitions(HeliotisC4Plugin PRIVATE
+        HELIOTISC4_SDK_ROOT="${heliotis_c4_plugin_sdk_root}"
+    )
+    target_link_libraries(HeliotisC4Plugin PRIVATE
+        Playground::DevicePlugin
+        HeliotisC4::Core
+        HeliotisC4::QtWidget
+        HeliotisC4::PlaygroundAdapter
+        Qt6::Widgets
+        Qt6::OpenGL
+        Qt6::OpenGLWidgets
+        Qt6::Concurrent
+    )
+    if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        target_link_libraries(HeliotisC4Plugin PRIVATE delayimp)
+        target_link_options(HeliotisC4Plugin PRIVATE "/DELAYLOAD:C4HdlC.dll")
+    endif()
+    include("${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/RuntimeStaging.cmake")
+    heliotis_c4_prepare_playground_plugin_runtime(HeliotisC4Plugin)
+    message(STATUS "[HeliotisC4] HeliotisC4Plugin enabled.")
 endif()
 
 if(HELIOTISC4_BUILD_TESTS)
@@ -130,20 +206,21 @@ if(HELIOTISC4_BUILD_TESTS)
         COMMAND heliotis_c4_acquisition_policy_test
     )
 
-    if(HELIOTISC4_BUILD_GRAPHICSENGINE_ADAPTER)
+    if(HELIOTISC4_BUILD_PLAYGROUND_ADAPTER)
         add_executable(heliotis_c4_graphics_adapter_test
-            Tests/GraphicsFrameAdapterTest.cpp
+            Utility/PlaygroundAdapter/Tests/GraphicsFrameAdapterTest.cpp
         )
         target_link_libraries(heliotis_c4_graphics_adapter_test
             PRIVATE
-                HeliotisC4::GraphicsEngineAdapter
+                HeliotisC4::PlaygroundAdapter
         )
         add_test(
             NAME heliotis_c4_graphics_adapter
             COMMAND heliotis_c4_graphics_adapter_test
         )
-        add_executable(heliotis_c4_graphics_stream_test Tests/GraphicsFrameStreamTest.cpp)
-        target_link_libraries(heliotis_c4_graphics_stream_test PRIVATE HeliotisC4::GraphicsEngineAdapter)
+        add_executable(heliotis_c4_graphics_stream_test
+            Utility/PlaygroundAdapter/Tests/GraphicsFrameStreamTest.cpp)
+        target_link_libraries(heliotis_c4_graphics_stream_test PRIVATE HeliotisC4::PlaygroundAdapter)
         add_test(NAME heliotis_c4_graphics_stream COMMAND heliotis_c4_graphics_stream_test)
     endif()
 

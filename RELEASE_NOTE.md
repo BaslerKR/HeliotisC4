@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Link `Playground::DevicePlugin` for the `IDevicePlugin` MODULE.
+- Own package identity in `C++/Utility/PlaygroundAdapter/Package/Package.cmake`; the host emits `plugin.json` from `DevicePluginPackage.h`.
+- Keep the session source controller in `C++/Utility/PlaygroundAdapter/Source` as `HeliotisC4SourceController`.
+- Declare the Playground plugin runtime payload from this module; the host copies it into the package.
+- Move the GraphicsFrame stream/adapter into `Utility/PlaygroundAdapter` as `HeliotisC4::PlaygroundAdapter`.
 - Keep `HeliotisGraphicsFrameStream.h` on the SDK-neutral frame contract; C4Utility headers stay in the stream translation unit.
 - Publish GraphicsFrame through `HeliotisGraphicsFrameStream`; the converter header stays in the adapter translation unit.
 
