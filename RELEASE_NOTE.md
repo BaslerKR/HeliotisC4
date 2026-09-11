@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Publish the Heliotis controls through the generic host-managed plugin dock contract.
+
+- Link `HeliotisC4Plugin` only through `HeliotisC4::QtWidget` and `HeliotisC4::PlaygroundAdapter` so the core static library is not passed twice to the linker.
+
+- Require ABI / Qt IID 4.0 and recompilation; v3 packages are rejected. Declare immutable GraphicsEngine + Script Editor capabilities directly on the session.
+
 - Fix the hardware-free stream regression test's device and stream includes.
 - Link `Playground::DevicePlugin` for the `IDevicePlugin` MODULE.
 - Own package identity in `C++/Utility/PlaygroundAdapter/Package/Package.cmake`; the host emits `plugin.json` from `DevicePluginPackage.h`.

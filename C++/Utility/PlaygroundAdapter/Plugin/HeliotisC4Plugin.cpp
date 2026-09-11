@@ -1,4 +1,4 @@
-#include "DevicePlugin.h"
+#include "DevicePluginTemplate.h"
 
 #include "HeliotisC4SourceController.h"
 #include "HeliotisC4System.h"
@@ -400,9 +400,12 @@ public:
 
     QString title() const override { return _title; }
 
-    QWidget* createControlWidget(QWidget* parent) override
+    std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override
     {
-        if (_widget) return _widget;
+        if (_widget) {
+            return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
+                     Qt::LeftDockWidgetArea, _widget, true}};
+        }
 
         _widget = new QHeliotisC4Widget(parent);
         _widget->setDiscoveredDevices(_devices);
@@ -569,10 +572,16 @@ public:
                 }
                 _widget->setAcquisitionError(message);
             });
-        return _widget;
+        return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
+                 Qt::LeftDockWidgetArea, _widget, true}};
     }
 
     AbstractSourceController* sourceController() const override { return _controller.get(); }
+    unsigned int capabilities() const noexcept override
+    {
+        return DevicePluginSessionCapability::GraphicsEngine
+            | DevicePluginSessionCapability::ScriptEditor;
+    }
     void setTitleChangedCallback(std::function<void(const QString&)> callback) override { _titleChanged = std::move(callback); }
 
 private:
@@ -980,7 +989,7 @@ private:
 };
 
 /** Owns Heliotis discovery, sessions, and one coherently selected SDK runtime. */
-class HeliotisC4Plugin final : public QObject, public IDevicePlugin {
+class HeliotisC4Plugin final : public DevicePluginTemplate {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
     Q_INTERFACES(IDevicePlugin)

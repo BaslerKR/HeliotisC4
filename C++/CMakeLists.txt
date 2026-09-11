@@ -147,7 +147,6 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
     )
     target_link_libraries(HeliotisC4Plugin PRIVATE
         Playground::DevicePlugin
-        HeliotisC4::Core
         HeliotisC4::QtWidget
         HeliotisC4::PlaygroundAdapter
         Qt6::Widgets
