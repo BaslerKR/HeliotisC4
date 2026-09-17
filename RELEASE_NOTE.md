@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Limit the control statusbar to Idle, Connected, and Live; route operation messages to application logs.
+
 - Publish the Heliotis controls through the generic host-managed plugin dock contract.
 
 - Link `HeliotisC4Plugin` only through `HeliotisC4::QtWidget` and `HeliotisC4::PlaygroundAdapter` so the core static library is not passed twice to the linker.

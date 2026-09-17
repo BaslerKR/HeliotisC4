@@ -165,8 +165,8 @@ private:
         const QString& categoryPath);
     void setIdleState(const QString& message);
     void setSoftwareTriggerAvailable(bool available);
-    /** Refreshes the operator message from the authoritative acquisition flags. */
-    void updateAcquisitionMessage();
+    /** Logs operation guidance from the authoritative acquisition flags. */
+    void logAcquisitionState();
 
     QComboBox* _deviceSelector = nullptr;
     QToolButton* _refreshButton = nullptr;
@@ -175,7 +175,11 @@ private:
     QToolButton* _grabOneButton = nullptr;
     QToolButton* _grabLiveButton = nullptr;
     QLabel* _connectionStatus = nullptr;
-    QLabel* _messageLabel = nullptr;
+    /** Displays only the canonical connection/acquisition state. */
+    void updateStatusLabel();
+    /** Routes operation diagnostics to application logs. */
+    void logMessage(const QString& message, bool error = false);
+
     QStatusBar* _statusBar = nullptr;
     QTreeWidget* _featureTree = nullptr;
     QHash<QString, QTreeWidgetItem*> _categories;

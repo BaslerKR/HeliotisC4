@@ -294,14 +294,14 @@ int main(int argc, char** argv)
     auto* messageLabel = widget.findChild<QLabel*>(QStringLiteral("HeliotisC4MessageLabel"));
     if (!require(status != nullptr && refreshButton != nullptr && connectButton != nullptr
                      && grabOneButton != nullptr && liveButton != nullptr && initializeButton != nullptr
-                     && messageLabel != nullptr,
+                     && messageLabel == nullptr,
                  "The Heliotis connection and acquisition controls are missing.")) {
         return EXIT_FAILURE;
     }
     widget.setDiscoveredDevices({{0, 0, "TestInterface", "TestDevice"}});
     widget.setDiscoveryPending(true);
     application.processEvents();
-    if (!require(!refreshButton->isEnabled() && !connectButton->isEnabled(),
+    if (!require(status->text() == QStringLiteral("Idle") && !refreshButton->isEnabled() && !connectButton->isEnabled(),
                  "Background discovery must lock refresh and stale-descriptor connection controls.")) {
         return EXIT_FAILURE;
     }
@@ -323,7 +323,7 @@ int main(int argc, char** argv)
     }
     widget.setInitializationPending(true);
     application.processEvents();
-    if (!require(status->property("status").toString() == QStringLiteral("connected"),
+    if (!require(status->text() == QStringLiteral("Connected"),
                  "H8 initialization must not replace the connected status.")) {
         return EXIT_FAILURE;
     }
@@ -338,7 +338,7 @@ int main(int argc, char** argv)
 
     widget.setInitializationError(QStringLiteral("H8 reference profile failed"));
     application.processEvents();
-    if (!require(status->property("status").toString() == QStringLiteral("connected"),
+    if (!require(status->text() == QStringLiteral("Connected"),
                  "An H8 initialization error must not disconnect the device.")) {
         return EXIT_FAILURE;
     }
@@ -424,7 +424,7 @@ int main(int argc, char** argv)
 
     widget.setAcquisitionArmPending(true, false);
     application.processEvents();
-    if (!require(!tree->isEnabled() && !initializeButton->isEnabled() && !liveButton->isEnabled(),
+    if (!require(status->text() == QStringLiteral("Connected") && !tree->isEnabled() && !initializeButton->isEnabled() && !liveButton->isEnabled(),
                  "Asynchronous acquisition arming must lock competing SDK controls.")) {
         return EXIT_FAILURE;
     }
@@ -442,7 +442,7 @@ int main(int argc, char** argv)
     widget.setAcquisitionState(false, false, false);
     widget.setAcquisitionArmPending(false, false);
     application.processEvents();
-    if (!require(status->property("status").toString() == QStringLiteral("connected")
+    if (!require(status->text() == QStringLiteral("Connected")
                      && tree->isEnabled()
                      && !triggerButton->isEnabled() && liveButton->isEnabled(),
                   "A rapidly completed SingleFrame arm must settle in the stopped UI state.")) {
@@ -461,8 +461,8 @@ int main(int argc, char** argv)
     widget.setAcquisitionState(true, true, false);
     application.processEvents();
     if (!require(!triggerButton->isEnabled()
-                     && messageLabel->text().contains(QStringLiteral("automatic or external")),
-                 "Free-run or external Live must keep TriggerSoftware disabled and describe its wait path.")) {
+                     && status->text() == QStringLiteral("Live"),
+                 "Free-run or external Live must keep TriggerSoftware disabled and show Live.")) {
         return EXIT_FAILURE;
     }
 
@@ -474,7 +474,7 @@ int main(int argc, char** argv)
     widget.setFeatureOperationPending(false);
     application.processEvents();
     if (!require(!triggerButton->isEnabled()
-                     && messageLabel->text().contains(QStringLiteral("Waiting for its Heliotis frame")),
+                     && status->text() == QStringLiteral("Live"),
                  "An accepted software trigger must stay disabled until its frame arrives.")) {
         return EXIT_FAILURE;
     }
@@ -491,8 +491,7 @@ int main(int argc, char** argv)
     widget.setFeatureOperationPending(false);
     application.processEvents();
     if (!require(triggerButton->isEnabled()
-                     && messageLabel->text().contains(QStringLiteral("Live is armed"))
-                     && !messageLabel->text().contains(QStringLiteral("Waiting for its Heliotis frame")),
+                     && status->text() == QStringLiteral("Live"),
                  "A frame that beats feature-operation completion must not leave TriggerSoftware stuck pending.")) {
         return EXIT_FAILURE;
     }
@@ -501,7 +500,7 @@ int main(int argc, char** argv)
     widget.setAcquisitionStopPending();
     widget.setFeatureOperationPending(false);
     application.processEvents();
-    if (!require(status->text() == QStringLiteral("Stopping")
+    if (!require(status->text() == QStringLiteral("Live")
                      && !grabOneButton->isEnabled() && !liveButton->isEnabled()
                      && !triggerButton->isEnabled() && !tree->isEnabled(),
                  "A non-blocking stop request must lock acquisition and feature controls until worker completion.")) {
@@ -509,7 +508,7 @@ int main(int argc, char** argv)
     }
     widget.setAcquisitionState(false, false, false);
     application.processEvents();
-    if (!require(status->property("status").toString() == QStringLiteral("connected")
+    if (!require(status->text() == QStringLiteral("Connected")
                      && grabOneButton->isEnabled() && liveButton->isEnabled()
                      && tree->isEnabled(),
                  "Worker completion must recover controls from the stop-pending state.")) {
@@ -539,10 +538,10 @@ int main(int argc, char** argv)
 
     // A queued inactive callback from the old worker must not relabel the
     // disconnected session as connected before the next open completes.
-    const QString disconnectedStatus = status->property("status").toString();
+    const QString disconnectedStatus = status->text();
     widget.setAcquisitionState(false, false, false);
     application.processEvents();
-    if (!require(status->property("status").toString() == disconnectedStatus,
+    if (!require(status->text() == disconnectedStatus && disconnectedStatus == QStringLiteral("Idle"),
                  "A late acquisition state must not overwrite disconnected presentation.")) {
         return EXIT_FAILURE;
     }
