@@ -247,20 +247,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         }
         else
         {
-            // CalibratedC intentionally has no physical X/Y information. Keep
-            // its physical Z values, but expose a pixel-grid preview instead
-            // of inventing a millimetre calibration.
-            // heliViewer's CalibratedC surface convention is a 1 µm pixel
-            // grid. It exposes relative relief without claiming calibrated
-            // object-space X/Y coordinates.
-            const double previewPixelPitch = convertGraphicsLength(
-                0.001,
-                GraphicsLengthUnit::Millimeter,
-                range.lengthUnit);
-            range.xScale = previewPixelPitch;
-            range.yScale = previewPixelPitch;
-            range.xOffset = 0.0;
-            range.yOffset = 0.0;
+            // CalibratedC has physical Z and pixel X/Y. Do not invent a pitch.
             range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
         }
     }

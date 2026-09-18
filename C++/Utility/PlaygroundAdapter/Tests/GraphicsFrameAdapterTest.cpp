@@ -64,9 +64,9 @@ int main()
         || std::fabs(range.xOffset - 100.0) > 0.0000001
         || std::fabs(range.yOffset - 200.0) > 0.0000001
         || std::fabs(range.zOffset + 10.0) > 0.0000001
-        || std::fabs(range.worldXAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.102F) > 0.0000001F
-        || std::fabs(range.worldYAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.203F) > 0.0000001F
-        || std::fabs(range.worldZAt(3, GraphicsLengthUnit::Millimeter) + 0.00775F) > 0.0000001F
+        || std::fabs(range.physicalXAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.102F) > 0.0000001F
+        || std::fabs(range.physicalYAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.203F) > 0.0000001F
+        || std::fabs(range.physicalZAt(3, GraphicsLengthUnit::Millimeter) + 0.00775F) > 0.0000001F
         || scene->metadata.frameIndex != 7U)
     {
         std::cerr << "The GraphicsEngine scene must preserve H8 frame geometry, values, and metadata.\n";
@@ -77,10 +77,11 @@ int main()
     const auto calibratedScene = adapter.convertFrame(frame, {});
     if (!calibratedScene || !calibratedScene->rangeFrame
         || calibratedScene->rangeFrame->xyCoordinateMode != RangeFrameXYCoordinateMode::PixelGrid
-        || std::fabs(calibratedScene->rangeFrame->xScale - 1.0) > 0.0000001
-        || std::fabs(calibratedScene->rangeFrame->yScale - 1.0) > 0.0000001)
+        || std::isfinite(calibratedScene->rangeFrame->xScale)
+        || std::isfinite(calibratedScene->rangeFrame->yScale)
+        || std::isfinite(calibratedScene->rangeFrame->physicalXAt(0, 0, GraphicsLengthUnit::Millimeter)))
     {
-        std::cerr << "CalibratedC must use the 1 µm pixel-grid preview.\n";
+        std::cerr << "CalibratedC must keep pixel-grid X/Y without a stored pitch.\n";
         return 1;
     }
 
