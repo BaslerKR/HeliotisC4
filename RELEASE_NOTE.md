@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.4
+
 - Stop writing a 1 µm preview pitch into CalibratedC PixelGrid `xScale`; keep physical Z and unused non-finite X/Y scales.
 - Limit the control statusbar to Idle, Connected, and Live; route operation messages to application logs.
 
