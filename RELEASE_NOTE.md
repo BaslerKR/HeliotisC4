@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Publish range output through the identified GraphicsFrame resource collection contract.
+
 ## v0.1.4
 
 - Stop writing a 1 µm preview pitch into CalibratedC PixelGrid `xScale`; keep physical Z and unused non-finite X/Y scales.
@@ -11,7 +13,7 @@
 
 - Link `HeliotisC4Plugin` only through `HeliotisC4::QtWidget` and `HeliotisC4::PlaygroundAdapter` so the core static library is not passed twice to the linker.
 
-- Require ABI / Qt IID 4.0 and recompilation; v3 packages are rejected. Declare immutable GraphicsEngine + Script Editor capabilities directly on the session.
+- Require ABI / Qt IID 5.0 and recompilation; older packages are rejected. Declare immutable GraphicsEngine + Script Editor capabilities directly on the session.
 
 - Fix the hardware-free stream regression test's device and stream includes.
 - Link `Playground::DevicePlugin` for the `IDevicePlugin` MODULE.

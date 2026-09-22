@@ -294,7 +294,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     }
 
     GraphicsFrame result;
-    result.rangeFrame = std::move(range);
+    result.addRange("range", std::move(range), "Range");
     result.metadata.sourceName = "Heliotis C4";
     result.metadata.frameId = frame.frameId;
     result.metadata.frameIndex = frame.sequence;
