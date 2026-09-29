@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Declare the C4Utility subtitle and heliInspect H8 acquisition summary in package metadata.
+
 - Publish range output through the identified GraphicsFrame resource collection contract.
 
 ## v0.1.4
