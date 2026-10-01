@@ -251,6 +251,12 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
             range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
         }
     }
+    else if (!oneRowPreview)
+    {
+        // An organized grid without rectified XY is still a height map.
+        // UniformPhysical with non-finite X/Y hides Surface3D.
+        range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
+    }
     range.sensorType = rawPartPreview
         ? "Heliotis H8 (raw part preview)"
         : (frame.scan3dGeometry

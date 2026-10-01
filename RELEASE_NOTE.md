@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show an organized H8 range as a PixelGrid height map when Scan3d XY calibration is absent, so Surface3D is available without inventing a pitch.
+
 - Declare the C4Utility subtitle and heliInspect H8 acquisition summary in package metadata.
 
 - Publish range output through the identified GraphicsFrame resource collection contract.
