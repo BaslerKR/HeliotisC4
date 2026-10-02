@@ -5,6 +5,10 @@
 #include "Utility/Qt/QHeliotisC4Widget.h"
 
 #include <QDebug>
+#include <QLoggingCategory>
+#include <QJsonDocument>
+#include <QJsonObject>
+Q_LOGGING_CATEGORY(heliotisOperationDiagnosticLog, "diagnostics.HeliotisC4.Operations", QtInfoMsg)
 #include <QDir>
 #include <QFileInfo>
 #include <QFutureWatcher>
@@ -525,7 +529,11 @@ public:
         QObject::connect(_widget, &QHeliotisC4Widget::featureWriteRequested, _widget,
             [this](const QString& name, const QString& value) {
                 runFeatureOperation([name, value](heliotis::HeliotisC4Device* device, std::string* error) {
-                    return device->writeFeature(name.toStdString(), value.toStdString(), error);
+                    const bool accepted = device->writeFeature(name.toStdString(), value.toStdString(), error);
+                    qCDebug(heliotisOperationDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
+                        {"event", "parameter_result"}, {"fields", QJsonObject{{"name", name}, {"requestedValue", value},
+                        {"accepted", accepted}, {"error", error ? QString::fromStdString(*error) : QString{}}}}}).toJson(QJsonDocument::Compact));
+                    return accepted;
                 });
             });
         QObject::connect(_widget, &QHeliotisC4Widget::featureCommandRequested, _widget,
@@ -550,6 +558,8 @@ public:
                     return;
                 }
                 if (_widget) _widget->setAcquisitionState(acquiring, continuous, softwareTriggerAvailable);
+                if (!acquiring && heliotisOperationDiagnosticLog().isDebugEnabled() && _device && _device->isOpened()
+                    && !_device->requiresReconnect()) refreshFeatureTree();
             });
         QObject::connect(_controller.get(), &HeliotisC4SourceController::acquisitionFrameReceived, _widget,
             [this]() {

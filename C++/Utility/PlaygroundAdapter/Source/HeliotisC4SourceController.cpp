@@ -16,6 +16,7 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
                                                                 const bool active) {
         if (status != heliotis::HeliotisC4Device::Status::Acquisition) return;
         _isGrabbing.store(active);
+        emit diagnosticAcquisitionChanged(active, QStringLiteral("heliotis"));
         if (active) _framesInCurrentAcquisition.store(0);
         const bool continuous = _isContinuous.load();
         if (!active) _isContinuous.store(false);

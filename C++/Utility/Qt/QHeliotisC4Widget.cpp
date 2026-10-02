@@ -1,4 +1,9 @@
 #include "QHeliotisC4Widget.h"
+#include <QLoggingCategory>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+Q_LOGGING_CATEGORY(heliotisDiagnosticLog, "diagnostics.HeliotisC4", QtInfoMsg)
 
 #ifdef HELIOTISC4_HAS_QT_UI
 
@@ -718,6 +723,16 @@ void QHeliotisC4Widget::setIdleState(const QString& message)
 
 void QHeliotisC4Widget::setFeatures(const heliotis::HeliotisC4::FeatureList& features)
 {
+    if (heliotisDiagnosticLog().isDebugEnabled() && !_acquisitionActive) {
+        QJsonArray snapshot;
+        for (const auto& feature : features) snapshot.append(QJsonObject{
+            {"name", QString::fromStdString(feature.displayName)}, {"category", QString::fromStdString(feature.categoryPath)},
+            {"value", QString::fromStdString(feature.valueText)}, {"kind", static_cast<int>(feature.type)},
+            {"access", static_cast<int>(feature.access)}});
+        qCDebug(heliotisDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"event", "feature_snapshot"}, {"fields", QJsonObject{{"coverage", "all-exposed-feature-descriptors/current-selector-state"},
+            {"nodes", snapshot}}}}).toJson(QJsonDocument::Compact));
+    }
     _featureAccessCurrent = !_acquisitionActive;
     _featureTree->setEnabled(_connected && !_featureOperationPending
         && !_featureRefreshPending && !_acquisitionArmPending);

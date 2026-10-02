@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report acquisition lifecycle to consumers and retain opt-in stopped-device feature snapshots at the current selector state; expose parameter requests and operation outcomes through diagnostics without changing capture policy.
+
 - Show an organized H8 range as a PixelGrid height map when Scan3d XY calibration is absent, so Surface3D is available without inventing a pitch.
 
 - Declare the C4Utility subtitle and heliInspect H8 acquisition summary in package metadata.
