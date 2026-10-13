@@ -53,7 +53,7 @@ renderer is needed. The plugin switch enables its owning widget/adapter
 consumer-owned.
 
 ```sh
-cmake -S . -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DHELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON -DHELIOTISC4_BUILD_TESTS=ON
+cmake -S . -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_BUILD_TYPE=Release -DHELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON -DHELIOTISC4_BUILD_TESTS=ON
 cmake --build build/plugin --config Release --parallel 4
 ctest --test-dir build/plugin -C Release --output-on-failure
 cmake --build build/plugin --config Release --target HeliotisC4PluginPackageStage
