@@ -43,3 +43,27 @@ Every `heliotis::Frame` is copied before the C4 buffer is released. Consumers ma
 Acquisition callbacks run on a worker. Keep them bounded, stop acquisition before closing the device, and do not update GUI objects directly. One dedicated acquisition worker owns `C4Dev_startAcquisition`, every trigger and buffer operation, `C4Dev_stopAcquisition`, and post-stop restoration; the calling thread waits only for the worker's arm result. Single and Live both acquire through device `AcquisitionMode=Continuous`, matching the vendor H8 surface sequence. Single is a host-side completion policy that stops SDK acquisition after the first received frame; Live runs until stopped. A non-Continuous preset is restored after SDK stop. Neither action implicitly triggers a frame: all-Off trigger selectors free-run, and one `FrameStart=On/Software` request issues exactly one `TriggerSoftware` command before waiting for its frame, including when `RecordingStart=On/Stage`. The software surface path pins FrameStart before SDK start, performs no feature access after start and before an accepted request, then calls `TriggerSoftware` and immediately enters the installed C sample's uninterrupted ten-second `C4Dev_getBuffer()` wait. No feature access or log call separates those two SDK operations. A buffer timeout then records acquisition/transfer/stage state and disarms so it cannot block the next arm. Automatic and external paths use short polls for responsive cancellation. FrameStart `TriggerDivider` and `TriggerMultiplier` are preserved and reported but not interpreted by the host; device behavior for non-unit values remains hardware-dependent. The prior trigger, acquisition-status, and device-mode cursors are restored after use. Diagnostics retain worker identity, pre-arm and post-timeout state, configuration, recording plan, command/buffer SDK codes, multipart metadata, copy timing, and callback timing without a second full-sample scan after the ownership copy.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for lifecycle, runtime, and validation contracts.
+
+## Installed consumer SDK plugin build
+
+Build the existing plugin project using this repository, an installed Plugin
+SDK, the matching Qt kit and its vendor SDK. No consumer source tree or
+renderer is needed. The plugin switch enables its owning widget/adapter
+(and vendor SDK implementation where required). Theme installation remains
+consumer-owned.
+
+```sh
+cmake -S . -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DHELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON -DHELIOTISC4_BUILD_TESTS=ON
+cmake --build build/plugin --config Release --parallel 4
+ctest --test-dir build/plugin -C Release --output-on-failure
+cmake --build build/plugin --config Release --target HeliotisC4PluginPackageStage
+```
+
+Supply the existing vendor SDK options when it is not in the documented default
+location. The generated package is `build/plugin/packages/Release/plugins/<id>/current`
+on multi-configuration generators and retains the module-owned runtime layout.
+It includes the manifest, icon and SDK identity. Staging reconciles only this
+generated package. Use a fresh build directory or explicitly update
+`PlaygroundPluginSDK_DIR` when selecting another SDK. This Release software
+gate does not establish physical-device, Debug or cross-platform acceptance.
+Set `CMAKE_BUILD_TYPE=Release` for a single-configuration generator.

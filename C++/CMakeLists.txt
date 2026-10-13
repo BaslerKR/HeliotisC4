@@ -23,6 +23,17 @@ option(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN
     "Build the HeliotisC4 Playground device plugin MODULE." OFF)
 option(HELIOTISC4_BUILD_TESTS "Build the standalone HeliotisC4 module tests" OFF)
 
+if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
+    set(HELIOTISC4_BUILD_PLAYGROUND_ADAPTER ON)
+    set(HELIOTISC4_BUILD_QT_UI ON)
+    set(HELIOTISC4_ENABLE_SDK ON)
+endif()
+if(PROJECT_NAME STREQUAL "HeliotisC4" AND PROJECT_IS_TOP_LEVEL AND
+   (HELIOTISC4_BUILD_PLAYGROUND_ADAPTER OR HELIOTISC4_BUILD_PLAYGROUND_PLUGIN))
+    find_package(PlaygroundPluginSDK 0.1 CONFIG REQUIRED)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 if(HELIOTISC4_BUILD_QT_UI)
     find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
@@ -160,6 +171,18 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
     endif()
     include("${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/RuntimeStaging.cmake")
     heliotis_c4_prepare_playground_plugin_runtime(HeliotisC4Plugin)
+    if(PROJECT_NAME STREQUAL "HeliotisC4" AND PROJECT_IS_TOP_LEVEL)
+        if(APPLE)
+            set_target_properties(HeliotisC4Plugin PROPERTIES BUILD_WITH_INSTALL_RPATH ON
+                INSTALL_RPATH "@loader_path/runtime;@executable_path/../Frameworks")
+        elseif(UNIX)
+            set_target_properties(HeliotisC4Plugin PROPERTIES BUILD_WITH_INSTALL_RPATH ON
+                INSTALL_RPATH "$ORIGIN/runtime")
+        endif()
+        playground_sdk_package_plugin(HeliotisC4Plugin
+            PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
+            ICON "${PlaygroundPluginSDK_ICON_DIR}/heliotis.png")
+    endif()
     message(STATUS "[HeliotisC4] HeliotisC4Plugin enabled.")
 endif()
 
@@ -250,3 +273,12 @@ if(HELIOTISC4_BUILD_TESTS)
         endif()
     endif()
 endif()
+
+# Keep contract assertions active in Release validation.
+foreach(module_test IN ITEMS heliotis_c4_sdk_layout_test heliotis_c4_runtime_open_test heliotis_c4_frame_contract_test heliotis_c4_acquisition_policy_test heliotis_c4_graphics_adapter_test heliotis_c4_graphics_stream_test heliotis_c4_widget_test)
+    if(TARGET ${module_test})
+        target_compile_options(${module_test} PRIVATE
+            $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+            $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+    endif()
+endforeach()
