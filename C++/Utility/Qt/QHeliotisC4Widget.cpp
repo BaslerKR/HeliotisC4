@@ -169,7 +169,7 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
 
     _refreshButton = new QToolButton(this);
     _refreshButton->setObjectName(QStringLiteral("HeliotisC4RefreshButton"));
-    _refreshButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
+    _refreshButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/refresh-48.png")));
     _refreshButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     _refreshButton->setIconSize(QSize(16, 16));
     _refreshButton->setToolTip(tr("Refresh Heliotis devices"));
@@ -196,7 +196,7 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
 
     _grabOneButton = new QToolButton(this);
     _grabOneButton->setObjectName(QStringLiteral("HeliotisC4GrabOneButton"));
-    _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
+    _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/camera-48.png")));
     _grabOneButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     _grabOneButton->setIconSize(QSize(16, 16));
     _grabOneButton->setToolTip(tr("Arm acquisition for one Heliotis frame"));
@@ -209,8 +209,8 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     _grabLiveButton->setIconSize(QSize(16, 16));
     _grabLiveButton->setToolTip(tr("Start or stop live Heliotis acquisition"));
     QIcon liveIcon;
-    liveIcon.addFile(QStringLiteral(":/Resources/Icons/icons8-cameras-48.png"), QSize(), QIcon::Normal, QIcon::Off);
-    liveIcon.addFile(QStringLiteral(":/Resources/Icons/icons8-pause-48.png"), QSize(), QIcon::Normal, QIcon::On);
+    liveIcon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), QSize(), QIcon::Normal, QIcon::Off);
+    liveIcon.addFile(QStringLiteral(":/Resources/icon/pause-48.png"), QSize(), QIcon::Normal, QIcon::On);
     _grabLiveButton->setIcon(liveIcon);
     _grabLiveButton->setEnabled(false);
 
@@ -475,7 +475,7 @@ void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
             const QSignalBlocker blocker(_grabLiveButton);
             _grabLiveButton->setChecked(false);
         }
-        _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
+        _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/camera-48.png")));
         _grabOneButton->setToolTip(tr("Arm acquisition for one Heliotis frame"));
     }
     updateStatusLabel();
@@ -606,8 +606,8 @@ void QHeliotisC4Widget::setAcquisitionState(
         && !_acquisitionArmPending && !_acquisitionStopPending;
     _grabOneButton->setEnabled(acquisitionControlsEnabled && (!acquiring || !continuous));
     _grabOneButton->setIcon(acquiring && !continuous
-        ? QIcon(QStringLiteral(":/Resources/Icons/icons8-stop-48.png"))
-        : QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
+        ? QIcon(QStringLiteral(":/Resources/icon/stop-48.png"))
+        : QIcon(QStringLiteral(":/Resources/icon/camera-48.png")));
     _grabOneButton->setToolTip(acquiring && !continuous
         ? tr("Stop the armed single Heliotis acquisition")
         : tr("Arm acquisition for one Heliotis frame"));

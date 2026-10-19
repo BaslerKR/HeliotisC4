@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use the shared refresh, single-grab, live, and stop glyphs on the device toolbar.
+
 ## v0.2.1 (2026-10-15)
 
 - Publish the independently built device package with installed SDK validation.
