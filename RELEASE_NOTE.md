@@ -1,6 +1,6 @@
 # HeliotisC4 Release Note
 
-## Unreleased
+## v0.2.2 (2026-10-20)
 
 - Use the neutral Heliotis artwork for the package icon.
 
