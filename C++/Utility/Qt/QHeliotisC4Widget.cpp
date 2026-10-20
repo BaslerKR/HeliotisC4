@@ -188,7 +188,7 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
 
     _initializeButton = new QToolButton(this);
     _initializeButton->setObjectName(QStringLiteral("HeliotisC4InitializeButton"));
-    _initializeButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-setup-48.png")));
+    _initializeButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/setting-48.png")));
     _initializeButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     _initializeButton->setIconSize(QSize(16, 16));
     _initializeButton->setToolTip(tr("Reset all H8 capture settings to the vendor defaults and initialize the stage"));

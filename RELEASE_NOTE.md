@@ -2,6 +2,8 @@
 
 ## v0.2.2 (2026-10-20)
 
+- Match the initialization control to the shared neutral settings icon.
+
 - Use the neutral Heliotis artwork for the package icon.
 
 - Use the shared connect and disconnect artwork for connection controls.
