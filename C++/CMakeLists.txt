@@ -181,7 +181,7 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
         endif()
         playground_sdk_package_plugin(HeliotisC4Plugin
             PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
-            ICON "${PlaygroundPluginSDK_ICON_DIR}/heliotis.png")
+            ICON "${PlaygroundPluginSDK_ICON_DIR}/heliotis-48.png")
     endif()
     message(STATUS "[HeliotisC4] HeliotisC4Plugin enabled.")
 endif()

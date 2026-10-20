@@ -181,8 +181,8 @@ QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     _connectButton->setIconSize(QSize(16, 16));
     _connectButton->setToolTip(tr("Connect the selected device"));
     QIcon connectIcon;
-    connectIcon.addFile(QStringLiteral(":/Resources/Icons/icons8-connect-48.png"), QSize(), QIcon::Normal, QIcon::Off);
-    connectIcon.addFile(QStringLiteral(":/Resources/Icons/icons8-disconnected-48.png"), QSize(), QIcon::Normal, QIcon::On);
+    connectIcon.addFile(QStringLiteral(":/Resources/icon/connect-48.png"), QSize(), QIcon::Normal, QIcon::Off);
+    connectIcon.addFile(QStringLiteral(":/Resources/icon/disconnected-48.png"), QSize(), QIcon::Normal, QIcon::On);
     _connectButton->setIcon(connectIcon);
     _connectButton->setEnabled(false);
 

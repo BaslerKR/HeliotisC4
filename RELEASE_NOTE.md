@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Use the neutral Heliotis artwork for the package icon.
+
+- Use the shared connect and disconnect artwork for connection controls.
+
 - Use the shared refresh, single-grab, live, and stop glyphs on the device toolbar.
 
 ## v0.2.1 (2026-10-15)
