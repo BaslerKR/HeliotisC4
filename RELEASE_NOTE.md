@@ -1,5 +1,9 @@
 # HeliotisC4 Release Note
 
+## Unreleased
+
+- Share the SDK-independent Qt control composition between the runtime widget and isolated presentation consumers.
+
 ## v0.2.1 (2026-10-20)
 
 - Match the initialization control to the shared neutral settings icon.

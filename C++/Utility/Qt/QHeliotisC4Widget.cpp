@@ -141,110 +141,13 @@ QStringList expectedTreeIds(const heliotis::HeliotisC4::FeatureList& features)
     return qobject_cast<QLineEdit*>(editor) != nullptr;
 }
 
-QTreeWidget* createFeatureTree(QWidget* parent, const QString& objectName)
-{
-    auto* tree = new QTreeWidget(parent);
-    tree->setObjectName(objectName);
-    tree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
-    tree->setHeaderLabels({QStringLiteral("Feature"), QStringLiteral("Value")});
-    return tree;
-}
 
 } // namespace
 
 QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
     : QWidget(parent)
 {
-    setMinimumSize(300, 350);
-
-    auto* rootLayout = new QVBoxLayout(this);
-    rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
-
-    auto* topLayout = new QHBoxLayout;
-    topLayout->setObjectName(QStringLiteral("DeviceTopBarLayout"));
-
-    _deviceSelector = new QComboBox(this);
-    _deviceSelector->setObjectName(QStringLiteral("HeliotisC4DeviceSelector"));
-    _deviceSelector->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    _refreshButton = new QToolButton(this);
-    _refreshButton->setObjectName(QStringLiteral("HeliotisC4RefreshButton"));
-    _refreshButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/refresh-48.png")));
-    _refreshButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _refreshButton->setIconSize(QSize(16, 16));
-    _refreshButton->setToolTip(tr("Refresh Heliotis devices"));
-
-    _connectButton = new QToolButton(this);
-    _connectButton->setObjectName(QStringLiteral("HeliotisC4ConnectButton"));
-    _connectButton->setCheckable(true);
-    _connectButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _connectButton->setIconSize(QSize(16, 16));
-    _connectButton->setToolTip(tr("Connect the selected device"));
-    QIcon connectIcon;
-    connectIcon.addFile(QStringLiteral(":/Resources/icon/connect-48.png"), QSize(), QIcon::Normal, QIcon::Off);
-    connectIcon.addFile(QStringLiteral(":/Resources/icon/disconnected-48.png"), QSize(), QIcon::Normal, QIcon::On);
-    _connectButton->setIcon(connectIcon);
-    _connectButton->setEnabled(false);
-
-    _initializeButton = new QToolButton(this);
-    _initializeButton->setObjectName(QStringLiteral("HeliotisC4InitializeButton"));
-    _initializeButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/setting-48.png")));
-    _initializeButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _initializeButton->setIconSize(QSize(16, 16));
-    _initializeButton->setToolTip(tr("Reset all H8 capture settings to the vendor defaults and initialize the stage"));
-    _initializeButton->setEnabled(false);
-
-    _grabOneButton = new QToolButton(this);
-    _grabOneButton->setObjectName(QStringLiteral("HeliotisC4GrabOneButton"));
-    _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/camera-48.png")));
-    _grabOneButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _grabOneButton->setIconSize(QSize(16, 16));
-    _grabOneButton->setToolTip(tr("Arm acquisition for one Heliotis frame"));
-    _grabOneButton->setEnabled(false);
-
-    _grabLiveButton = new QToolButton(this);
-    _grabLiveButton->setObjectName(QStringLiteral("HeliotisC4GrabLiveButton"));
-    _grabLiveButton->setCheckable(true);
-    _grabLiveButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _grabLiveButton->setIconSize(QSize(16, 16));
-    _grabLiveButton->setToolTip(tr("Start or stop live Heliotis acquisition"));
-    QIcon liveIcon;
-    liveIcon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), QSize(), QIcon::Normal, QIcon::Off);
-    liveIcon.addFile(QStringLiteral(":/Resources/icon/pause-48.png"), QSize(), QIcon::Normal, QIcon::On);
-    _grabLiveButton->setIcon(liveIcon);
-    _grabLiveButton->setEnabled(false);
-
-    auto* selectorLayout = new QHBoxLayout;
-    selectorLayout->setObjectName(QStringLiteral("DeviceSelectorLayout"));
-    selectorLayout->addWidget(_deviceSelector);
-    selectorLayout->addWidget(_refreshButton);
-
-    auto* toolLayout = new QHBoxLayout;
-    toolLayout->setObjectName(QStringLiteral("DeviceToolLayout"));
-    toolLayout->addWidget(_connectButton);
-    toolLayout->addWidget(_initializeButton);
-    toolLayout->addWidget(_grabOneButton);
-    toolLayout->addWidget(_grabLiveButton);
-
-    topLayout->addLayout(selectorLayout);
-    topLayout->addLayout(toolLayout);
-    rootLayout->addLayout(topLayout);
-
-    auto* featureTreeLayout = new QVBoxLayout;
-    featureTreeLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
-    _featureTree = createFeatureTree(this, QStringLiteral("HeliotisC4FeatureTree"));
-    featureTreeLayout->addWidget(_featureTree);
-    rootLayout->addLayout(featureTreeLayout);
-
-    _statusBar = new QStatusBar(this);
-    _statusBar->setObjectName(QStringLiteral("HeliotisC4StatusBar"));
-    _statusBar->setSizeGripEnabled(false);
-    _connectionStatus = new QLabel(this);
-    _connectionStatus->setObjectName(QStringLiteral("HeliotisC4StatusLabel"));
-    _connectionStatus->setAlignment(Qt::AlignCenter);
-    _statusBar->addWidget(_connectionStatus);
-    rootLayout->addWidget(_statusBar);
-
+    HeliotisC4ControlUi::create(this);
     connect(_refreshButton, &QToolButton::clicked, this, [this] {
         _refreshButton->setEnabled(false);
         updateStatusLabel();

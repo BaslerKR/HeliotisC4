@@ -1,6 +1,7 @@
 #pragma once
 
 #ifdef HELIOTISC4_HAS_QT_UI
+#include "HeliotisC4ControlUi.h"
 
 #include "HeliotisC4.h"
 
@@ -19,7 +20,7 @@ class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 
-class QHeliotisC4Widget final : public QWidget {
+class QHeliotisC4Widget final : public QWidget, protected HeliotisC4ControlUi {
     Q_OBJECT
 
 public:
@@ -168,20 +169,11 @@ private:
     /** Logs operation guidance from the authoritative acquisition flags. */
     void logAcquisitionState();
 
-    QComboBox* _deviceSelector = nullptr;
-    QToolButton* _refreshButton = nullptr;
-    QToolButton* _connectButton = nullptr;
-    QToolButton* _initializeButton = nullptr;
-    QToolButton* _grabOneButton = nullptr;
-    QToolButton* _grabLiveButton = nullptr;
-    QLabel* _connectionStatus = nullptr;
     /** Displays only the canonical connection/acquisition state. */
     void updateStatusLabel();
     /** Routes operation diagnostics to application logs. */
     void logMessage(const QString& message, bool error = false);
 
-    QStatusBar* _statusBar = nullptr;
-    QTreeWidget* _featureTree = nullptr;
     QHash<QString, QTreeWidgetItem*> _categories;
     std::vector<QPushButton*> _softwareTriggerButtons;
     std::vector<QWidget*> _featureEditors;

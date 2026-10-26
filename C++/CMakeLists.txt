@@ -37,6 +37,7 @@ endif()
 if(HELIOTISC4_BUILD_QT_UI)
     find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
+    add_subdirectory(Utility/Qt)
     add_library(HeliotisC4QtWidget STATIC
         Utility/Qt/QHeliotisC4Widget.cpp
         Utility/Qt/QHeliotisC4Widget.h
@@ -282,3 +283,7 @@ foreach(module_test IN ITEMS heliotis_c4_sdk_layout_test heliotis_c4_runtime_ope
             $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     endif()
 endforeach()
+
+if(TARGET HeliotisC4QtWidget)
+    target_link_libraries(HeliotisC4QtWidget PUBLIC HeliotisC4Presentation)
+endif()
