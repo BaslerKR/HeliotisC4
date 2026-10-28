@@ -131,6 +131,13 @@ struct FeatureDescriptor {
     FeatureType type = FeatureType::Unknown;
     FeatureAccess access = FeatureAccess::Unknown;
     std::vector<std::string> enumEntries;
+    // Optional SDK-reported numeric bounds. Absent values were not reported.
+    std::optional<std::int64_t> integerMinimum;
+    std::optional<std::int64_t> integerMaximum;
+    std::optional<std::int64_t> integerIncrement;
+    std::optional<double> floatMinimum;
+    std::optional<double> floatMaximum;
+    std::optional<double> floatIncrement;
 };
 
 class HeliotisC4 {

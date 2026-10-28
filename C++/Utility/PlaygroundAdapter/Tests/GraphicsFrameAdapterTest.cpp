@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <optional>
 
@@ -86,6 +87,87 @@ int main()
         || scene->metadata.frameIndex != 7U)
     {
         std::cerr << "The GraphicsEngine scene must preserve H8 frame geometry, values, and metadata.\n";
+        return 1;
+    }
+
+    // Composition mirrors the GenTL adapter: one "0:0" cohort with a range and
+    // an intensity image, so get().image() resolves the range by group.
+    if (scene->ranges.size() != 1U || scene->images.size() != 1U
+        || scene->ranges.front().descriptor.id != "range.0:0.0"
+        || scene->ranges.front().descriptor.groupId != "0:0"
+        || scene->images.front().descriptor.id != "image.0:0.1"
+        || scene->images.front().descriptor.groupId != "0:0"
+        || scene->images.front().descriptor.displayName != "Intensity"
+        || scene->images.front().descriptor.registration != GraphicsImageRegistration::Unspecified
+        || !range.canDerivePointCloud())
+    {
+        std::cerr << "An H8 frame must publish one grouped range and intensity image.\n";
+        return 1;
+    }
+    const GraphicsImage& intensity = scene->images.front().payload;
+    std::uint16_t secondSample = 0;
+    std::memcpy(&secondSample, intensity.data() + 2, sizeof(secondSample));
+    if (intensity.pixelFormat != GraphicsImagePixelFormat::Mono16
+        || intensity.width != 2 || intensity.height != 2 || intensity.stride != 4
+        || intensity.declaredMonoSourceBits != 0
+        || intensity.bitAlignment != GraphicsImageBitAlignment::Packed
+        || intensity.frameSequence != 7U || secondSample != 20U)
+    {
+        std::cerr << "The intensity image must keep unscaled Mono16 sensor codes.\n";
+        return 1;
+    }
+
+    frame.parts.at(1).bitsPerSample = 12;
+    const auto twelveBit = adapter.convertFrame(frame, {});
+    if (!twelveBit || twelveBit->images.size() != 1U
+        || twelveBit->images.front().payload.declaredMonoSourceBits != 12U
+        || twelveBit->images.front().payload.bitAlignment != GraphicsImageBitAlignment::LeastSignificant)
+    {
+        std::cerr << "A 12-bit intensity part must declare LSB-aligned Mono16 samples.\n";
+        return 1;
+    }
+    frame.parts.at(1).bitsPerSample = 8;
+    frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 300U, 30U, 40U};
+    const auto eightBit = adapter.convertFrame(frame, {});
+    if (!eightBit || eightBit->images.size() != 1U
+        || eightBit->images.front().payload.pixelFormat != GraphicsImagePixelFormat::Mono8
+        || eightBit->images.front().payload.stride != 2
+        || eightBit->images.front().payload.data()[1] != 255U)
+    {
+        std::cerr << "An 8-bit intensity part must become a saturated Mono8 image.\n";
+        return 1;
+    }
+    frame.parts.at(1).bitsPerSample = 16;
+    frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 20U, 30U, 40U};
+
+    GraphicsFrameRequest imageOnlyRequest;
+    imageOnlyRequest.components = GraphicsFrameComponent::Image;
+    const auto imageOnly = adapter.convertFrame(frame, imageOnlyRequest);
+    if (!imageOnly || !imageOnly->ranges.empty() || imageOnly->images.size() != 1U)
+    {
+        std::cerr << "Image-only requests must omit the range resource.\n";
+        return 1;
+    }
+
+    auto floatingIntensity = frame;
+    floatingIntensity.parts.at(1).samples = std::vector<double>{1.0, 2.0, 3.0, 4.0};
+    const auto floatingScene = adapter.convertFrame(floatingIntensity, {});
+    if (!floatingScene || !floatingScene->images.empty()
+        || floatingScene->ranges.front().payload.intensity.size() != 4U)
+    {
+        std::cerr << "Floating intensity remains a range channel without an image.\n";
+        return 1;
+    }
+
+    auto twoImages = frame;
+    twoImages.parts.push_back(twoImages.parts.at(1));
+    const auto pairedImages = adapter.convertFrame(twoImages, {});
+    if (!pairedImages || pairedImages->images.size() != 2U
+        || pairedImages->images[0].descriptor.displayName != "Intensity 1"
+        || pairedImages->images[1].descriptor.displayName != "Intensity 2"
+        || pairedImages->images[1].descriptor.id != "image.0:0.2")
+    {
+        std::cerr << "Repeated intensity names must stay distinguishable.\n";
         return 1;
     }
 

@@ -1,13 +1,17 @@
 #pragma once
 #include <QWidget>
 #include <QString>
-class QComboBox; class QToolButton; class QTreeWidget; class QStatusBar; class QLabel;
-class QLineEdit; class QTabWidget; class OneGenFeatureTree;
+#include "HeliotisC4FeatureTree.h"
+class QComboBox; class QToolButton; class QStatusBar; class QLabel;
 
 /** @brief Owns the device control composition without SDK or acquisition dependencies. */
 struct HeliotisC4ControlUi {
-    /** @brief Creates the same controls used by the runtime widget. */
-    void create(QWidget* owner);
+    /**
+     * @brief Creates the same controls used by the runtime widget.
+     * @param settingsFile Consumer favorites store; empty selects standalone storage.
+     * @param favoritesKey Consumer favorites key; empty selects the standalone key.
+     */
+    void create(QWidget* owner, const QString& settingsFile = {}, const QString& favoritesKey = {});
     QComboBox* _deviceSelector = nullptr;
     QToolButton* _refreshButton = nullptr;
     QToolButton* _connectButton = nullptr;
@@ -16,5 +20,5 @@ struct HeliotisC4ControlUi {
     QToolButton* _grabLiveButton = nullptr;
     QLabel* _connectionStatus = nullptr;
     QStatusBar* _statusBar = nullptr;
-    QTreeWidget* _featureTree = nullptr;
+    HeliotisC4FeatureTree* _featureTree = nullptr;
 };

@@ -6,6 +6,16 @@
 
 - Share the SDK-independent Qt control composition between the runtime widget and isolated presentation consumers.
 
+- Publish each integer intensity-class part as a Mono8/Mono16 image in the same `0:0` cohort as the range, so image consumers such as the script `get().image()` input and the 2D viewer receive frames. Resource ids follow the GenTL adapter scheme (`range.0:0.<part>`, `image.0:0.<part>`); floating intensity parts remain range channels.
+
+- Own the feature browser as `HeliotisC4FeatureTree` on the shared `SearchableTreeWidget`, so the host no longer attaches a second, deferred geometry controller to the tree and one owner computes its scroll range synchronously, as for OneGen. Favorites are keyed by SDK feature name, stored in the host INI under `Plugins/HeliotisC4/Favorites/Features` through `IDevicePluginSettings`, and survive rebuilds, category changes and other devices.
+
+- Read SDK integer and float bounds and increments into feature descriptors; numeric editors validate syntax, describe the bounds, and keep an in-progress edit across value refreshes. Editors destroyed during a rebuild no longer emit a write.
+
+- Declare `IToolProvider` and `IDeviceParameterControl` on `HeliotisC4SourceController`. Device tools (`device.targets`, `device.connection`, `device.discover`, `device.connect`, `device.disconnect`, `device.single`, `device.live-start`, `device.live-stop`) reuse the session's GUI flows, and typed parameter inventory, read, write and execute use the module feature channel with connection generations, revisions, bounds validation and readback. While armed, only `TriggerSoftware` is admitted.
+
+- Favorites saved under the previous host-attached browser key are not migrated.
+
 ## v0.2.1 (2026-10-20)
 
 - Match the initialization control to the shared neutral settings icon.

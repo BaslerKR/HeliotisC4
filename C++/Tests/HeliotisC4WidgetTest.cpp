@@ -9,13 +9,17 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QTreeWidgetItemIterator>
 
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 
 namespace {
 
@@ -42,6 +46,91 @@ bool require(const bool condition, const char* message)
         std::cerr << message << std::endl;
     }
     return condition;
+}
+
+QTreeWidgetItem* findFeatureRow(QTreeWidget* tree, const QString& id)
+{
+    for (QTreeWidgetItemIterator it(tree); *it; ++it) {
+        if ((*it)->data(0, Qt::UserRole).toString() == id) return *it;
+    }
+    return nullptr;
+}
+
+/**
+ * Verifies the plugin-owned browser: the host must not attach a second one,
+ * favorites follow the SDK feature name in the consumer store, and rebuilds
+ * keep them without touching unrelated INI keys.
+ */
+bool featureBrowserPasses()
+{
+    QTemporaryDir directory;
+    if (!require(directory.isValid(), "A temporary settings directory is required.")) return false;
+    const QString settingsFile = directory.filePath(QStringLiteral("host.ini"));
+    const QString favoritesKey = QStringLiteral("Plugins/HeliotisC4/Favorites/Features");
+    {
+        QSettings settings(settingsFile, QSettings::IniFormat);
+        settings.setValue(QStringLiteral("Window/Geometry"), QStringLiteral("keep"));
+    }
+
+    heliotis::HeliotisC4::FeatureList features{
+        makeFeature(QStringLiteral("Acquisition"), QStringLiteral("ExposureTime"), QStringLiteral("4")),
+        makeFeature(QStringLiteral("Acquisition"), QStringLiteral("Gain"), QStringLiteral("1"))};
+    features[0].type = heliotis::FeatureType::Integer;
+    features[0].integerMinimum = 1;
+    features[0].integerMaximum = 10;
+
+    auto first = std::make_unique<QHeliotisC4Widget>(nullptr, settingsFile, favoritesKey);
+    first->resize(460, 320);
+    first->show();
+    first->setConnectedDeviceName(QStringLiteral("H8-A"));
+    first->setConnectionState(true);
+    first->setFeatures(features);
+    QApplication::processEvents();
+
+    auto* tree = first->findChild<SearchableTreeWidget*>(QStringLiteral("HeliotisC4FeatureTree"));
+    if (!require(tree != nullptr, "The feature tree must be the plugin-owned searchable browser.")) return false;
+    const auto controllers = tree->findChildren<QObject*>(
+        QStringLiteral("SearchableTreeController"), Qt::FindDirectChildrenOnly);
+    if (!require(controllers.size() == 1 && controllers.front()->inherits("SearchableTreeController"),
+                 "The host detects exactly one plugin-owned browser controller.")) return false;
+    if (!require(first->findChild<QLineEdit*>(QStringLiteral("DeviceFeatureSearchInput")) != nullptr,
+                 "The browser must provide feature search.")) return false;
+
+    auto* exposure = findFeatureRow(tree, QStringLiteral("feature:Acquisition/ExposureTime"));
+    if (!require(exposure && exposure->data(0, SearchableTreeWidget::FavoritableRole).toBool()
+                     && !findFeatureRow(tree, QStringLiteral("category:Acquisition"))
+                            ->data(0, SearchableTreeWidget::FavoritableRole).toBool(),
+                 "Only feature rows are favoritable.")) return false;
+    auto* editor = qobject_cast<QLineEdit*>(tree->itemWidget(exposure, 1));
+    if (!require(editor && editor->validator() && editor->toolTip().contains(QStringLiteral("Range: 1 to 10")),
+                 "Integer editors must validate input and describe SDK bounds.")) return false;
+
+    tree->toggleFavorite(exposure);
+    if (!require(tree->isFavorite(exposure), "Toggling must mark the feature as a favorite.")) return false;
+
+    // A category change and a second device keep the favorite: the key is the feature name.
+    features[0].categoryPath = "Moved";
+    auto second = std::make_unique<QHeliotisC4Widget>(nullptr, settingsFile, favoritesKey);
+    second->setConnectedDeviceName(QStringLiteral("H8-B"));
+    second->setConnectionState(true);
+    second->setFeatures(features);
+    QApplication::processEvents();
+    auto* secondTree = second->findChild<SearchableTreeWidget*>(QStringLiteral("HeliotisC4FeatureTree"));
+    auto* moved = secondTree ? findFeatureRow(secondTree, QStringLiteral("feature:Moved/ExposureTime")) : nullptr;
+    if (!require(moved && secondTree->isFavorite(moved),
+                 "Favorites must follow the SDK feature name across devices and categories.")) return false;
+
+    first->setFeatures(features);
+    QApplication::processEvents();
+    auto* rebuilt = findFeatureRow(tree, QStringLiteral("feature:Moved/ExposureTime"));
+    if (!require(rebuilt && tree->isFavorite(rebuilt)
+                     && rebuilt->data(0, SearchableTreeWidget::FavoriteRole).toBool(),
+                 "A structural rebuild must reapply favorites.")) return false;
+
+    QSettings settings(settingsFile, QSettings::IniFormat);
+    return require(settings.value(QStringLiteral("Window/Geometry")).toString() == QStringLiteral("keep")
+                       && settings.value(favoritesKey).toStringList().size() == 1,
+                   "The consumer store must keep unrelated keys and hold the favorite.");
 }
 
 } // namespace
@@ -556,5 +645,5 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
-    return EXIT_SUCCESS;
+    return featureBrowserPasses() ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -11,7 +11,8 @@ namespace {
 [[nodiscard]] GraphicsFrameRequest heliotisGraphicsFrameRequest() noexcept
 {
     GraphicsFrameRequest request;
-    request.components = GraphicsFrameComponent::Range | GraphicsFrameComponent::PointCloud;
+    request.components = GraphicsFrameComponent::Image | GraphicsFrameComponent::Range
+        | GraphicsFrameComponent::PointCloud;
     request.includeRangeAuxiliaryChannels = true;
     request.includePointCloudColors = false;
     return request;

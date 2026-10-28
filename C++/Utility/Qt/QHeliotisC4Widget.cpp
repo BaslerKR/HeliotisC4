@@ -14,7 +14,12 @@ Q_LOGGING_CATEGORY(heliotisDiagnosticLog, "diagnostics.HeliotisC4", QtInfoMsg)
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QAction>
+#include <QKeySequence>
+#include <QMenu>
 #include <QPushButton>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QSize>
 #include <QSignalBlocker>
 #include <QScrollBar>
@@ -112,6 +117,41 @@ QStringList expectedTreeIds(const heliotis::HeliotisC4::FeatureList& features)
         || feature.access == heliotis::FeatureAccess::WriteOnly;
 }
 
+/** Describes SDK-reported numeric bounds for the value editor tooltip. */
+[[nodiscard]] QString numericFeatureToolTip(const heliotis::FeatureDescriptor& feature)
+{
+    QStringList lines;
+    const auto bound = [](const auto& value) {
+        return value ? QString::number(*value, 'g', 12) : QStringLiteral("unbounded");
+    };
+    if (feature.type == heliotis::FeatureType::Integer) {
+        if (feature.integerMinimum || feature.integerMaximum) {
+            lines << QStringLiteral("Range: %1 to %2").arg(
+                feature.integerMinimum ? QString::number(*feature.integerMinimum) : QStringLiteral("unbounded"),
+                feature.integerMaximum ? QString::number(*feature.integerMaximum) : QStringLiteral("unbounded"));
+        }
+        if (feature.integerIncrement) lines << QStringLiteral("Increment: %1").arg(*feature.integerIncrement);
+    } else if (feature.type == heliotis::FeatureType::Float) {
+        if (feature.floatMinimum || feature.floatMaximum) {
+            lines << QStringLiteral("Range: %1 to %2").arg(bound(feature.floatMinimum), bound(feature.floatMaximum));
+        }
+        if (feature.floatIncrement) lines << QStringLiteral("Increment: %1").arg(*feature.floatIncrement, 0, 'g', 12);
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+/** Accepts only syntactically numeric text for numeric line editors. */
+void applyNumericValidator(QLineEdit* lineEdit, const heliotis::FeatureType type)
+{
+    if (type == heliotis::FeatureType::Integer) {
+        lineEdit->setValidator(new QRegularExpressionValidator(
+            QRegularExpression(QStringLiteral("^[+-]?\\d+$")), lineEdit));
+    } else if (type == heliotis::FeatureType::Float) {
+        lineEdit->setValidator(new QRegularExpressionValidator(
+            QRegularExpression(QStringLiteral("^[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?$")), lineEdit));
+    }
+}
+
 [[nodiscard]] bool editorMatchesFeature(
     const QTreeWidget* tree,
     const QTreeWidgetItem* item,
@@ -144,10 +184,27 @@ QStringList expectedTreeIds(const heliotis::HeliotisC4::FeatureList& features)
 
 } // namespace
 
-QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent)
+QHeliotisC4Widget::QHeliotisC4Widget(QWidget* parent, const QString& settingsFile,
+                                     const QString& favoritesKey)
     : QWidget(parent)
 {
-    HeliotisC4ControlUi::create(this);
+    HeliotisC4ControlUi::create(this, settingsFile, favoritesKey);
+    connect(_featureTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+        auto* item = _featureTree->itemAt(position);
+        if (!item || !item->data(0, SearchableTreeWidget::FavoritableRole).toBool()) return;
+        QMenu menu(this);
+        QAction* favorite = menu.addAction(_featureTree->isFavorite(item)
+            ? tr("Remove from favorites") : tr("Add to favorites"));
+        favorite->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
+        const QString id = item->data(0, HeliotisC4FeatureTree::ItemIdRole).toString();
+        if (menu.exec(_featureTree->viewport()->mapToGlobal(position)) != favorite) return;
+        // The nested menu loop may have replaced the row with a new snapshot.
+        QHash<QString, QTreeWidgetItem*> items;
+        for (int index = 0; index < _featureTree->topLevelItemCount(); ++index) {
+            collectTreeItems(_featureTree->topLevelItem(index), items);
+        }
+        if (QTreeWidgetItem* current = items.value(id)) _featureTree->toggleFavorite(current);
+    });
     connect(_refreshButton, &QToolButton::clicked, this, [this] {
         _refreshButton->setEnabled(false);
         updateStatusLabel();
@@ -649,6 +706,7 @@ void QHeliotisC4Widget::populateTree(
     const heliotis::HeliotisC4::FeatureList& features)
 {
     if (tryUpdateTreeInPlace(tree, features)) {
+        _featureTree->refreshFilter();
         return;
     }
 
@@ -656,7 +714,9 @@ void QHeliotisC4Widget::populateTree(
     const bool restoreUpdates = tree->updatesEnabled();
     tree->setUpdatesEnabled(false);
 
+    _rebuildingFeatures = true;
     tree->clear();
+    _rebuildingFeatures = false;
     categories.clear();
     _softwareTriggerButtons.clear();
     _featureEditors.clear();
@@ -673,6 +733,9 @@ void QHeliotisC4Widget::populateTree(
         createFeatureItem(tree, parent ? parent : rootItem, feature);
     }
     restoreTreeState(tree, categories, state);
+    // Apply favorites, search and the browser scroll clearance to the new rows
+    // before painting, as the in-place path does.
+    _featureTree->refreshFilter();
     tree->setUpdatesEnabled(restoreUpdates);
 }
 
@@ -713,6 +776,7 @@ void QHeliotisC4Widget::createFeatureItem(
     item->setText(0, QString::fromStdString(feature.displayName));
     item->setToolTip(0, QString::fromStdString(feature.description));
     const QString featureName = QString::fromStdString(feature.displayName);
+    if (tree == _featureTree) _featureTree->registerFeature(item, featureName);
     const bool writable = isFeatureWritable(feature);
 
     if (feature.type == heliotis::FeatureType::Command) {
@@ -764,6 +828,8 @@ void QHeliotisC4Widget::createFeatureItem(
 
     auto* lineEdit = new QLineEdit(tree);
     lineEdit->setProperty(featureWritableProperty, writable);
+    applyNumericValidator(lineEdit, feature.type);
+    lineEdit->setToolTip(numericFeatureToolTip(feature));
     if (feature.access == heliotis::FeatureAccess::WriteOnly) {
         lineEdit->setPlaceholderText(tr("Enter value"));
     } else {
@@ -771,6 +837,9 @@ void QHeliotisC4Widget::createFeatureItem(
     }
     lineEdit->setEnabled(writable && _featureAccessCurrent && !_featureOperationPending);
     connect(lineEdit, &QLineEdit::editingFinished, this, [this, featureName, lineEdit] {
+        // Destroying a focused editor during a rebuild emits editingFinished;
+        // that is not an operator write.
+        if (_rebuildingFeatures) return;
         emit featureWriteRequested(featureName, lineEdit->text());
     });
     tree->setItemWidget(item, 1, lineEdit);
@@ -813,6 +882,12 @@ void QHeliotisC4Widget::updateFeatureEditor(
     }
     if (auto* lineEdit = qobject_cast<QLineEdit*>(editor)) {
         const QSignalBlocker blocker(lineEdit);
+        lineEdit->setToolTip(numericFeatureToolTip(feature));
+        if (lineEdit->hasFocus() && lineEdit->isModified()) {
+            // Keep an in-progress edit; its editingFinished write follows.
+            lineEdit->setEnabled(editorEnabled);
+            return;
+        }
         if (feature.access == heliotis::FeatureAccess::WriteOnly) {
             lineEdit->clear();
             lineEdit->setPlaceholderText(tr("Enter value"));

@@ -2014,7 +2014,7 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
                 },
                 &enumError));
         }
-        features.push_back({
+        FeatureDescriptor descriptor{
             category,
             name,
             type == FeatureType::Command ? std::string("Execute")
@@ -2026,7 +2026,22 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
             type,
             access,
             std::move(enumEntries),
-        });
+        };
+        // Bounds are optional metadata; a rejected query leaves the bound absent.
+        if (type == FeatureType::Integer && access != FeatureAccess::NotAvailable) {
+            std::int64_t bound = 0;
+            if (C4Ftr_getIntMin(feature, &bound) == C4HDL_ERR_SUCCESS) descriptor.integerMinimum = bound;
+            if (C4Ftr_getIntMax(feature, &bound) == C4HDL_ERR_SUCCESS) descriptor.integerMaximum = bound;
+            if (C4Ftr_getIntInc(feature, &bound) == C4HDL_ERR_SUCCESS && bound > 0) descriptor.integerIncrement = bound;
+        } else if (type == FeatureType::Float && access != FeatureAccess::NotAvailable) {
+            double bound = 0.0;
+            if (C4Ftr_getFloatMin(feature, &bound) == C4HDL_ERR_SUCCESS && std::isfinite(bound)) descriptor.floatMinimum = bound;
+            if (C4Ftr_getFloatMax(feature, &bound) == C4HDL_ERR_SUCCESS && std::isfinite(bound)) descriptor.floatMaximum = bound;
+            if (C4Ftr_getFloatInc(feature, &bound) == C4HDL_ERR_SUCCESS && std::isfinite(bound) && bound > 0.0) {
+                descriptor.floatIncrement = bound;
+            }
+        }
+        features.push_back(std::move(descriptor));
     }
     C4Ftr_release(featureList);
     logInfo("Read " + std::to_string(features.size()) + " available feature(s).");

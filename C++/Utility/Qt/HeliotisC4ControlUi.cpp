@@ -2,17 +2,23 @@
 #include <QtWidgets>
 
 namespace {
-QTreeWidget* createFeatureTree(QWidget* parent, const QString& objectName)
+HeliotisC4FeatureTree* createFeatureTree(QWidget* parent, const QString& objectName,
+                                         const QString& settingsFile, const QString& favoritesKey)
 {
-    auto* tree = new QTreeWidget(parent);
+    // The plugin owns its browser, so the host does not attach a second one.
+    auto* tree = new HeliotisC4FeatureTree(parent, settingsFile, favoritesKey);
     tree->setObjectName(objectName);
     tree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
+    tree->setColumnCount(2);
     tree->setHeaderLabels({QStringLiteral("Feature"), QStringLiteral("Value")});
+    tree->setUniformRowHeights(true);
+    tree->setRootIsDecorated(true);
+    tree->setContextMenuPolicy(Qt::CustomContextMenu);
     return tree;
 }
 }
 
-void HeliotisC4ControlUi::create(QWidget* owner) {
+void HeliotisC4ControlUi::create(QWidget* owner, const QString& settingsFile, const QString& favoritesKey) {
     owner->setProperty("actionDensity", "compact");
     owner->setProperty("controlRole", "devicePanel");
 
@@ -98,7 +104,8 @@ void HeliotisC4ControlUi::create(QWidget* owner) {
     auto* featureTreeLayout = new QVBoxLayout;
     featureTreeLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
     featureTreeLayout->setProperty("layoutRole", "bottom-panel");
-    _featureTree = createFeatureTree(owner, QStringLiteral("HeliotisC4FeatureTree"));
+    _featureTree = createFeatureTree(owner, QStringLiteral("HeliotisC4FeatureTree"),
+                                     settingsFile, favoritesKey);
     featureTreeLayout->addWidget(_featureTree);
     rootLayout->addLayout(featureTreeLayout);
 

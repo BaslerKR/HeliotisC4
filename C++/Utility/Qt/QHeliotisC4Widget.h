@@ -24,7 +24,14 @@ class QHeliotisC4Widget final : public QWidget, protected HeliotisC4ControlUi {
     Q_OBJECT
 
 public:
-    explicit QHeliotisC4Widget(QWidget* parent = nullptr);
+    /**
+     * Creates the control panel and its searchable feature browser.
+     *
+     * @param settingsFile Consumer favorites INI; empty selects standalone storage.
+     * @param favoritesKey Consumer favorites key; empty selects the standalone key.
+     */
+    explicit QHeliotisC4Widget(QWidget* parent = nullptr, const QString& settingsFile = {},
+                               const QString& favoritesKey = {});
 
     void setDiscoveredDevices(const std::vector<heliotis::DeviceDescriptor>& devices);
     /**
@@ -194,6 +201,7 @@ private:
     bool _featureRefreshPending = false;
     bool _featureOperationPending = false;
     bool _featureAccessCurrent = true;
+    bool _rebuildingFeatures = false;
 };
 
 #endif // HELIOTISC4_HAS_QT_UI
