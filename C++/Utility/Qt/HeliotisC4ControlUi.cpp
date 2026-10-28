@@ -13,14 +13,18 @@ QTreeWidget* createFeatureTree(QWidget* parent, const QString& objectName)
 }
 
 void HeliotisC4ControlUi::create(QWidget* owner) {
+    owner->setProperty("actionDensity", "compact");
+    owner->setProperty("controlRole", "devicePanel");
 
     owner->setMinimumSize(300, 350);
 
     auto* rootLayout = new QVBoxLayout(owner);
     rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
+    rootLayout->setProperty("layoutRole", "flush");
 
     auto* topLayout = new QHBoxLayout;
     topLayout->setObjectName(QStringLiteral("DeviceTopBarLayout"));
+    topLayout->setProperty("layoutRole", "content");
 
     _deviceSelector = new QComboBox(owner);
     _deviceSelector->setObjectName(QStringLiteral("HeliotisC4DeviceSelector"));
@@ -75,11 +79,13 @@ void HeliotisC4ControlUi::create(QWidget* owner) {
 
     auto* selectorLayout = new QHBoxLayout;
     selectorLayout->setObjectName(QStringLiteral("DeviceSelectorLayout"));
+    selectorLayout->setProperty("layoutRole", "row");
     selectorLayout->addWidget(_deviceSelector);
     selectorLayout->addWidget(_refreshButton);
 
     auto* toolLayout = new QHBoxLayout;
     toolLayout->setObjectName(QStringLiteral("DeviceToolLayout"));
+    toolLayout->setProperty("layoutRole", "actions");
     toolLayout->addWidget(_connectButton);
     toolLayout->addWidget(_initializeButton);
     toolLayout->addWidget(_grabOneButton);
@@ -91,6 +97,7 @@ void HeliotisC4ControlUi::create(QWidget* owner) {
 
     auto* featureTreeLayout = new QVBoxLayout;
     featureTreeLayout->setObjectName(QStringLiteral("DeviceTreePanelLayout"));
+    featureTreeLayout->setProperty("layoutRole", "bottom-panel");
     _featureTree = createFeatureTree(owner, QStringLiteral("HeliotisC4FeatureTree"));
     featureTreeLayout->addWidget(_featureTree);
     rootLayout->addLayout(featureTreeLayout);
