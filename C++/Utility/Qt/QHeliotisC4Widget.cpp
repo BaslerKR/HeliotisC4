@@ -433,7 +433,7 @@ void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
         _softwareTriggerPending = false;
         {
             const QSignalBlocker blocker(_grabLiveButton);
-            _grabLiveButton->setChecked(false);
+            _grabLiveButton->setChecked(false); updateLiveAction();
         }
         _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/camera-48.png")));
         _grabOneButton->setToolTip(tr("Arm acquisition for one Heliotis frame"));
@@ -446,7 +446,7 @@ void QHeliotisC4Widget::setAcquisitionAvailable(const bool available)
     _grabLiveButton->setEnabled(enabled);
     if (!enabled) {
         const QSignalBlocker blocker(_grabLiveButton);
-        _grabLiveButton->setChecked(false);
+        _grabLiveButton->setChecked(false); updateLiveAction();
     }
     setSoftwareTriggerAvailable(_acquisitionActive && enabled && _softwareTriggerAvailable);
 }
@@ -478,7 +478,7 @@ void QHeliotisC4Widget::setAcquisitionArmPending(const bool pending, const bool 
     }
     {
         const QSignalBlocker blocker(_grabLiveButton);
-        _grabLiveButton->setChecked(false);
+        _grabLiveButton->setChecked(false); updateLiveAction();
     }
     _continuousAcquisition = false;
     _connectButton->setEnabled(_connected || !_devices.empty());
@@ -559,7 +559,7 @@ void QHeliotisC4Widget::setAcquisitionState(
 
     {
         const QSignalBlocker blocker(_grabLiveButton);
-        _grabLiveButton->setChecked(acquiring && continuous);
+        _grabLiveButton->setChecked(acquiring && continuous); updateLiveAction();
     }
     const bool acquisitionControlsEnabled = _connected && _acquisitionAvailable
         && !_initializationPending && !_featureOperationPending && !_featureRefreshPending

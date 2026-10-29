@@ -77,12 +77,15 @@ void HeliotisC4ControlUi::create(QWidget* owner, const QString& settingsFile, co
     _grabLiveButton->setCheckable(true);
     _grabLiveButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     _grabLiveButton->setIconSize(QSize(16, 16));
-    _grabLiveButton->setToolTip(QCoreApplication::translate("QHeliotisC4Widget", "Start or stop live Heliotis acquisition"));
+
     QIcon liveIcon;
-    // Paused while stopped, live while grabbing.
-    liveIcon.addFile(QStringLiteral(":/Resources/icon/pause-48.png"), QSize(), QIcon::Normal, QIcon::Off);
-    liveIcon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), QSize(), QIcon::Normal, QIcon::On);
+    // Always show the next acquisition command, including during hover.
+    liveIcon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), QSize(), QIcon::Normal, QIcon::Off);
+    liveIcon.addFile(QStringLiteral(":/Resources/icon/stop-48.png"), QSize(), QIcon::Normal, QIcon::On);
+    _grabLiveButton->setProperty("iconStateRole", "action");
     _grabLiveButton->setIcon(liveIcon);
+    QObject::connect(_grabLiveButton, &QToolButton::toggled, owner, [this] { updateLiveAction(); });
+    updateLiveAction();
     _grabLiveButton->setEnabled(false);
 
     auto* selectorLayout = new QHBoxLayout;
@@ -121,4 +124,13 @@ void HeliotisC4ControlUi::create(QWidget* owner, const QString& settingsFile, co
     rootLayout->addWidget(_statusBar);
 
 
+}
+
+void HeliotisC4ControlUi::updateLiveAction()
+{
+    const QString command = _grabLiveButton->isChecked()
+        ? QCoreApplication::translate("QHeliotisC4Widget", "Stop live acquisition")
+        : QCoreApplication::translate("QHeliotisC4Widget", "Start live acquisition");
+    _grabLiveButton->setToolTip(command);
+    _grabLiveButton->setAccessibleName(command);
 }

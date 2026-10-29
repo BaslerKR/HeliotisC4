@@ -12,6 +12,8 @@ struct HeliotisC4ControlUi {
      * @param favoritesKey Consumer favorites key; empty selects the standalone key.
      */
     void create(QWidget* owner, const QString& settingsFile = {}, const QString& favoritesKey = {});
+    /** @brief Synchronizes the next command after observed or local acquisition state changes. */
+    void updateLiveAction();
     QComboBox* _deviceSelector = nullptr;
     QToolButton* _refreshButton = nullptr;
     QToolButton* _connectButton = nullptr;
