@@ -50,8 +50,9 @@ void HeliotisC4ControlUi::create(QWidget* owner, const QString& settingsFile, co
     _connectButton->setIconSize(QSize(16, 16));
     _connectButton->setToolTip(QCoreApplication::translate("QHeliotisC4Widget", "Connect the selected device"));
     QIcon connectIcon;
-    connectIcon.addFile(QStringLiteral(":/Resources/icon/connect-48.png"), QSize(), QIcon::Normal, QIcon::Off);
-    connectIcon.addFile(QStringLiteral(":/Resources/icon/disconnected-48.png"), QSize(), QIcon::Normal, QIcon::On);
+    // The glyph names the current state; the shared theme previews the other state on hover.
+    connectIcon.addFile(QStringLiteral(":/Resources/icon/disconnected-48.png"), QSize(), QIcon::Normal, QIcon::Off);
+    connectIcon.addFile(QStringLiteral(":/Resources/icon/connect-48.png"), QSize(), QIcon::Normal, QIcon::On);
     _connectButton->setIcon(connectIcon);
     _connectButton->setEnabled(false);
 
@@ -78,8 +79,9 @@ void HeliotisC4ControlUi::create(QWidget* owner, const QString& settingsFile, co
     _grabLiveButton->setIconSize(QSize(16, 16));
     _grabLiveButton->setToolTip(QCoreApplication::translate("QHeliotisC4Widget", "Start or stop live Heliotis acquisition"));
     QIcon liveIcon;
-    liveIcon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), QSize(), QIcon::Normal, QIcon::Off);
-    liveIcon.addFile(QStringLiteral(":/Resources/icon/pause-48.png"), QSize(), QIcon::Normal, QIcon::On);
+    // Paused while stopped, live while grabbing.
+    liveIcon.addFile(QStringLiteral(":/Resources/icon/pause-48.png"), QSize(), QIcon::Normal, QIcon::Off);
+    liveIcon.addFile(QStringLiteral(":/Resources/icon/cameras-48.png"), QSize(), QIcon::Normal, QIcon::On);
     _grabLiveButton->setIcon(liveIcon);
     _grabLiveButton->setEnabled(false);
 
