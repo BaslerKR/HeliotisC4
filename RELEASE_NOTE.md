@@ -12,7 +12,9 @@
 
 - Read SDK integer and float bounds and increments into feature descriptors; numeric editors validate syntax, describe the bounds, and keep an in-progress edit across value refreshes. Editors destroyed during a rebuild no longer emit a write.
 
-- Declare `IToolProvider` and `IDeviceParameterControl` on `HeliotisC4SourceController`. Device tools (`device.targets`, `device.connection`, `device.discover`, `device.connect`, `device.disconnect`, `device.single`, `device.live-start`, `device.live-stop`) reuse the session's GUI flows, and typed parameter inventory, read, write and execute use the module feature channel with connection generations, revisions, bounds validation and readback. While armed, only `TriggerSoftware` is admitted.
+- Declare `IToolProvider` and `IDeviceParameterControl` on `HeliotisC4SourceController`. Device tools (`device.targets`, `device.connection`, `device.discover`, `device.connect`, `device.disconnect`, `device.single`, `device.live-start`, `device.live-stop`) reuse the session's GUI flows, and typed parameter inventory, read, write and execute use the module feature channel with connection generations, revisions, bounds validation and readback. While armed, only `TriggerSoftware` is admitted, without presenting it as a feature change in the panel.
+
+- Require Core 0.6.0, which first provides `IToolProvider/1.0` and `IDeviceParameterControl/1.0`.
 
 - Favorites saved under the previous host-attached browser key are not migrated.
 

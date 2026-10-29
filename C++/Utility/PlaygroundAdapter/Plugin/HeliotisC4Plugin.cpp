@@ -485,7 +485,10 @@ public:
             // API work holds the same SDK channel as GUI feature edits. Mirror only
             // its transitions so session-owned pending states remain authoritative.
             // Tool calls drive the session flows below, which present their own state.
-            const bool busy = _controller && _controller->parameterWorkActive();
+            // While armed the only admitted call is TriggerSoftware, which is an
+            // acquisition command rather than a feature edit; arming is refused
+            // while parameter work runs, so no shown state can be left behind.
+            const bool busy = _controller && _controller->parameterWorkActive() && !_controller->isGrabbing();
             if (busy == _externalBusyShown) return;
             _externalBusyShown = busy;
             if (_widget && !_featureWatcher && !_featureReadWatcher && !_initializationWatcher) {
