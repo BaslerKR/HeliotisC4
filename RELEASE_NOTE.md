@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.2 (2026-10-29)
+
 - Show the next Live grab command with cameras/stop artwork in all pointer and focus states, and keep its tooltip and accessible name synchronized with acquisition state.
 
 
