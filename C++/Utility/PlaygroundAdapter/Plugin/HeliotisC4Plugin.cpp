@@ -1141,7 +1141,7 @@ public:
 
     DevicePluginDescriptor descriptor() const override
     {
-        return {QStringLiteral("heliotis-c4"), QStringLiteral("Heliotis C4"), playgroundDevicePluginVersion(), true};
+        return {QStringLiteral("heliotis-c4"), playgroundDevicePluginDisplayName(), playgroundDevicePluginVersion(), true};
     }
 
     /** Releases C4 handles before the selected runtime module and search paths. */
