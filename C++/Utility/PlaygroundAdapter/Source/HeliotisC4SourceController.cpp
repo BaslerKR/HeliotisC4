@@ -6,7 +6,6 @@
 
 #include <QByteArray>
 #include <QDebug>
-#include <QJsonArray>
 #include <QMetaObject>
 #include <QPointer>
 #include <QThread>
@@ -197,18 +196,28 @@ void HeliotisC4SourceController::handleFrame(GraphicsFrame&& payload, const unsi
 
 /** One accepted tool request; delivery happens exactly once. */
 struct HeliotisC4SourceController::ToolCall {
-    IToolProvider::Completion completion;
+    IDeviceConnectionControl::Completion completion;
+    IDeviceConnectionControl::TargetsCompletion targets;
     std::atomic<bool> delivered{false};
 
-    void deliver(ApiResult<QJsonValue> result) noexcept
+    /** Delivers a state result, or a target catalog for discovery, exactly once. */
+    void deliver(DeviceConnectionResult result, std::vector<heliotis::DeviceDescriptor> devices = {}) noexcept
     {
         if (delivered.exchange(true)) return;
         try {
-            completion(std::move(result));
+            if (targets) {
+                DeviceConnectionTargets copied{std::move(result), {}};
+                if (copied.result.error == DeviceConnectionError::None) copied.result.state.reset();
+                for (const auto& device : devices) copied.targets.push_back(target(device));
+                targets(std::move(copied));
+            } else {
+                completion(std::move(result));
+            }
         } catch (...) {
-            qWarning().noquote() << "[Heliotis C4] Tool consumer callback threw.";
+            qWarning().noquote() << "[Heliotis C4] Lifecycle consumer callback threw.";
         }
     }
+    static DeviceConnectionTarget target(const heliotis::DeviceDescriptor& device);
 };
 
 namespace {
@@ -217,20 +226,6 @@ using ParameterError = DeviceParameterError;
 using ParameterKind = DeviceParameterKind;
 
 constexpr const char* kParameterScope = "Device";
-
-QJsonObject schema(QJsonObject properties, QJsonArray required)
-{
-    return {{"type", "object"}, {"properties", properties}, {"required", required},
-            {"additionalProperties", false}};
-}
-
-QJsonObject stateSchema()
-{
-    const QJsonObject text{{"type", "string"}}, flag{{"type", "boolean"}};
-    return schema({{"connected", flag}, {"live", flag}, {"connectionId", text}, {"targetId", text},
-                   {"deliveredFrames", text}},
-                  {"connected", "live", "connectionId", "targetId", "deliveredFrames"});
-}
 
 /** Encodes the exact discovery identity that `HeliotisC4Device::open()` re-verifies. */
 QString targetId(const heliotis::DeviceDescriptor& device)
@@ -241,16 +236,9 @@ QString targetId(const heliotis::DeviceDescriptor& device)
         .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
 }
 
-QJsonObject targets(const std::vector<heliotis::DeviceDescriptor>& devices)
+DeviceConnectionResult refused(DeviceConnectionError error, const char* message)
 {
-    QJsonArray values;
-    for (const auto& device : devices) {
-        values.append(QJsonObject{{"targetId", targetId(device)},
-            {"title", QString::fromStdString(device.deviceName)},
-            {"deviceName", QString::fromStdString(device.deviceName)},
-            {"interfaceName", QString::fromStdString(device.interfaceName)}});
-    }
-    return {{"targets", values}};
+    return {error, message};
 }
 
 DeviceParameterResult parameterFailure(const ParameterError error, std::string message)
@@ -352,14 +340,20 @@ const heliotis::FeatureDescriptor* findFeature(const heliotis::HeliotisC4::Featu
 
 } // namespace
 
+DeviceConnectionTarget HeliotisC4SourceController::ToolCall::target(const heliotis::DeviceDescriptor& device)
+{
+    return {targetId(device).toStdString(), device.deviceName,
+            {{"deviceName", device.deviceName}, {"interfaceName", device.interfaceName}}};
+}
+
 void HeliotisC4SourceController::setControlBackend(HeliotisC4ControlBackend* backend)
 {
     Q_ASSERT(QThread::currentThread() == thread());
     _backend = backend;
     if (!backend && _toolCall) {
         const auto call = std::exchange(_toolCall, {});
-        call->deliver(ApiResult<QJsonValue>::failure(ApiErrorCode::Unavailable,
-            QStringLiteral("The Heliotis session closed before the operation completed.")));
+        call->deliver({DeviceConnectionError::Unavailable, "The Heliotis session closed before the operation completed.",
+                       DeviceConnectionEffect::Unknown});
         emit controlChanged();
     }
 }
@@ -375,111 +369,129 @@ QString HeliotisC4SourceController::connectionId() const
     return _connectionId;
 }
 
-QJsonObject HeliotisC4SourceController::controlState() const
+DeviceConnectionState HeliotisC4SourceController::connectionState() const
 {
     const QString connection = connectionId();
     const bool connected = _device && _device->isOpened() && !connection.isEmpty();
     const auto target = connected && _backend ? _backend->connectedTarget() : std::nullopt;
-    return {{"connected", connected}, {"live", connected && _isGrabbing.load() && _isContinuous.load()},
-            {"connectionId", connected ? connection : QString()},
-            {"targetId", target ? targetId(*target) : QString()},
-            {"deliveredFrames", QString::number(_deliveredFrames.load())}};
+    return {connected, connected && _isGrabbing.load() && _isContinuous.load(),
+            connected ? connection.toStdString() : std::string(),
+            target ? targetId(*target).toStdString() : std::string(),
+            target ? target->deviceName : std::string(), _deliveredFrames.load()};
 }
 
-QList<ToolDescriptor> HeliotisC4SourceController::toolDescriptors() const
+DeviceConnectionCapabilities HeliotisC4SourceController::connectionCapabilities() const
 {
-    const QJsonObject text{{"type", "string"}, {"minLength", 1}};
-    const auto empty = schema({}, {});
-    const auto connection = schema({{"connectionId", text}}, {"connectionId"});
-    const auto entry = schema({{"targetId", text}, {"title", QJsonObject{{"type", "string"}}},
-        {"deviceName", QJsonObject{{"type", "string"}}}, {"interfaceName", QJsonObject{{"type", "string"}}}},
-        {"targetId", "title", "deviceName", "interfaceName"});
-    const auto inventory = schema({{"targets", QJsonObject{{"type", "array"}, {"items", entry}}}}, {"targets"});
-    QList<ToolDescriptor> result{
-        {"device.targets", 1, "Device targets", "Copy the exact C4Utility interface/device discovery snapshot.",
-            ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, inventory},
-        {"device.connection", 1, "Device connection",
-            "Observe the module-owned connection and delivered-frame count, not presentation completion.",
-            ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, stateSchema()},
-        {"device.discover", 1, "Discover devices", "Refresh C4Utility discovery while disconnected and idle.",
-            ToolEffect::Device, ToolEgress::Metadata, true, {}, empty, inventory},
-        {"device.connect", 1, "Connect device",
-            "Open an exact discovered target; the device configuration is preserved and Init stays explicit.",
-            ToolEffect::Device, ToolEgress::Metadata, true, {}, schema({{"targetId", text}}, {"targetId"}), stateSchema()},
-        {"device.disconnect", 1, "Disconnect device", "Stop acquisition when needed and close the exact connection generation.",
-            ToolEffect::Device, ToolEgress::Metadata, true, {}, connection, stateSchema()},
-        {"device.single", 1, "Acquire one frame",
-            "Arm Single acquisition and wait until it stops; query the viewer separately for presentation evidence.",
-            ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()},
-        {"device.live-start", 1, "Start Live", "Arm Live acquisition on the exact connection; completion is arm acknowledgement.",
-            ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()},
-        {"device.live-stop", 1, "Stop Live", "Stop acquisition on the exact connection and wait until it has stopped.",
-            ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()}};
-    if (!_backend) {
-        for (auto& descriptor : result) {
-            descriptor.available = false;
-            descriptor.unavailableReason = QStringLiteral("Device control has no session.");
-        }
-    }
-    return result;
+    const DeviceConnectionAvailability availability = _backend ? DeviceConnectionAvailability{true, {}}
+        : DeviceConnectionAvailability{false, "Device control has no session."};
+    return {availability, availability, availability, availability, availability, availability};
 }
 
-ApiResult<void> HeliotisC4SourceController::requestTool(const QString& name, const int version,
-                                                        QJsonObject arguments, IToolProvider::Completion completion)
+DeviceConnectionResult HeliotisC4SourceController::requestConnectionTargets(TargetsCompletion completion)
 {
-    Q_ASSERT(QThread::currentThread() == thread());
-    using Result = ApiResult<QJsonValue>;
-    if (!completion) return ApiResult<void>::failure(ApiErrorCode::InvalidArgument, "Completion is required.");
-    bool known = false;
-    for (const auto& descriptor : toolDescriptors()) known = known || descriptor.name == name;
-    if (!known) return ApiResult<void>::failure(ApiErrorCode::NotFound, "Tool is not declared.");
-    if (version != 1) return ApiResult<void>::failure(ApiErrorCode::Unsupported, "Unsupported tool version.");
-    if (!_backend) return ApiResult<void>::failure(ApiErrorCode::Unavailable, "Device control has no session.");
-    const bool observe = name == "device.targets" || name == "device.connection";
-    const bool discover = name == "device.discover";
-    const QString field = name == "device.connect" ? "targetId" : "connectionId";
-    if (((observe || discover) && !arguments.isEmpty())
-        || (!observe && !discover && (arguments.size() != 1 || !arguments.value(field).isString()
-            || arguments.value(field).toString().isEmpty() || arguments.value(field).toString().contains(QChar::Null)))) {
-        return ApiResult<void>::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
-    }
+    auto call = std::make_shared<ToolCall>();
+    call->targets = std::move(completion);
+    return admitLifecycle(Lifecycle::Targets, {}, std::move(call));
+}
+
+DeviceConnectionResult HeliotisC4SourceController::requestConnectionState(IDeviceConnectionControl::Completion completion)
+{
     auto call = std::make_shared<ToolCall>();
     call->completion = std::move(completion);
-    if (observe) {
-        call->deliver(Result::success(name == "device.targets" ? targets(_backend->targets()) : controlState()));
-        return ApiResult<void>::success();
+    return admitLifecycle(Lifecycle::Connection, {}, std::move(call));
+}
+
+DeviceConnectionResult HeliotisC4SourceController::requestDiscover(TargetsCompletion completion)
+{
+    auto call = std::make_shared<ToolCall>();
+    call->targets = std::move(completion);
+    return admitLifecycle(Lifecycle::Discover, {}, std::move(call));
+}
+
+DeviceConnectionResult HeliotisC4SourceController::requestConnect(std::string targetId,
+                                                                  IDeviceConnectionControl::Completion completion)
+{
+    auto call = std::make_shared<ToolCall>();
+    call->completion = std::move(completion);
+    return admitLifecycle(Lifecycle::Connect, std::move(targetId), std::move(call));
+}
+
+DeviceConnectionResult HeliotisC4SourceController::requestDisconnect(std::string connectionId,
+                                                                     IDeviceConnectionControl::Completion completion)
+{
+    auto call = std::make_shared<ToolCall>();
+    call->completion = std::move(completion);
+    return admitLifecycle(Lifecycle::Disconnect, std::move(connectionId), std::move(call));
+}
+
+DeviceConnectionResult HeliotisC4SourceController::requestSingle(std::string connectionId,
+                                                                 IDeviceConnectionControl::Completion completion)
+{
+    auto call = std::make_shared<ToolCall>();
+    call->completion = std::move(completion);
+    return admitLifecycle(Lifecycle::Single, std::move(connectionId), std::move(call));
+}
+
+DeviceConnectionResult HeliotisC4SourceController::requestLiveStart(std::string connectionId,
+                                                                    IDeviceConnectionControl::Completion completion)
+{
+    auto call = std::make_shared<ToolCall>();
+    call->completion = std::move(completion);
+    return admitLifecycle(Lifecycle::LiveStart, std::move(connectionId), std::move(call));
+}
+
+DeviceConnectionResult HeliotisC4SourceController::requestLiveStop(std::string connectionId,
+                                                                   IDeviceConnectionControl::Completion completion)
+{
+    auto call = std::make_shared<ToolCall>();
+    call->completion = std::move(completion);
+    return admitLifecycle(Lifecycle::LiveStop, std::move(connectionId), std::move(call));
+}
+
+DeviceConnectionResult HeliotisC4SourceController::admitLifecycle(const Lifecycle operation, const std::string& argument,
+                                                                  std::shared_ptr<ToolCall> call)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!call->completion && !call->targets) return refused(DeviceConnectionError::InvalidArgument, "Completion is required.");
+    if (!_backend) return refused(DeviceConnectionError::Unavailable, "Device control has no session.");
+    if (operation == Lifecycle::Targets) {
+        call->deliver({}, _backend->targets());
+        return {};
+    }
+    if (operation == Lifecycle::Connection) {
+        call->deliver({{}, {}, {}, connectionState()});
+        return {};
     }
     if (externalBusy() || _backend->controlBusy()) {
-        return ApiResult<void>::failure(ApiErrorCode::Busy, "Another Heliotis GUI or API operation is active.");
+        return refused(DeviceConnectionError::Busy, "Another Heliotis GUI or API operation is active.");
     }
 
-    const QJsonObject state = controlState();
-    const bool connected = state.value("connected").toBool();
+    const auto state = connectionState();
     std::size_t targetIndex = 0;
-    if (discover) {
-        if (connected) return ApiResult<void>::failure(ApiErrorCode::Busy, "Disconnect before discovery.");
-    } else if (name == "device.connect") {
-        if (connected) return ApiResult<void>::failure(ApiErrorCode::Conflict, "Disconnect before connecting another device.");
+    if (operation == Lifecycle::Discover) {
+        if (state.connected) return refused(DeviceConnectionError::Busy, "Disconnect before discovery.");
+    } else if (operation == Lifecycle::Connect) {
+        if (state.connected) return refused(DeviceConnectionError::Conflict, "Disconnect before connecting another device.");
         const auto devices = _backend->targets();
         bool found = false;
         for (std::size_t index = 0; index < devices.size() && !found; ++index) {
-            if (targetId(devices[index]) == arguments.value(field).toString()) {
+            if (targetId(devices[index]).toStdString() == argument) {
                 targetIndex = index;
                 found = true;
             }
         }
-        if (!found) return ApiResult<void>::failure(ApiErrorCode::NotFound, "Exact discovered target was not found.");
+        if (!found) return refused(DeviceConnectionError::NotFound, "Exact discovered target was not found.");
     } else {
-        if (!connected) return ApiResult<void>::failure(ApiErrorCode::Unavailable, "Device is disconnected.");
-        if (state.value("connectionId").toString() != arguments.value(field).toString()) {
-            return ApiResult<void>::failure(ApiErrorCode::Conflict, "Connection generation changed.");
+        if (!state.connected) return refused(DeviceConnectionError::Disconnected, "Device is disconnected.");
+        if (state.connectionId != argument) {
+            return refused(DeviceConnectionError::Conflict, "The connection changed; observe it again.");
         }
-        if ((name == "device.single" || name == "device.live-start") && _isGrabbing.load()) {
-            return ApiResult<void>::failure(ApiErrorCode::Busy, "Stop the active acquisition explicitly first.");
+        if ((operation == Lifecycle::Single || operation == Lifecycle::LiveStart) && _isGrabbing.load()) {
+            return refused(DeviceConnectionError::Busy, "Stop the active acquisition explicitly first.");
         }
-        if (name == "device.live-stop" && !_isGrabbing.load()) {
-            call->deliver(Result::success(state));
-            return ApiResult<void>::success();
+        if (operation == Lifecycle::LiveStop && !_isGrabbing.load()) {
+            call->deliver({{}, {}, {}, state});
+            return {};
         }
     }
 
@@ -487,42 +499,42 @@ ApiResult<void> HeliotisC4SourceController::requestTool(const QString& name, con
     emit controlChanged();
     const std::uint64_t framesBefore = _deliveredFrames.load();
     const QPointer<HeliotisC4SourceController> guard(this);
-    auto done = [guard, call, name, framesBefore](const QString& error) {
-        if (guard) guard->finishTool(call, name, error, framesBefore);
+    auto done = [guard, call, operation, framesBefore](const QString& error) {
+        if (guard) guard->finishTool(call, operation, error, framesBefore);
     };
     bool admitted = false;
-    if (discover) admitted = _backend->discover(done);
-    else if (name == "device.connect") admitted = _backend->connectTarget(targetIndex, done);
-    else if (name == "device.disconnect") admitted = _backend->disconnect(done);
-    else if (name == "device.single") admitted = _backend->arm(false, done);
-    else if (name == "device.live-start") admitted = _backend->arm(true, done);
+    if (operation == Lifecycle::Discover) admitted = _backend->discover(done);
+    else if (operation == Lifecycle::Connect) admitted = _backend->connectTarget(targetIndex, done);
+    else if (operation == Lifecycle::Disconnect) admitted = _backend->disconnect(done);
+    else if (operation == Lifecycle::Single) admitted = _backend->arm(false, done);
+    else if (operation == Lifecycle::LiveStart) admitted = _backend->arm(true, done);
     else admitted = _backend->stop(done);
     if (!admitted) {
         if (_toolCall == call) _toolCall.reset();
         emit controlChanged();
-        return ApiResult<void>::failure(ApiErrorCode::Busy, "The Heliotis session did not admit the operation.");
+        return refused(DeviceConnectionError::Busy, "The Heliotis session did not admit the operation.");
     }
-    return ApiResult<void>::success();
+    return {};
 }
 
-void HeliotisC4SourceController::finishTool(const std::shared_ptr<ToolCall>& call, const QString& name,
+void HeliotisC4SourceController::finishTool(const std::shared_ptr<ToolCall>& call, const Lifecycle operation,
                                             const QString& error, const std::uint64_t framesBefore)
 {
     Q_ASSERT(QThread::currentThread() == thread());
     if (_toolCall == call) _toolCall.reset();
-    ApiResult<QJsonValue> result = ApiResult<QJsonValue>::failure(ApiErrorCode::Internal, "Device operation did not complete.");
+    DeviceConnectionResult result{{}, {}, DeviceConnectionEffect::Applied, connectionState()};
     if (!error.isEmpty()) {
-        result = ApiResult<QJsonValue>::failure(ApiErrorCode::Unavailable, error);
-    } else if (name == "device.discover") {
-        result = ApiResult<QJsonValue>::success(targets(_backend ? _backend->targets() : std::vector<heliotis::DeviceDescriptor>{}));
-    } else if (name == "device.single" && _deliveredFrames.load() == framesBefore) {
-        result = ApiResult<QJsonValue>::failure(ApiErrorCode::Unavailable,
-            "Single acquisition stopped without a converted frame.");
-    } else {
-        result = ApiResult<QJsonValue>::success(controlState());
+        // Discovery keeps its previous snapshot; device commands leave an uncertain effect.
+        result = {DeviceConnectionError::BackendFailure, error.toStdString(),
+                  operation == Lifecycle::Discover ? DeviceConnectionEffect::None : DeviceConnectionEffect::Unknown,
+                  connectionState()};
+    } else if (operation == Lifecycle::Single && _deliveredFrames.load() == framesBefore) {
+        result = {DeviceConnectionError::BackendFailure, "Single acquisition stopped without a converted frame.",
+                  DeviceConnectionEffect::Applied, connectionState()};
     }
     emit controlChanged();
-    call->deliver(std::move(result));
+    call->deliver(std::move(result), operation == Lifecycle::Discover && _backend ? _backend->targets()
+                                                                                : std::vector<heliotis::DeviceDescriptor>{});
 }
 
 // --- Device parameters ---------------------------------------------------

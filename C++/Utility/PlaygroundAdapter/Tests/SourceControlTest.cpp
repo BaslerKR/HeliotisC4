@@ -2,7 +2,7 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
-#include <QJsonArray>
+#include "ToolProvider.h"
 
 #include <functional>
 #include <iostream>
@@ -174,55 +174,66 @@ int main(int argc, char** argv)
     heliotis::HeliotisC4Device device(nullptr);
     {
         HeliotisC4SourceController controller(&device);
-        auto* tools = qobject_cast<IToolProvider*>(&controller);
+        auto* lifecycle = qobject_cast<IDeviceConnectionControl*>(&controller);
         auto* parameters = qobject_cast<IDeviceParameterControl*>(&controller);
-        require(tools && parameters, "The controller must declare both host capability interfaces.");
+        require(lifecycle && parameters, "The controller must declare both host capability interfaces.");
+        require(!qobject_cast<IToolProvider*>(&controller), "Lifecycle tools are declared by the host, not the module.");
 
-        const auto unbound = controller.toolDescriptors();
-        require(unbound.size() == 8 && !unbound.front().available,
-                "Tools without a session must be declared unavailable.");
+        const auto unbound = controller.connectionCapabilities();
+        require(!unbound.connect.available && !unbound.connect.reason.empty(),
+                "Lifecycle operations without a session must be declared unavailable.");
         FakeBackend backend;
         backend.devices = {{0, 0, "H8 Interface", "H8-0001"}, {0, 1, "H8 Interface", "H8-0002"}};
         controller.setControlBackend(&backend);
-        require(controller.toolDescriptors().front().available, "A bound session must enable the tools.");
+        const auto bound = controller.connectionCapabilities();
+        require(bound.targets.available && bound.connect.available && bound.single.available && bound.live.available,
+                "A bound session must enable every lifecycle operation.");
 
-        std::optional<ApiResult<QJsonValue>> toolResult;
-        const auto tool = [&](const QString& name, QJsonObject arguments = {}) {
+        using Lifecycle = DeviceConnectionError;
+        std::optional<DeviceConnectionResult> toolResult;
+        std::optional<DeviceConnectionTargets> targetsResult;
+        const auto onState = [&toolResult](DeviceConnectionResult result) { toolResult = std::move(result); };
+        const auto onTargets = [&targetsResult](DeviceConnectionTargets result) { targetsResult = std::move(result); };
+        const auto tool = [&](const std::string& name, const std::string& argument = {}) {
             toolResult.reset();
-            return tools->requestTool(name, 1, std::move(arguments),
-                                      [&toolResult](ApiResult<QJsonValue> result) { toolResult = std::move(result); });
+            targetsResult.reset();
+            if (name == "targets") return lifecycle->requestConnectionTargets(onTargets);
+            if (name == "discover") return lifecycle->requestDiscover(onTargets);
+            if (name == "connect") return lifecycle->requestConnect(argument, onState);
+            if (name == "disconnect") return lifecycle->requestDisconnect(argument, onState);
+            if (name == "single") return lifecycle->requestSingle(argument, onState);
+            if (name == "live-start") return lifecycle->requestLiveStart(argument, onState);
+            if (name == "live-stop") return lifecycle->requestLiveStop(argument, onState);
+            return lifecycle->requestConnectionState(onState);
         };
 
         // Discovery snapshot and exact target admission.
-        require(tool("device.targets").succeeded() && toolResult && toolResult->succeeded()
-                    && toolResult->value().toObject().value("targets").toArray().size() == 2,
-                "device.targets must copy the discovery snapshot.");
-        const QString secondTarget = toolResult->value().toObject().value("targets").toArray()
-            .at(1).toObject().value("targetId").toString();
-        require(tool("device.connect", {{"targetId", "missing"}}).error()->code == ApiErrorCode::NotFound,
+        require(tool("targets").error == Lifecycle::None && targetsResult && targetsResult->result.error == Lifecycle::None
+                    && targetsResult->targets.size() == 2 && targetsResult->targets[1].displayName == "H8-0002",
+                "Targets must copy the discovery snapshot.");
+        const std::string secondTarget = targetsResult->targets[1].targetId;
+        require(tool("connect", "missing").error == Lifecycle::NotFound,
                 "An unknown target must be refused before any session work.");
-        require(tool("device.connect", {{"targetId", 1}}).error()->code == ApiErrorCode::InvalidArgument,
-                "Tool arguments must be exactly typed.");
-        require(tool("device.single", {{"connectionId", "x"}}).error()->code == ApiErrorCode::Unavailable,
-                "Acquisition tools require a connection.");
+        require(tool("single", "x").error == Lifecycle::Disconnected,
+                "Acquisition requires a connection.");
 
-        require(tool("device.connect", {{"targetId", secondTarget}}).succeeded() && backend.last == "connect"
+        require(tool("connect", secondTarget).error == Lifecycle::None && backend.last == "connect"
                     && backend.connectIndex == 1 && !toolResult,
-                "device.connect must route the exact target through the session.");
-        require(controller.externalBusy(), "A pending tool call must hold external admission.");
-        require(tool("device.discover").error()->code == ApiErrorCode::Busy, "Tool calls are serialized.");
+                "Connect must route the exact target through the session.");
+        require(controller.externalBusy(), "A pending lifecycle call must hold external admission.");
+        require(tool("discover").error == Lifecycle::Busy, "Lifecycle calls are serialized.");
         fake::opened = true;
         fake::status(heliotis::HeliotisC4Device::Status::Connection, true);
         backend.connected = backend.devices[1];
         backend.pending({});
-        require(toolResult && toolResult->succeeded()
-                    && toolResult->value().toObject().value("connected").toBool()
-                    && toolResult->value().toObject().value("targetId").toString() == secondTarget,
-                "device.connect must complete with the new connection state.");
+        require(toolResult && toolResult->error == Lifecycle::None && toolResult->state
+                    && toolResult->state->connected && toolResult->state->targetId == secondTarget,
+                "Connect must complete with the new connection state.");
         const QString connection = controller.connectionId();
         require(!connection.isEmpty() && !controller.externalBusy(), "A connection must mint a generation.");
-        require(tool("device.single", {{"connectionId", "stale"}}).error()->code == ApiErrorCode::Conflict,
-                "A stale connection generation must conflict.");
+        require(toolResult->state->connectionId == connection.toStdString(), "The state must carry the connection id.");
+        require(tool("single", "stale").error == Lifecycle::Conflict,
+                "A stale connection id must conflict.");
 
         // Parameter inventory, typed values, bounds and stable revisions.
         std::optional<DeviceParameterInventory> inventory;
@@ -303,32 +314,33 @@ int main(int argc, char** argv)
                     && result->effect == DeviceParameterEffect::Applied && fake::triggers == 1,
                 "TriggerSoftware must reach the armed acquisition.");
 
-        require(tool("device.live-start", {{"connectionId", connection}}).error()->code == ApiErrorCode::Busy,
+        require(tool("live-start", connection.toStdString()).error == Lifecycle::Busy,
                 "Live cannot start while another acquisition is armed.");
-        require(tool("device.live-stop", {{"connectionId", connection}}).succeeded() && backend.last == "stop",
-                "device.live-stop must use the session stop path.");
+        require(tool("live-stop", connection.toStdString()).error == Lifecycle::None && backend.last == "stop",
+                "Live stop must use the session stop path.");
         fake::acquiring = false;
         fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
         backend.pending({});
-        require(toolResult && toolResult->succeeded() && !toolResult->value().toObject().value("live").toBool(),
-                "device.live-stop must complete after acquisition stops.");
+        require(toolResult && toolResult->error == Lifecycle::None && !toolResult->state->live,
+                "Live stop must complete after acquisition stops.");
 
-        require(tool("device.single", {{"connectionId", connection}}).succeeded() && backend.last == "single",
-                "device.single must use the session Single path.");
+        require(tool("single", connection.toStdString()).error == Lifecycle::None && backend.last == "single",
+                "Single must use the session Single path.");
         backend.pending({});
-        require(toolResult && !toolResult->succeeded(),
-                "device.single must fail when no frame was converted.");
+        require(toolResult && toolResult->error != Lifecycle::None,
+                "Single must fail when no frame was converted.");
 
         backend.admit = false;
-        require(tool("device.disconnect", {{"connectionId", connection}}).error()->code == ApiErrorCode::Busy
+        require(tool("disconnect", connection.toStdString()).error == Lifecycle::Busy
                     && !controller.externalBusy(),
-                "A session refusal must release tool admission.");
+                "A session refusal must release lifecycle admission.");
         backend.admit = true;
-        require(tool("device.disconnect", {{"connectionId", connection}}).succeeded(), "Disconnect is admitted.");
+        require(tool("disconnect", connection.toStdString()).error == Lifecycle::None, "Disconnect is admitted.");
         controller.setControlBackend(nullptr);
-        require(toolResult && toolResult->error() && toolResult->error()->code == ApiErrorCode::Unavailable,
-                "Unbinding the session must complete a pending tool call.");
+        require(toolResult && toolResult->error == Lifecycle::Unavailable
+                    && toolResult->effect == DeviceConnectionEffect::Unknown,
+                "Unbinding the session must complete a pending lifecycle call.");
     }
-    if (failures == 0) std::cout << "Heliotis device tools and parameter contracts passed.\n";
+    if (failures == 0) std::cout << "Heliotis device lifecycle and parameter contracts passed.\n";
     return failures == 0 ? 0 : 1;
 }

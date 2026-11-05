@@ -1,12 +1,11 @@
 #pragma once
 
 #include "AbstractSourceController.h"
+#include "DeviceConnectionControl.h"
 #include "DeviceParameterControl.h"
 #include "HeliotisC4System.h"
-#include "ToolProvider.h"
 
 #include <QFuture>
-#include <QJsonObject>
 #include <QString>
 
 #include <atomic>
@@ -61,11 +60,12 @@ public:
 
 /** Adapts worker-owned Heliotis frames, status, tools and parameters into the host contracts. */
 class HeliotisC4SourceController final
-    : public AbstractSourceController, public IToolProvider, public IDeviceParameterControl {
+    : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl {
     Q_OBJECT
-    Q_INTERFACES(IToolProvider IDeviceParameterControl)
+    Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl)
 
 public:
+    using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
     explicit HeliotisC4SourceController(heliotis::HeliotisC4Device* device, QObject* parent = nullptr);
     ~HeliotisC4SourceController() override;
 
@@ -96,11 +96,24 @@ public:
     /** Returns the current connection generation, empty while disconnected. */
     [[nodiscard]] QString connectionId() const;
 
-    /** Declares discovery, connection and acquisition tools without SDK work. */
-    QList<ToolDescriptor> toolDescriptors() const override;
-    /** Routes declared tools through the session lifecycle authority. */
-    ApiResult<void> requestTool(const QString& name, int version, QJsonObject arguments,
-                                IToolProvider::Completion completion) override;
+    /** Declares every lifecycle operation while the session lifecycle authority is bound. */
+    DeviceConnectionCapabilities connectionCapabilities() const override;
+    /** Copies the exact C4Utility interface/device discovery snapshot. */
+    DeviceConnectionResult requestConnectionTargets(TargetsCompletion completion) override;
+    /** Observes the module-owned connection and delivered-frame count. */
+    DeviceConnectionResult requestConnectionState(IDeviceConnectionControl::Completion completion) override;
+    /** Refreshes C4Utility discovery while disconnected and idle. */
+    DeviceConnectionResult requestDiscover(TargetsCompletion completion) override;
+    /** Opens an exact discovered target; the device configuration is preserved and Init stays explicit. */
+    DeviceConnectionResult requestConnect(std::string targetId, IDeviceConnectionControl::Completion completion) override;
+    /** Stops acquisition when needed and closes the exact connection. */
+    DeviceConnectionResult requestDisconnect(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
+    /** Arms Single acquisition and completes after it stops with a delivered frame. */
+    DeviceConnectionResult requestSingle(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
+    /** Arms Live acquisition; completion is arm acknowledgement. */
+    DeviceConnectionResult requestLiveStart(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
+    /** Stops acquisition and completes after it has stopped. */
+    DeviceConnectionResult requestLiveStop(std::string connectionId, IDeviceConnectionControl::Completion completion) override;
 
     DeviceParameterResult requestParameters(InventoryCompletion completion) override;
     DeviceParameterResult requestReadParameter(DeviceParameterTarget target,
@@ -131,10 +144,13 @@ private:
     [[nodiscard]] bool startAcquisition(heliotis::HeliotisC4Device::AcquisitionMode mode);
     /** Forwards one module-owned GraphicsFrame to the session consumer. */
     void handleFrame(GraphicsFrame&& frame, unsigned int sourceIndex);
+    enum class Lifecycle { Targets, Connection, Discover, Connect, Disconnect, Single, LiveStart, LiveStop };
     /** Copies the connection and acquisition state on the controller thread. */
-    [[nodiscard]] QJsonObject controlState() const;
-    /** Completes the accepted tool call on the controller thread. */
-    void finishTool(const std::shared_ptr<ToolCall>& call, const QString& name, const QString& error,
+    [[nodiscard]] DeviceConnectionState connectionState() const;
+    /** Applies the shared GUI/API admission rules and starts one lifecycle operation. */
+    DeviceConnectionResult admitLifecycle(Lifecycle operation, const std::string& argument, std::shared_ptr<ToolCall> call);
+    /** Completes the accepted lifecycle call on the controller thread. */
+    void finishTool(const std::shared_ptr<ToolCall>& call, Lifecycle operation, const QString& error,
                     std::uint64_t framesBefore);
     /** Applies the shared GUI/API admission rules for parameter calls. */
     [[nodiscard]] DeviceParameterResult parameterAdmission(bool softwareTrigger);

@@ -79,7 +79,8 @@ target. The presentation target does not install an application theme.
 
 ## Application control
 
-The Playground source controller exposes device tools and typed parameters
-through `IToolProvider` and `IDeviceParameterControl`, reusing the session's
+The Playground source controller exposes the standard connection lifecycle and
+typed parameters through `IDeviceConnectionControl` and `IDeviceParameterControl`
+(Playground declares the canonical `device.*` tools), reusing the session's
 GUI flows and the module feature channel. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#application-control-boundary).

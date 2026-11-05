@@ -31,7 +31,7 @@ endif()
 # The Qt UI also consumes the SDK-exported Resources::Widgets browser.
 if(PROJECT_NAME STREQUAL "HeliotisC4" AND PROJECT_IS_TOP_LEVEL AND
    (HELIOTISC4_BUILD_QT_UI OR HELIOTISC4_BUILD_PLAYGROUND_ADAPTER OR HELIOTISC4_BUILD_PLAYGROUND_PLUGIN))
-    find_package(PlaygroundPluginSDK 0.1 CONFIG REQUIRED)
+    find_package(PlaygroundPluginSDK 0.2 CONFIG REQUIRED)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 

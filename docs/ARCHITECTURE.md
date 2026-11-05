@@ -51,9 +51,9 @@ The tree is `HeliotisC4FeatureTree`, a module-owned `SearchableTreeWidget`. Its 
 
 ## Application Control Boundary
 
-`HeliotisC4SourceController` declares `IToolProvider/1.0` and `IDeviceParameterControl/1.0` so GUI and API clients share one authority:
+`HeliotisC4SourceController` implements `IDeviceConnectionControl/1.0` and `IDeviceParameterControl/1.0` so GUI and API clients share one authority; Playground declares the canonical `device.*` lifecycle tools from the first:
 
-- Device tools route through `HeliotisC4ControlBackend`, which the session implements with the same discovery, connection, disconnect, Single/Live arm, and stop flows as the control widget. A target id encodes the discovery identity that `open()` re-verifies. Each open mints a connection id; acquisition and disconnect tools require the current one. `device.single` completes after the acquisition it armed stops and fails when no frame was converted.
+- Lifecycle operations route through `HeliotisC4ControlBackend`, which the session implements with the same discovery, connection, disconnect, Single/Live arm, and stop flows as the control widget. A target id encodes the discovery identity that `open()` re-verifies. Each open mints a connection id; acquisition and disconnect require the current one. Single completes after the acquisition it armed stops and fails when no frame was converted.
 - Parameters use scope `Device`, the SDK feature name, and no selectors. Values are typed from the feature snapshot; writes are validated against current access, enum entries, bounds, increment, and an optional observation revision before `writeFeature()`, then read back. C4Utility reports one failure for refusal and SDK errors, so a failed dispatched write reports effect `unknown`. Strings must be non-empty without surrounding whitespace because `writeFeature()` trims values.
 - One API call runs at a time. Session watchers and API parameter work exclude each other; an applied API change refreshes the feature tree. While acquisition is armed, only `TriggerSoftware` execution is admitted, through `triggerSoftware()` without feature reads.
 
