@@ -397,24 +397,24 @@ QList<ToolDescriptor> HeliotisC4SourceController::toolDescriptors() const
     const auto inventory = schema({{"targets", QJsonObject{{"type", "array"}, {"items", entry}}}}, {"targets"});
     QList<ToolDescriptor> result{
         {"device.targets", 1, "Device targets", "Copy the exact C4Utility interface/device discovery snapshot.",
-            ToolEffect::Observe, true, {}, empty, inventory},
+            ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, inventory},
         {"device.connection", 1, "Device connection",
             "Observe the module-owned connection and delivered-frame count, not presentation completion.",
-            ToolEffect::Observe, true, {}, empty, stateSchema()},
+            ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, stateSchema()},
         {"device.discover", 1, "Discover devices", "Refresh C4Utility discovery while disconnected and idle.",
-            ToolEffect::Device, true, {}, empty, inventory},
+            ToolEffect::Device, ToolEgress::Metadata, true, {}, empty, inventory},
         {"device.connect", 1, "Connect device",
             "Open an exact discovered target; the device configuration is preserved and Init stays explicit.",
-            ToolEffect::Device, true, {}, schema({{"targetId", text}}, {"targetId"}), stateSchema()},
+            ToolEffect::Device, ToolEgress::Metadata, true, {}, schema({{"targetId", text}}, {"targetId"}), stateSchema()},
         {"device.disconnect", 1, "Disconnect device", "Stop acquisition when needed and close the exact connection generation.",
-            ToolEffect::Device, true, {}, connection, stateSchema()},
+            ToolEffect::Device, ToolEgress::Metadata, true, {}, connection, stateSchema()},
         {"device.single", 1, "Acquire one frame",
             "Arm Single acquisition and wait until it stops; query the viewer separately for presentation evidence.",
-            ToolEffect::Pipeline, true, {}, connection, stateSchema()},
+            ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()},
         {"device.live-start", 1, "Start Live", "Arm Live acquisition on the exact connection; completion is arm acknowledgement.",
-            ToolEffect::Pipeline, true, {}, connection, stateSchema()},
+            ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()},
         {"device.live-stop", 1, "Stop Live", "Stop acquisition on the exact connection and wait until it has stopped.",
-            ToolEffect::Pipeline, true, {}, connection, stateSchema()}};
+            ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, stateSchema()}};
     if (!_backend) {
         for (auto& descriptor : result) {
             descriptor.available = false;
