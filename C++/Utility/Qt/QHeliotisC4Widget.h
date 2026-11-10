@@ -9,6 +9,7 @@
 #include <QSet>
 #include <QString>
 #include <QWidget>
+#include <QElapsedTimer>
 
 #include <vector>
 
@@ -129,7 +130,16 @@ signals:
     void featureWriteRequested(const QString& featureName, const QString& value);
     void featureCommandRequested(const QString& featureName);
 
+public:
+    /** @brief Samples producer counters on the GUI thread; stop hides both readouts. */
+    void setRuntimeDiagnostics(const heliotis::RuntimeDiagnostics& diagnostics);
+
 private:
+    QElapsedTimer _diagnosticClock;
+    quint64 _diagnosticDelivered = 0;
+    qint64 _diagnosticSampleMs = 0;
+    qint64 _diagnosticLogMs = 0;
+    bool _diagnosticActive = false;
     struct TreeState {
         bool hadItems = false;
         bool rootExpanded = true;

@@ -8,6 +8,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,7 @@ std::vector<std::pair<std::string, std::string>> writes;
 std::vector<std::string> commands;
 int triggers = 0;
 heliotis::HeliotisC4Device::StatusCallback status;
+heliotis::HeliotisC4Device::FrameCallback frame;
 } // namespace fake
 
 // Replace only the SDK-owned device facade; exercise the real controller contracts.
@@ -26,6 +28,7 @@ namespace heliotis {
 HeliotisC4Device::HeliotisC4Device(HeliotisC4System* system) : _system(system) {}
 HeliotisC4Device::~HeliotisC4Device() = default;
 bool HeliotisC4Device::isOpened() const { return fake::opened; }
+bool HeliotisC4Device::isAcquiring() const { return fake::acquiring; }
 HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage) const
 {
     if (fake::acquiring) {
@@ -52,7 +55,12 @@ bool HeliotisC4Device::triggerSoftware(std::string*)
     ++fake::triggers;
     return true;
 }
-bool HeliotisC4Device::startAcquisition(AcquisitionMode, FrameCallback, std::string*) { return true; }
+bool HeliotisC4Device::startAcquisition(AcquisitionMode, FrameCallback callback, std::string*) {
+    fake::frame = std::move(callback);
+    fake::acquiring = true;
+    if (fake::status) fake::status(Status::Acquisition, true);
+    return true;
+}
 void HeliotisC4Device::requestStopAcquisition() noexcept {}
 void HeliotisC4Device::stopAcquisition() {}
 bool HeliotisC4Device::isSoftwareTriggerAvailable() const { return true; }
@@ -340,6 +348,39 @@ int main(int argc, char** argv)
         require(toolResult && toolResult->error == Lifecycle::Unavailable
                     && toolResult->effect == DeviceConnectionEffect::Unknown,
                 "Unbinding the session must complete a pending lifecycle call.");
+    }
+    {
+        heliotis::HeliotisC4Device device(nullptr);
+        HeliotisC4SourceController controller(&device);
+        AbstractSourceController& callable = controller;
+        controller.start();
+        require(callable.sourceRuntimeDiagnostics(0)->grabbing, "An armed source reports grabbing without a widget.");
+        require(callable.sourceRuntimeDiagnostics(0)->failed == 0, "Trigger waits do not add failed frames.");
+        fake::frame(heliotis::Frame{});
+        require(callable.sourceRuntimeDiagnostics(0)->failed == 1, "A conversion failure reaches the source query.");
+        heliotis::Frame frame;
+        frame.parts = {{heliotis::FramePartKind::Range, "Range", "Mono16", 1, 1, 16,
+                        std::vector<std::uint16_t>{42U}}};
+        fake::frame(heliotis::Frame(frame));
+        require(callable.sourceRuntimeDiagnostics(0)->delivered == 0, "No consumer means no source delivery.");
+        controller.setFrameConsumer([](SessionFrame&&, unsigned) {});
+        fake::frame(heliotis::Frame(frame));
+        require(callable.sourceRuntimeDiagnostics(0)->delivered == 1, "A successful consumer reaches the source query.");
+        controller.setFrameConsumer([](SessionFrame&&, unsigned) { throw std::runtime_error("consumer failure"); });
+        fake::frame(heliotis::Frame(frame));
+        const auto failed = callable.sourceRuntimeDiagnostics(0);
+        require(failed->delivered == 1 && failed->failed == 2, "A failed consumer increments only failures.");
+        fake::acquiring = false;
+        fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
+        const auto stopped = callable.sourceRuntimeDiagnostics(0);
+        require(!stopped->grabbing && stopped->delivered == 1 && stopped->failed == 2,
+                "Stopped counters remain observable.");
+        controller.start();
+        require(callable.sourceRuntimeDiagnostics(0)->delivered == 0 && callable.sourceRuntimeDiagnostics(0)->failed == 0,
+                "A new run resets diagnostics.");
+        require(!callable.sourceRuntimeDiagnostics(9), "Unknown source indices are unsupported.");
+        fake::acquiring = false;
+        fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
     }
     if (failures == 0) std::cout << "Heliotis device lifecycle and parameter contracts passed.\n";
     return failures == 0 ? 0 : 1;

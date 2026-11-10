@@ -24,10 +24,11 @@ Q_LOGGING_CATEGORY(heliotisDiagnosticLog, "diagnostics.HeliotisC4", QtInfoMsg)
 #include <QSignalBlocker>
 #include <QScrollBar>
 #include <QStatusBar>
-#include <QDebug>
-#include <QStringList>
 #include <QStyle>
 #include <QTimer>
+#include <QThread>
+#include <QDebug>
+#include <QStringList>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -997,8 +998,48 @@ QTreeWidgetItem* QHeliotisC4Widget::ensureCategory(
     return parent;
 }
 
+void QHeliotisC4Widget::setRuntimeDiagnostics(const heliotis::RuntimeDiagnostics& diagnostics)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!diagnostics.grabbing) {
+        _diagnosticActive = false;
+        _failedLabel->hide();
+        _fpsLabel->hide();
+        return;
+    }
+    if (!_diagnosticActive) {
+        _diagnosticClock.start();
+        _diagnosticSampleMs = 0;
+        _diagnosticLogMs = 0;
+        _diagnosticDelivered = diagnostics.delivered;
+        _diagnosticActive = true;
+    }
+    const qint64 elapsed = _diagnosticClock.elapsed();
+    const qint64 interval = elapsed - _diagnosticSampleMs;
+    const double fps = interval > 0 && diagnostics.delivered >= _diagnosticDelivered
+        ? double(diagnostics.delivered - _diagnosticDelivered) * 1000.0 / double(interval) : 0.0;
+    _diagnosticDelivered = diagnostics.delivered;
+    _diagnosticSampleMs = elapsed;
+    _fpsLabel->setText(QStringLiteral("%1 fps").arg(fps, 0, 'f', 1));
+    _fpsLabel->show();
+    _failedLabel->setText(QStringLiteral("%1 failed").arg(qulonglong(diagnostics.failed)));
+    const auto state = diagnostics.failed ? QStringLiteral("warning") : QStringLiteral("normal");
+    if (_failedLabel->property("failedState").toString() != state) {
+        _failedLabel->setProperty("failedState", state);
+        _failedLabel->style()->unpolish(_failedLabel);
+        _failedLabel->style()->polish(_failedLabel);
+    }
+    _failedLabel->setVisible(diagnostics.failed > 0);
+    if (elapsed - _diagnosticLogMs >= 5000) {
+        qInfo().noquote() << QStringLiteral("[HeliotisC4 UI] diagnostics: delivered=%1 failed=%2 fps=%3")
+            .arg(qulonglong(diagnostics.delivered)).arg(qulonglong(diagnostics.failed)).arg(fps, 0, 'f', 1);
+        _diagnosticLogMs = elapsed;
+    }
+}
+
 void QHeliotisC4Widget::updateStatusLabel()
 {
+    if (!_acquisitionActive) setRuntimeDiagnostics({});
     _connectionStatus->setText(!_connected ? QStringLiteral("Idle")
         : _acquisitionActive ? QStringLiteral("Live") : QStringLiteral("Connected"));
 }

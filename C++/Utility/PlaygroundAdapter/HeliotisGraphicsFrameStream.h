@@ -39,6 +39,8 @@ public:
         std::string* errorMessage = nullptr);
     void requestStop() noexcept;
     void stop();
+    /** @brief Copies conversion and consumer failures without touching the SDK. */
+    [[nodiscard]] RuntimeDiagnostics runtimeDiagnostics() const noexcept;
 
 private:
     class Impl;

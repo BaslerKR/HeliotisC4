@@ -4,6 +4,7 @@
 #include "HeliotisC4System.h"
 
 #include <memory>
+#include <atomic>
 #include <utility>
 
 namespace {
@@ -39,6 +40,9 @@ public:
         std::string* errorMessage);
     void requestStop() noexcept;
     void stop();
+    bool acquiring() const { return _device && _device->isAcquiring(); }
+    std::atomic<std::uint64_t> delivered{0};
+    std::atomic<std::uint64_t> failed{0};
 
 private:
     HeliotisC4Device* _device = nullptr;
@@ -85,6 +89,8 @@ bool HeliotisGraphicsFrameStream::Impl::start(
         return false;
     }
 
+    delivered.store(0);
+    failed.store(0);
     const auto callbackToken = _callbackGate.token();
     return _device->startAcquisition(mode,
         [this, callbackToken](Frame&& sourceFrame) {
@@ -103,10 +109,16 @@ bool HeliotisGraphicsFrameStream::Impl::start(
             try
             {
                 auto frame = _adapter.convertFrame(sourceFrame, heliotisGraphicsFrameRequest());
-                if (frame.has_value()) _callback(std::move(*frame), 0U);
+                if (frame.has_value()) {
+                    _callback(std::move(*frame), 0U);
+                    delivered.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    failed.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             catch (...)
             {
+                failed.fetch_add(1, std::memory_order_relaxed);
                 // Do not let host conversion or consumer exceptions cross the SDK callback.
             }
         }, errorMessage);
@@ -154,6 +166,11 @@ void HeliotisGraphicsFrameStream::requestStop() noexcept
 void HeliotisGraphicsFrameStream::stop()
 {
     _impl->stop();
+}
+
+RuntimeDiagnostics HeliotisGraphicsFrameStream::runtimeDiagnostics() const noexcept
+{
+    return {_impl->acquiring(), _impl->delivered.load(), _impl->failed.load()};
 }
 
 } // namespace heliotis

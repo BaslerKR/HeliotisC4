@@ -10,6 +10,13 @@
 
 namespace heliotis {
 
+/** @brief Per-run producer diagnostics; waiting for a trigger is not a failed frame. */
+struct RuntimeDiagnostics {
+    bool grabbing = false;
+    std::uint64_t delivered = 0;
+    std::uint64_t failed = 0;
+};
+
 enum class FeatureType {
     Unknown,
     Integer,

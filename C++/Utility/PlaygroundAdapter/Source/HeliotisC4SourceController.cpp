@@ -39,9 +39,17 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
             return;
         }
         if (status != heliotis::HeliotisC4Device::Status::Acquisition) return;
-        _isGrabbing.store(active);
+        const bool wasActive = _isGrabbing.exchange(active);
+        if (!active && wasActive && _graphicsStream) {
+            const auto diagnostics = _graphicsStream->runtimeDiagnostics();
+            qInfo().noquote() << "[Heliotis C4] acquisition diagnostics: delivered="
+                << _diagnosticDelivered.load() << "failed=" << diagnostics.failed;
+        }
         emit diagnosticAcquisitionChanged(active, QStringLiteral("heliotis"));
-        if (active) _framesInCurrentAcquisition.store(0);
+        if (active) {
+            _framesInCurrentAcquisition.store(0);
+            _diagnosticDelivered.store(0);
+        }
         const bool continuous = _isContinuous.load();
         if (!active) _isContinuous.store(false);
         const std::uint64_t generation = _statusGeneration.fetch_add(1) + 1;
@@ -190,6 +198,7 @@ void HeliotisC4SourceController::handleFrame(GraphicsFrame&& payload, const unsi
     frame.frameSeq = frame.payload.metadata.frameIndex;
     _frameConsumer(std::move(frame), sourceIndex);
     _deliveredFrames.fetch_add(1);
+    _diagnosticDelivered.fetch_add(1);
 }
 
 // --- Device tools --------------------------------------------------------
@@ -765,4 +774,11 @@ DeviceParameterResult HeliotisC4SourceController::requestParameter(
         completeParameter(completion, std::move(result));
     });
     return {};
+}
+
+std::optional<SourceRuntimeDiagnostics> HeliotisC4SourceController::sourceRuntimeDiagnostics(unsigned sourceIndex) const
+{
+    if (sourceIndex != 0 || !_graphicsStream) return std::nullopt;
+    const auto value = _graphicsStream->runtimeDiagnostics();
+    return SourceRuntimeDiagnostics{_isGrabbing.load(), _diagnosticDelivered.load(), value.failed};
 }

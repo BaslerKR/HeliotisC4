@@ -121,6 +121,19 @@ void HeliotisC4ControlUi::create(QWidget* owner, const QString& settingsFile, co
     _connectionStatus->setObjectName(QStringLiteral("HeliotisC4StatusLabel"));
     _connectionStatus->setAlignment(Qt::AlignCenter);
     _statusBar->addWidget(_connectionStatus);
+    _failedLabel = new QLabel(owner);
+    _failedLabel->setObjectName(QStringLiteral("HeliotisC4FailedLabel"));
+    _failedLabel->setProperty("statusRole", QStringLiteral("deviceFailed"));
+    _failedLabel->setProperty("failedState", QStringLiteral("normal"));
+    _failedLabel->setAlignment(Qt::AlignCenter);
+    _failedLabel->hide();
+    _fpsLabel = new QLabel(owner);
+    _fpsLabel->setObjectName(QStringLiteral("HeliotisC4FpsLabel"));
+    _fpsLabel->setProperty("statusRole", QStringLiteral("deviceFps"));
+    _fpsLabel->setAlignment(Qt::AlignCenter);
+    _fpsLabel->hide();
+    _statusBar->addPermanentWidget(_failedLabel);
+    _statusBar->addPermanentWidget(_fpsLabel);
     rootLayout->addWidget(_statusBar);
 
 

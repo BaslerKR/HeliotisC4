@@ -17,6 +17,7 @@ bool HeliotisC4Device::startAcquisition(AcquisitionMode, FrameCallback callback,
     deviceCallback = std::move(callback);
     return true;
 }
+bool HeliotisC4Device::isAcquiring() const { return false; }
 void HeliotisC4Device::requestStopAcquisition() noexcept {}
 void HeliotisC4Device::stopAcquisition() {}
 }
@@ -48,6 +49,7 @@ int main()
                         std::vector<std::uint16_t>{42U}}};
         deviceCallback(heliotis::Frame(frame));
         if (receipts != 1 || deliveries != 1 || !receiptPrecedesDelivery) return 2;
+        if (stream.runtimeDiagnostics().delivered != 1 || stream.runtimeDiagnostics().failed != 0) return 7;
 
         // An unconvertible buffer still acknowledges receipt exactly once.
         deviceCallback(heliotis::Frame{});
@@ -60,6 +62,10 @@ int main()
         throwOnDelivery = true;
         deviceCallback(heliotis::Frame(frame));
         if (receipts != 4 || deliveries != 3) return 5;
+        if (stream.runtimeDiagnostics().delivered != 2 || stream.runtimeDiagnostics().failed != 2) return 8;
+        // Waiting without a frame leaves diagnostics unchanged; starting a new run resets them.
+        if (!stream.start(heliotis::AcquisitionMode::Continuous)) return 9;
+        if (stream.runtimeDiagnostics().delivered != 0 || stream.runtimeDiagnostics().failed != 0) return 10;
     }
     // A callback retained by a dispatcher must be harmless after stream destruction.
     deviceCallback(heliotis::Frame{});

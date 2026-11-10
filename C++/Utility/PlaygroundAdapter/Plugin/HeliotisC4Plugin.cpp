@@ -3,6 +3,7 @@
 #include "HeliotisC4SourceController.h"
 #include "HeliotisC4System.h"
 #include "Utility/Qt/QHeliotisC4Widget.h"
+#include <QTimer>
 
 #include <QDebug>
 #include <QLoggingCategory>
@@ -425,6 +426,14 @@ public:
         _widget = new QHeliotisC4Widget(parent, _settingsFile, _settingsFile.isEmpty()
             ? QString{} : QStringLiteral("Plugins/HeliotisC4/Favorites/Features"));
         _widget->setDiscoveredDevices(_devices);
+        auto* diagnosticsTimer = new QTimer(_widget);
+        diagnosticsTimer->setInterval(1000);
+        QObject::connect(diagnosticsTimer, &QTimer::timeout, _widget, [this] {
+            if (!_controller || !_widget) return;
+            const auto value = _controller->sourceRuntimeDiagnostics(0);
+            if (value) _widget->setRuntimeDiagnostics({value->grabbing, value->delivered, value->failed});
+        });
+        diagnosticsTimer->start();
         QObject::connect(_widget, &QHeliotisC4Widget::refreshRequested, _widget, [this]() {
             static_cast<void>(refreshDevices());
         });
@@ -505,7 +514,11 @@ public:
                     completeDisconnect();
                     return;
                 }
-                if (_widget) _widget->setAcquisitionState(acquiring, continuous, softwareTriggerAvailable);
+                if (_widget) {
+                    _widget->setAcquisitionState(acquiring, continuous, softwareTriggerAvailable);
+                    const auto value = _controller->sourceRuntimeDiagnostics(0);
+                    if (value) _widget->setRuntimeDiagnostics({value->grabbing, value->delivered, value->failed});
+                }
                 if (!acquiring && heliotisOperationDiagnosticLog().isDebugEnabled() && _device && _device->isOpened()
                     && !_device->requiresReconnect()) refreshFeatureTree();
             });

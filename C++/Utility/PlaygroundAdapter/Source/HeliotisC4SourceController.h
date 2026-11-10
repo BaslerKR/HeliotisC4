@@ -70,6 +70,8 @@ public:
     ~HeliotisC4SourceController() override;
 
     /** Arms continuous acquisition through the common controller contract. */
+    /** @brief Copies per-run counters shared with the control panel. */
+    std::optional<SourceRuntimeDiagnostics> sourceRuntimeDiagnostics(unsigned sourceIndex) const override;
     void start() override;
     /** Arms continuous acquisition and reports whether the SDK accepted it. */
     [[nodiscard]] bool startLive();
@@ -166,6 +168,7 @@ private:
     heliotis::HeliotisC4Device* _device = nullptr;
     FrameConsumer _frameConsumer;
     std::atomic<bool> _isGrabbing{false};
+    std::atomic<std::uint64_t> _diagnosticDelivered{0};
     std::atomic<bool> _isContinuous{false};
     std::atomic<bool> _softwareTriggerActive{false};
     std::atomic<std::uint64_t> _statusGeneration{0};

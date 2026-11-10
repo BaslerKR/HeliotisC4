@@ -22,5 +22,7 @@ struct HeliotisC4ControlUi {
     QToolButton* _grabLiveButton = nullptr;
     QLabel* _connectionStatus = nullptr;
     QStatusBar* _statusBar = nullptr;
+    QLabel* _failedLabel = nullptr;
+    QLabel* _fpsLabel = nullptr;
     HeliotisC4FeatureTree* _featureTree = nullptr;
 };

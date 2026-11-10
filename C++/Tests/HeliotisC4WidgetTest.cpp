@@ -140,6 +140,17 @@ int main(int argc, char** argv)
     QApplication application(argc, argv);
 
     QHeliotisC4Widget widget;
+    auto* fps = widget.findChild<QLabel*>("HeliotisC4FpsLabel");
+    auto* failed = widget.findChild<QLabel*>("HeliotisC4FailedLabel");
+    if (!require(fps && failed && fps->isHidden() && failed->isHidden(), "Diagnostics start hidden")) return 1;
+    widget.setRuntimeDiagnostics({true, 0, 0});
+    if (!require(!fps->isHidden() && failed->isHidden(), "Only FPS appears on live")) return 1;
+    widget.setRuntimeDiagnostics({true, 5, 2});
+    if (!require(!failed->isHidden() && failed->text() == "2 failed"
+        && failed->property("failedState").toString() == "warning", "Failures use warning bubble")) return 1;
+    widget.setRuntimeDiagnostics({false, 5, 2});
+    if (!require(fps->isHidden() && failed->isHidden(), "Stop hides both diagnostics")) return 1;
+
     widget.resize(460, 320);
     widget.show();
 
