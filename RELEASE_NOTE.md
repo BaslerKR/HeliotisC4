@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep acquisition-start and producer-diagnostics API documentation attached to their respective declarations.
+
 - Add per-run conversion/delivery failure diagnostics and Live-only FPS/failure bubbles, with the same counters available through the source diagnostics query. Trigger waits do not count as failures.
 
 - Connect, disconnect, discover and acquire through Playground's standard device connection tools, which use the same arguments and results for every device: connect takes a target id and returns a connection id that later calls use. Device and interface names are listed as descriptive target attributes. Builds against Plugin SDK 0.2 and requires a Playground release with the standard device connection interface.

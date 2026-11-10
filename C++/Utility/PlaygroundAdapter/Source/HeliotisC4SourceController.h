@@ -69,9 +69,9 @@ public:
     explicit HeliotisC4SourceController(heliotis::HeliotisC4Device* device, QObject* parent = nullptr);
     ~HeliotisC4SourceController() override;
 
-    /** Arms continuous acquisition through the common controller contract. */
     /** @brief Copies per-run counters shared with the control panel. */
     std::optional<SourceRuntimeDiagnostics> sourceRuntimeDiagnostics(unsigned sourceIndex) const override;
+    /** Arms continuous acquisition through the common controller contract. */
     void start() override;
     /** Arms continuous acquisition and reports whether the SDK accepted it. */
     [[nodiscard]] bool startLive();
