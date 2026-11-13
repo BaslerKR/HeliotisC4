@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.3.0 (2026-11-13)
+
+- Require Playground 0.6.6 or later; this package uses the device plugin interface introduced in that release.
+
 - Keep acquisition-start and producer-diagnostics API documentation attached to their respective declarations.
 
 - Add per-run conversion/delivery failure diagnostics and Live-only FPS/failure bubbles, with the same counters available through the source diagnostics query. Trigger waits do not count as failures.
@@ -13,7 +17,6 @@
 ## v0.2.2 (2026-10-29)
 
 - Show the next Live grab command with cameras/stop artwork in all pointer and focus states, and keep its tooltip and accessible name synchronized with acquisition state.
-
 
 - Connect icons name the current state (`disconnected`/`connect`); a consumer theme can preview the other state on hover.
 
