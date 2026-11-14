@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-- Write intensity images through the GraphicsEngine image writer into host-provided frame storage when Playground supplies it (`IFrameStorageClient`); without it the writer allocates the image. No storage drops that image. Range data is unchanged. Needs a Playground release that ships `FrameStorage.h`.
+## v0.4.0 (2026-11-14)
+
+- Require Playground 0.7.0 or later; this package uses the frame storage interface introduced in that release.
+
+- Deliver intensity images directly into Playground's shared frame storage, so image consumers can reuse each frame without an extra copy. An image is skipped when Playground cannot provide storage; range data is unchanged.
 
 ## v0.3.0 (2026-11-13)
 
