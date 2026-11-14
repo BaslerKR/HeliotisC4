@@ -1,5 +1,7 @@
 #include "HeliotisC4GraphicsFrameAdapter.h"
 
+#include "graphics/data/GraphicsRangeFrameWriter.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -47,16 +49,41 @@ constexpr const char* kResourceGroup = "0:0";
         && part.height == static_cast<std::uint32_t>(height);
 }
 
-[[nodiscard]] std::vector<float> toFloatSamples(const heliotis::FramePart& part)
+template <typename T>
+[[nodiscard]] float convertedSample(const T value, const double scale) noexcept
+{
+    return static_cast<float>(static_cast<double>(value) * scale);
+}
+
+/** True when any converted sample is not finite, so the channel needs a validity mask. */
+[[nodiscard]] bool hasNonFiniteSamples(const heliotis::FramePart& part)
 {
     return std::visit([&part](const auto& values) {
-        std::vector<float> converted;
-        converted.reserve(values.size());
         for (const auto value : values)
         {
-            converted.push_back(static_cast<float>(static_cast<double>(value) * part.sampleScale));
+            if (!std::isfinite(convertedSample(value, part.sampleScale)))
+            {
+                return true;
+            }
         }
-        return converted;
+        return false;
+    }, part.samples);
+}
+
+void writeConvertedSamples(const heliotis::FramePart& part,
+                           float* destination,
+                           std::uint8_t* mask)
+{
+    std::visit([&](const auto& values) {
+        for (std::size_t index = 0; index < values.size(); ++index)
+        {
+            const float value = convertedSample(values[index], part.sampleScale);
+            destination[index] = value;
+            if (mask != nullptr)
+            {
+                mask[index] = std::isfinite(value) ? 1U : 0U;
+            }
+        }
     }, part.samples);
 }
 
@@ -80,14 +107,6 @@ constexpr const char* kResourceGroup = "0:0";
         && part.height <= static_cast<std::uint32_t>((std::numeric_limits<int>::max)());
 }
 
-[[nodiscard]] std::vector<std::uint16_t> rawUint16Samples(const heliotis::FramePart& part)
-{
-    if (const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples))
-    {
-        return *values;
-    }
-    return {};
-}
 
 [[nodiscard]] std::uint8_t graphicsBitDepth(const heliotis::FramePart& part) noexcept
 {
@@ -113,30 +132,6 @@ constexpr const char* kResourceGroup = "0:0";
         graphicsBitDepth(part)};
 }
 
-[[nodiscard]] std::vector<std::uint8_t> finiteValidityMask(const GraphicsSampleBuffer<float>& values)
-{
-    std::vector<std::uint8_t> mask;
-    bool allValid = true;
-    for (const float value : values)
-    {
-        if (!std::isfinite(value))
-        {
-            allValid = false;
-            break;
-        }
-    }
-    if (allValid)
-    {
-        return mask;
-    }
-
-    mask.resize(values.size(), 0U);
-    for (std::size_t index = 0; index < values.size(); ++index)
-    {
-        mask[index] = std::isfinite(values[index]) ? 1U : 0U;
-    }
-    return mask;
-}
 
 [[nodiscard]] std::string lowerCase(std::string value)
 {
@@ -242,7 +237,8 @@ constexpr const char* kResourceGroup = "0:0";
     return image;
 }
 
-struct SelectedRange {
+struct SelectedRange
+{
     RangeFrame range;
     std::size_t partIndex = 0;
 };
@@ -250,12 +246,17 @@ struct SelectedRange {
 /**
  * Builds the organized range for the typed Range part or a raw preview.
  *
+ * @param frame Source frame whose parts stay owned by the caller.
+ * @param request Requested components and auxiliary channels.
+ * @param frameStorage Destination storage for the range samples; empty uses
+ *        ordinary memory.
  * @return The range and its source part index, or no value when no part
- *         holds representable samples.
+ *         holds representable samples or the storage is refused.
  */
 [[nodiscard]] std::optional<SelectedRange> selectRange(
     const heliotis::Frame& frame,
-    const GraphicsFrameRequest& request)
+    const GraphicsFrameRequest& request,
+    const GraphicsImageStorage& frameStorage)
 {
     using heliotis::FramePart;
     using heliotis::FramePartKind;
@@ -290,19 +291,113 @@ struct SelectedRange {
 
     const bool oneRowPreview = !hasRepresentableDimensions(rangePart);
     rawPartPreview = rawPartPreview || oneRowPreview;
+    const std::size_t expected = sampleCount(rangePart);
+    if (expected == 0U || expected > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+    {
+        return std::nullopt;
+    }
+    const int width = oneRowPreview ? static_cast<int>(expected) : static_cast<int>(rangePart.width);
+    const int height = oneRowPreview ? 1 : static_cast<int>(rangePart.height);
+    if (expected != static_cast<std::size_t>(width) * static_cast<std::size_t>(height))
+    {
+        return std::nullopt;
+    }
+    const auto* rangeRawSamples = std::get_if<std::vector<std::uint16_t>>(&rangePart.samples);
+    if (rangeRawSamples != nullptr && !rangeRawSamples->empty()
+        && rangeRawSamples->size() != expected)
+    {
+        return std::nullopt;
+    }
 
-    RangeFrame range;
-    range.width = oneRowPreview
-        ? static_cast<int>(sampleCount(rangePart))
-        : static_cast<int>(rangePart.width);
-    range.height = oneRowPreview ? 1 : static_cast<int>(rangePart.height);
-    range.zValues = toFloatSamples(rangePart);
+    const auto rawFits = [expected](const FramePart& part) {
+        const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples);
+        return values == nullptr || values->empty() || values->size() == expected;
+    };
+    const FramePart* intensityPart = request.includeRangeAuxiliaryChannels
+        ? findPart(frame, FramePartKind::Intensity) : nullptr;
+    if (intensityPart != nullptr)
+    {
+        if (!hasCompatibleDimensions(*intensityPart, width, height))
+        {
+            intensityPart = nullptr;
+        }
+        else if (sampleCount(*intensityPart) != expected || !rawFits(*intensityPart))
+        {
+            return std::nullopt;
+        }
+    }
+    const FramePart* confidencePart = request.includeRangeAuxiliaryChannels
+        ? findPart(frame, FramePartKind::Confidence) : nullptr;
+    if (confidencePart != nullptr)
+    {
+        if (!hasCompatibleDimensions(*confidencePart, width, height))
+        {
+            confidencePart = nullptr;
+        }
+        else if (sampleCount(*confidencePart) != expected || !rawFits(*confidencePart))
+        {
+            return std::nullopt;
+        }
+    }
+
+    GraphicsRangeFrameLayout layout;
+    layout.width = width;
+    layout.height = height;
+    layout.channels.validMask = hasNonFiniteSamples(rangePart);
+    layout.channels.rangeRaw = rangeRawSamples != nullptr && rangeRawSamples->size() == expected;
+    layout.channels.intensity = intensityPart != nullptr;
+    layout.channels.intensityValidMask = intensityPart != nullptr && hasNonFiniteSamples(*intensityPart);
+    layout.channels.intensityRaw = intensityPart != nullptr
+        && std::get_if<std::vector<std::uint16_t>>(&intensityPart->samples) != nullptr
+        && std::get<std::vector<std::uint16_t>>(intensityPart->samples).size() == expected;
+    layout.channels.confidence = confidencePart != nullptr;
+    layout.channels.confidenceValidMask = confidencePart != nullptr && hasNonFiniteSamples(*confidencePart);
+    layout.channels.confidenceRaw = confidencePart != nullptr
+        && std::get_if<std::vector<std::uint16_t>>(&confidencePart->samples) != nullptr
+        && std::get<std::vector<std::uint16_t>>(confidencePart->samples).size() == expected;
+
+    GraphicsRangeFrameWriter writer(layout, frameStorage);
+    if (!writer.isValid())
+    {
+        return std::nullopt;
+    }
+    writeConvertedSamples(rangePart, writer.zData(), writer.validMaskData());
+    if (layout.channels.rangeRaw)
+    {
+        if (!writer.writeRangeRaw(rangeRawSamples->data(), GraphicsSampleByteOrder::LittleEndian)) return std::nullopt;
+    }
+    if (intensityPart != nullptr)
+    {
+        writeConvertedSamples(*intensityPart, writer.intensityData(), writer.intensityValidMaskData());
+        if (layout.channels.intensityRaw)
+        {
+            if (!writer.writeIntensityRaw(
+                std::get<std::vector<std::uint16_t>>(intensityPart->samples).data(),
+                GraphicsSampleByteOrder::LittleEndian))
+            {
+                return std::nullopt;
+            }
+        }
+    }
+    if (confidencePart != nullptr)
+    {
+        writeConvertedSamples(*confidencePart, writer.confidenceData(), writer.confidenceValidMaskData());
+        if (layout.channels.confidenceRaw)
+        {
+            if (!writer.writeConfidenceRaw(
+                std::get<std::vector<std::uint16_t>>(confidencePart->samples).data(),
+                GraphicsSampleByteOrder::LittleEndian))
+            {
+                return std::nullopt;
+            }
+        }
+    }
+
+    RangeFrame range = writer.takeFrame();
     range.rangeField = fieldDescriptor(
         rangePart,
         rawPartPreview ? "Raw Part" : "Range",
         rawPartPreview ? MeasurementValueDomain::Native : MeasurementValueDomain::Calibrated);
-    range.validMask = finiteValidityMask(range.zValues);
-    range.rangeRaw = rawUint16Samples(rangePart);
     range.rangeBits = graphicsBitDepth(rangePart);
     range.zScale = 1.0;
     range.zOffset = 0.0;
@@ -346,38 +441,25 @@ struct SelectedRange {
                 : "Heliotis H8")
             : "Heliotis H8 (raw range)");
     range.frameId = frame.frameId;
+    if (intensityPart != nullptr)
+    {
+        range.intensityField = fieldDescriptor(
+            *intensityPart,
+            "Intensity",
+            MeasurementValueDomain::Native);
+        range.intensityBits = graphicsBitDepth(*intensityPart);
+    }
+    if (confidencePart != nullptr)
+    {
+        range.confidenceField = fieldDescriptor(
+            *confidencePart,
+            "Confidence",
+            MeasurementValueDomain::Native);
+        range.confidenceBits = graphicsBitDepth(*confidencePart);
+    }
     if (!range.isValid())
     {
         return std::nullopt;
-    }
-
-    if (request.includeRangeAuxiliaryChannels)
-    {
-        if (const FramePart* intensityPart = findPart(frame, FramePartKind::Intensity);
-            intensityPart && hasCompatibleDimensions(*intensityPart, range.width, range.height))
-        {
-            range.intensity = toFloatSamples(*intensityPart);
-            range.intensityField = fieldDescriptor(
-                *intensityPart,
-                "Intensity",
-                MeasurementValueDomain::Native);
-            range.intensityValidMask = finiteValidityMask(range.intensity);
-            range.intensityRaw = rawUint16Samples(*intensityPart);
-            range.intensityBits = graphicsBitDepth(*intensityPart);
-        }
-
-        if (const FramePart* confidencePart = findPart(frame, FramePartKind::Confidence);
-            confidencePart && hasCompatibleDimensions(*confidencePart, range.width, range.height))
-        {
-            range.confidence = toFloatSamples(*confidencePart);
-            range.confidenceField = fieldDescriptor(
-                *confidencePart,
-                "Confidence",
-                MeasurementValueDomain::Native);
-            range.confidenceValidMask = finiteValidityMask(range.confidence);
-            range.confidenceRaw = rawUint16Samples(*confidencePart);
-            range.confidenceBits = graphicsBitDepth(*confidencePart);
-        }
     }
     return SelectedRange{std::move(range), *rangeIndex};
 }
@@ -415,7 +497,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     GraphicsFrame result;
     if (rangeRequested)
     {
-        if (auto selected = selectRange(frame, request))
+        if (auto selected = selectRange(frame, request, frameStorage))
         {
             result.addRange(resourceId("range", selected->partIndex), std::move(selected->range),
                             "Range", kResourceGroup);

@@ -1,5 +1,6 @@
 #include "HeliotisC4GraphicsFrameAdapter.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -7,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace {
 
@@ -19,6 +21,37 @@ namespace {
     const GraphicsRangeResource* resource = frame->firstRange();
     return resource ? &resource->payload : nullptr;
 }
+
+struct RecordingStorage
+{
+    std::size_t calls = 0U;
+    std::vector<std::shared_ptr<std::uint8_t>> blocks;
+    std::vector<std::size_t> sizes;
+
+    GraphicsImageStorage function()
+    {
+        return [this](const std::size_t bytes)
+        {
+            ++calls;
+            blocks.emplace_back(new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>());
+            sizes.push_back(bytes);
+            return blocks.back();
+        };
+    }
+
+    [[nodiscard]] bool contains(const void* pointer) const
+    {
+        const auto* bytes = static_cast<const std::uint8_t*>(pointer);
+        for (std::size_t index = 0; index < blocks.size(); ++index)
+        {
+            if (bytes >= blocks[index].get() && bytes < blocks[index].get() + sizes[index])
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+};
 
 } // namespace
 
@@ -158,27 +191,39 @@ int main()
     frame.parts.at(1).bitsPerSample = 16;
     frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 20U, 30U, 40U};
 
-    std::array<std::uint8_t, 8> providedBytes{};
-    std::size_t providedRequests = 0U;
-    adapter.setFrameStorage([&providedBytes, &providedRequests](const std::size_t bytes) {
-        ++providedRequests;
-        if (bytes != providedBytes.size()) return std::shared_ptr<std::uint8_t>{};
-        return std::shared_ptr<std::uint8_t>(providedBytes.data(), [](std::uint8_t*) {});
-    });
+    // A provided storage function receives the range channels and the image
+    // bytes; every range array is borrowed from the block the writer acquired.
+    RecordingStorage providedStorage;
+    adapter.setFrameStorage(providedStorage.function());
     const auto providedScene = adapter.convertFrame(frame, {});
-    if (!providedScene || providedScene->images.size() != 1U
-        || providedRequests != 1U
-        || providedScene->images.front().payload.data() != providedBytes.data()
-        || std::memcmp(providedBytes.data(), mono16Bytes.data(), mono16Bytes.size()) != 0)
+    const RangeFrame* providedRange = rangeOf(providedScene);
+    const std::array<float, 4> expectedZ{1.5F, 2.5F, 3.5F, 4.5F};
+    const std::array<float, 4> expectedIntensity{5.0F, 10.0F, 15.0F, 20.0F};
+    const std::array<std::uint16_t, 4> expectedRaw{10U, 20U, 30U, 40U};
+    if (!providedScene || !providedRange || providedScene->images.size() != 1U
+        || providedStorage.calls != 2U
+        || !providedRange->zValues.isBorrowed()
+        || !providedRange->intensity.isBorrowed()
+        || !providedRange->intensityRaw.isBorrowed()
+        || !providedStorage.contains(providedRange->zValues.data())
+        || !providedStorage.contains(providedRange->intensity.data())
+        || providedRange->validMask.size() != 0U
+        || providedRange->intensityValidMask.size() != 0U
+        || !std::equal(expectedZ.begin(), expectedZ.end(), providedRange->zValues.cbegin())
+        || !std::equal(expectedIntensity.begin(), expectedIntensity.end(),
+               providedRange->intensity.cbegin())
+        || !std::equal(expectedRaw.begin(), expectedRaw.end(), providedRange->intensityRaw.cbegin())
+        || providedScene->images.front().payload.data() != providedStorage.blocks.back().get()
+        || std::memcmp(providedStorage.blocks.back().get(), mono16Bytes.data(),
+               mono16Bytes.size()) != 0)
     {
-        std::cerr << "A provided storage function must receive the image bytes in place.\n";
+        std::cerr << "Provided storage must receive the borrowed range channels and image bytes.\n";
         return 1;
     }
     adapter.setFrameStorage([](const std::size_t) { return std::shared_ptr<std::uint8_t>{}; });
-    const auto refusedScene = adapter.convertFrame(frame, {});
-    if (!refusedScene || !refusedScene->images.empty())
+    if (adapter.convertFrame(frame, {}).has_value())
     {
-        std::cerr << "An empty storage result must drop the image without failing the frame.\n";
+        std::cerr << "An empty storage result must drop the range and image resources.\n";
         return 1;
     }
     adapter.setFrameStorage({});
