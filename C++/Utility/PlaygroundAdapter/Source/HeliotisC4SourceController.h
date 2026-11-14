@@ -3,6 +3,7 @@
 #include "AbstractSourceController.h"
 #include "DeviceConnectionControl.h"
 #include "DeviceParameterControl.h"
+#include "FrameStorage.h"
 #include "HeliotisC4System.h"
 
 #include <QFuture>
@@ -60,11 +61,13 @@ public:
 
 /** Adapts worker-owned Heliotis frames, status, tools and parameters into the host contracts. */
 class HeliotisC4SourceController final
-    : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl {
+    : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl,
+      public IFrameStorageClient {
     Q_OBJECT
-    Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl)
+    Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient)
 
 public:
+    void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
     using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
     explicit HeliotisC4SourceController(heliotis::HeliotisC4Device* device, QObject* parent = nullptr);
     ~HeliotisC4SourceController() override;

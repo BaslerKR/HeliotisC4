@@ -7,6 +7,7 @@
 
 #include "HeliotisC4.h"
 #include "engine/GraphicsFrameAdapter.h"
+#include "engine/GraphicsImageWriter.h"
 
 #include <functional>
 #include <memory>
@@ -30,6 +31,9 @@ public:
         GraphicsFrameCallback callback,
         FrameReceiptCallback receiptCallback);
     ~HeliotisGraphicsFrameStream();
+
+    /** Forwards the storage intensity images are written into; callable while acquiring. */
+    void setFrameStorage(GraphicsImageStorage storage);
 
     HeliotisGraphicsFrameStream(const HeliotisGraphicsFrameStream&) = delete;
     HeliotisGraphicsFrameStream& operator=(const HeliotisGraphicsFrameStream&) = delete;

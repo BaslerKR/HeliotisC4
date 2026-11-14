@@ -87,6 +87,12 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
         });
 }
 
+void HeliotisC4SourceController::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
+{
+    if (!_graphicsStream) return;
+    _graphicsStream->setFrameStorage(frameStorageFunction(std::move(provider)));
+}
+
 HeliotisC4SourceController::~HeliotisC4SourceController()
 {
     setControlBackend(nullptr);

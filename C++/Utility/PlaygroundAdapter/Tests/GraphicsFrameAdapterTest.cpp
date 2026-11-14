@@ -1,9 +1,11 @@
 #include "HeliotisC4GraphicsFrameAdapter.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <optional>
 
 namespace {
@@ -107,11 +109,15 @@ int main()
     const GraphicsImage& intensity = scene->images.front().payload;
     std::uint16_t secondSample = 0;
     std::memcpy(&secondSample, intensity.data() + 2, sizeof(secondSample));
+    const std::array<std::uint8_t, 8> mono16Bytes{
+        10U, 0U, 20U, 0U, 30U, 0U, 40U, 0U};
     if (intensity.pixelFormat != GraphicsImagePixelFormat::Mono16
         || intensity.width != 2 || intensity.height != 2 || intensity.stride != 4
+        || intensity.size != mono16Bytes.size()
         || intensity.declaredMonoSourceBits != 0
         || intensity.bitAlignment != GraphicsImageBitAlignment::Packed
-        || intensity.frameSequence != 7U || secondSample != 20U)
+        || intensity.frameSequence != 7U || secondSample != 20U
+        || std::memcmp(intensity.data(), mono16Bytes.data(), mono16Bytes.size()) != 0)
     {
         std::cerr << "The intensity image must keep unscaled Mono16 sensor codes.\n";
         return 1;
@@ -128,17 +134,54 @@ int main()
     }
     frame.parts.at(1).bitsPerSample = 8;
     frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 300U, 30U, 40U};
+    const std::array<std::uint8_t, 4> mono8Bytes{10U, 255U, 30U, 40U};
     const auto eightBit = adapter.convertFrame(frame, {});
     if (!eightBit || eightBit->images.size() != 1U
         || eightBit->images.front().payload.pixelFormat != GraphicsImagePixelFormat::Mono8
         || eightBit->images.front().payload.stride != 2
-        || eightBit->images.front().payload.data()[1] != 255U)
+        || eightBit->images.front().payload.size != mono8Bytes.size()
+        || std::memcmp(eightBit->images.front().payload.data(), mono8Bytes.data(),
+               mono8Bytes.size()) != 0)
     {
         std::cerr << "An 8-bit intensity part must become a saturated Mono8 image.\n";
         return 1;
     }
+    frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 300U, 30U};
+    GraphicsFrameRequest shortPartRequest;
+    shortPartRequest.includeRangeAuxiliaryChannels = false;
+    const auto shortPart = adapter.convertFrame(frame, shortPartRequest);
+    if (!shortPart || shortPart->ranges.size() != 1U || !shortPart->images.empty())
+    {
+        std::cerr << "A part whose sample count does not match its dimensions must stay image-free.\n";
+        return 1;
+    }
     frame.parts.at(1).bitsPerSample = 16;
     frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 20U, 30U, 40U};
+
+    std::array<std::uint8_t, 8> providedBytes{};
+    std::size_t providedRequests = 0U;
+    adapter.setFrameStorage([&providedBytes, &providedRequests](const std::size_t bytes) {
+        ++providedRequests;
+        if (bytes != providedBytes.size()) return std::shared_ptr<std::uint8_t>{};
+        return std::shared_ptr<std::uint8_t>(providedBytes.data(), [](std::uint8_t*) {});
+    });
+    const auto providedScene = adapter.convertFrame(frame, {});
+    if (!providedScene || providedScene->images.size() != 1U
+        || providedRequests != 1U
+        || providedScene->images.front().payload.data() != providedBytes.data()
+        || std::memcmp(providedBytes.data(), mono16Bytes.data(), mono16Bytes.size()) != 0)
+    {
+        std::cerr << "A provided storage function must receive the image bytes in place.\n";
+        return 1;
+    }
+    adapter.setFrameStorage([](const std::size_t) { return std::shared_ptr<std::uint8_t>{}; });
+    const auto refusedScene = adapter.convertFrame(frame, {});
+    if (!refusedScene || !refusedScene->images.empty())
+    {
+        std::cerr << "An empty storage result must drop the image without failing the frame.\n";
+        return 1;
+    }
+    adapter.setFrameStorage({});
 
     GraphicsFrameRequest imageOnlyRequest;
     imageOnlyRequest.components = GraphicsFrameComponent::Image;

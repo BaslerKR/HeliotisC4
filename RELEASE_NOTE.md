@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.4.0 (2026-11-14)
+
+- Require Playground 0.7.0 or later; this package uses the frame storage interface introduced in that release.
+
+- Deliver intensity images directly into Playground's shared frame storage, so image consumers can reuse each frame without an extra copy. An image is skipped when Playground cannot provide storage; range data is unchanged.
+
 ## v0.3.0 (2026-11-13)
 
 - Require Playground 0.6.6 or later; this package uses the device plugin interface introduced in that release.

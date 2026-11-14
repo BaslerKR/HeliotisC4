@@ -3,9 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstring>
 #include <limits>
-#include <memory>
 #include <string>
 #include <utility>
 
@@ -190,17 +188,19 @@ constexpr const char* kResourceGroup = "0:0";
 }
 
 /**
- * Copies one integer intensity part into an owned Mono8 or Mono16 image.
+ * Copies one integer intensity part into an owned Mono8 or Mono16 image through the image writer.
  *
  * @param part Deep-owned C4 part with integer samples.
  * @param sequence Producer frame counter stored as image metadata.
- * @return The image, or no value for floating, empty, or oversized parts.
+ * @param frameStorage Destination storage; empty uses ordinary memory.
+ * @return The image, or no value for floating, empty, oversized, or refused parts.
  * @note Samples keep their unscaled sensor codes. Mono16 rows use the
  *       little-endian host order of the copied C4 samples.
  */
 [[nodiscard]] std::optional<GraphicsImage> intensityImage(
     const heliotis::FramePart& part,
-    const std::uint64_t sequence)
+    const std::uint64_t sequence,
+    const GraphicsImageStorage& frameStorage)
 {
     if (!hasRepresentableSamples(part) || !hasRepresentableDimensions(part)) return std::nullopt;
     const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples);
@@ -210,35 +210,34 @@ constexpr const char* kResourceGroup = "0:0";
         ? std::uint8_t{16}
         : std::min<std::uint8_t>(part.bitsPerSample, std::uint8_t{16});
     const bool eightBit = bits <= 8;
-    const std::size_t width = part.width;
-    const std::size_t height = part.height;
-    const std::size_t bytesPerSample = eightBit ? 1U : 2U;
-    if (width > static_cast<std::size_t>((std::numeric_limits<int>::max)()) / bytesPerSample) return std::nullopt;
-    const std::size_t stride = width * bytesPerSample;
-
-    auto storage = std::make_shared<std::vector<std::uint8_t>>(stride * height);
-    if (eightBit) {
-        for (std::size_t index = 0; index < values->size(); ++index) {
-            (*storage)[index] = static_cast<std::uint8_t>(std::min<std::uint16_t>((*values)[index], 255U));
-        }
-    } else {
-        std::memcpy(storage->data(), values->data(), values->size() * sizeof(std::uint16_t));
+    const std::size_t pixelCount = static_cast<std::size_t>(part.width) * part.height;
+    if (values->size() > pixelCount) return std::nullopt;
+    if (part.width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()) / 2U)
+    {
+        return std::nullopt;
     }
 
-    GraphicsImage image;
-    image.storage = std::shared_ptr<const std::uint8_t>(storage, storage->data());
-    image.size = storage->size();
-    image.width = static_cast<int>(width);
-    image.height = static_cast<int>(height);
-    image.stride = static_cast<int>(stride);
-    image.pixelFormat = eightBit ? GraphicsImagePixelFormat::Mono8 : GraphicsImagePixelFormat::Mono16;
-    image.bitsPerPixel = GraphicsImageValidation::packedBitsPerPixel(image.pixelFormat);
-    image.declaredMonoSourceBits = eightBit || bits >= 16 ? std::uint8_t{0} : bits;
-    image.sourceFormat = monoPfnc(eightBit ? std::uint8_t{8} : bits);
-    image.bitAlignment = image.declaredMonoSourceBits != 0
+    // The writer copies or narrows the sample bytes once into the requested storage.
+    GraphicsImageWriterSource source;
+    source.data = reinterpret_cast<const std::uint8_t*>(values->data());
+    source.size = values->size() * sizeof(std::uint16_t);
+    source.width = static_cast<int>(part.width);
+    source.height = static_cast<int>(part.height);
+    source.stride = static_cast<int>(part.width) * 2;
+    source.pixelFormat = GraphicsImagePixelFormat::Mono16;
+    source.operation = eightBit
+        ? GraphicsImageWriterOperation::NarrowMono16To8
+        : GraphicsImageWriterOperation::Copy;
+    source.bitsPerPixel = GraphicsImageValidation::packedBitsPerPixel(
+        eightBit ? GraphicsImagePixelFormat::Mono8 : GraphicsImagePixelFormat::Mono16);
+    source.sourceFormat = monoPfnc(eightBit ? std::uint8_t{8} : bits);
+    source.declaredMonoSourceBits = eightBit || bits >= 16 ? std::uint8_t{0} : bits;
+    source.bitAlignment = source.declaredMonoSourceBits != 0
         ? GraphicsImageBitAlignment::LeastSignificant
         : GraphicsImageBitAlignment::Packed;
-    image.frameSequence = sequence;
+    source.frameSequence = sequence;
+
+    GraphicsImage image = writeGraphicsImage(source, frameStorage);
     if (!image.isValid()) return std::nullopt;
     return image;
 }
@@ -387,10 +386,21 @@ struct SelectedRange {
 
 namespace heliotis {
 
+void HeliotisC4GraphicsFrameAdapter::setFrameStorage(GraphicsImageStorage storage)
+{
+    std::lock_guard<std::mutex> lock(_storageMutex);
+    _storage = std::move(storage);
+}
+
 std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFrame(
     const Frame& frame,
     const GraphicsFrameRequest& request) const
 {
+    GraphicsImageStorage frameStorage;
+    {
+        std::lock_guard<std::mutex> lock(_storageMutex);
+        frameStorage = _storage;
+    }
     const bool rangeRequested =
         hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::Range)
         || hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::PointCloud)
@@ -421,7 +431,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         {
             const FramePart& part = frame.parts[index];
             if (part.kind != FramePartKind::Intensity) continue;
-            auto image = intensityImage(part, frame.sequence);
+            auto image = intensityImage(part, frame.sequence, frameStorage);
             if (!image) continue;
             result.addImage(resourceId("image", index), std::move(*image),
                             part.name.empty() ? std::string("Intensity") : part.name, kResourceGroup);
