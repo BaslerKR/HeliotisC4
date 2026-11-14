@@ -113,7 +113,7 @@ constexpr const char* kResourceGroup = "0:0";
         graphicsBitDepth(part)};
 }
 
-[[nodiscard]] std::vector<std::uint8_t> finiteValidityMask(const std::vector<float>& values)
+[[nodiscard]] std::vector<std::uint8_t> finiteValidityMask(const GraphicsSampleBuffer<float>& values)
 {
     std::vector<std::uint8_t> mask;
     bool allValid = true;
