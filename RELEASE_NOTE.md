@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Write intensity images into host-provided frame storage when Playground supplies it (`IFrameStorageClient`); without it the adapter keeps storage of its own. No storage drops that image. Range data is unchanged. Needs a Playground release that ships `FrameStorage.h`.
+- Write intensity images through the GraphicsEngine image writer into host-provided frame storage when Playground supplies it (`IFrameStorageClient`); without it the writer allocates the image. No storage drops that image. Range data is unchanged. Needs a Playground release that ships `FrameStorage.h`.
 
 ## v0.3.0 (2026-11-13)
 

@@ -2,10 +2,10 @@
 
 #include "HeliotisC4.h"
 #include "engine/GraphicsFrameAdapter.h"
+#include "engine/GraphicsImageWriter.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -21,13 +21,8 @@ public:
 
     using GraphicsFrameAdapter<HeliotisC4GraphicsFrameAdapter, Frame>::convertFrame;
 
-    /**
-     * Storage for one image: returns at least `bytes` writable bytes, or empty to drop the image.
-     * Must not wait; called on acquisition threads.
-     */
-    using FrameStorage = std::function<std::shared_ptr<std::uint8_t>(std::size_t bytes)>;
     /** Sets where intensity images are written; empty restores storage of the adapter's own. */
-    void setFrameStorage(FrameStorage storage);
+    void setFrameStorage(GraphicsImageStorage storage);
 
 private:
     friend class GraphicsFrameAdapter<HeliotisC4GraphicsFrameAdapter, Frame>;
@@ -37,7 +32,7 @@ private:
         const GraphicsFrameRequest& request) const;
 
     mutable std::mutex _storageMutex;
-    FrameStorage _storage;
+    GraphicsImageStorage _storage;
 };
 
 } // namespace heliotis
