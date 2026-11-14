@@ -200,7 +200,8 @@ constexpr const char* kResourceGroup = "0:0";
  */
 [[nodiscard]] std::optional<GraphicsImage> intensityImage(
     const heliotis::FramePart& part,
-    const std::uint64_t sequence)
+    const std::uint64_t sequence,
+    const heliotis::HeliotisC4GraphicsFrameAdapter::FrameStorage& frameStorage)
 {
     if (!hasRepresentableSamples(part) || !hasRepresentableDimensions(part)) return std::nullopt;
     const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples);
@@ -216,18 +217,30 @@ constexpr const char* kResourceGroup = "0:0";
     if (width > static_cast<std::size_t>((std::numeric_limits<int>::max)()) / bytesPerSample) return std::nullopt;
     const std::size_t stride = width * bytesPerSample;
 
-    auto storage = std::make_shared<std::vector<std::uint8_t>>(stride * height);
+    // The image is written once, into provided storage when there is any. No storage drops the
+    // image, like any other part that cannot be represented.
+    const std::size_t storageBytes = stride * height;
+    if (values->size() * bytesPerSample > storageBytes) return std::nullopt;
+    std::shared_ptr<std::uint8_t> storage = frameStorage
+        ? frameStorage(storageBytes)
+        : std::shared_ptr<std::uint8_t>(new std::uint8_t[storageBytes](), std::default_delete<std::uint8_t[]>());
+    if (!storage) return std::nullopt;
     if (eightBit) {
         for (std::size_t index = 0; index < values->size(); ++index) {
-            (*storage)[index] = static_cast<std::uint8_t>(std::min<std::uint16_t>((*values)[index], 255U));
+            storage.get()[index] = static_cast<std::uint8_t>(std::min<std::uint16_t>((*values)[index], 255U));
         }
     } else {
-        std::memcpy(storage->data(), values->data(), values->size() * sizeof(std::uint16_t));
+        std::memcpy(storage.get(), values->data(), values->size() * sizeof(std::uint16_t));
+    }
+    // Provided storage is not zeroed; keep the bytes a short part leaves behind defined.
+    if (values->size() * bytesPerSample < storageBytes) {
+        std::memset(storage.get() + values->size() * bytesPerSample, 0,
+            storageBytes - values->size() * bytesPerSample);
     }
 
     GraphicsImage image;
-    image.storage = std::shared_ptr<const std::uint8_t>(storage, storage->data());
-    image.size = storage->size();
+    image.storage = std::move(storage);
+    image.size = storageBytes;
     image.width = static_cast<int>(width);
     image.height = static_cast<int>(height);
     image.stride = static_cast<int>(stride);
@@ -387,10 +400,21 @@ struct SelectedRange {
 
 namespace heliotis {
 
+void HeliotisC4GraphicsFrameAdapter::setFrameStorage(FrameStorage storage)
+{
+    std::lock_guard<std::mutex> lock(_storageMutex);
+    _storage = std::move(storage);
+}
+
 std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFrame(
     const Frame& frame,
     const GraphicsFrameRequest& request) const
 {
+    FrameStorage frameStorage;
+    {
+        std::lock_guard<std::mutex> lock(_storageMutex);
+        frameStorage = _storage;
+    }
     const bool rangeRequested =
         hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::Range)
         || hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::PointCloud)
@@ -421,7 +445,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         {
             const FramePart& part = frame.parts[index];
             if (part.kind != FramePartKind::Intensity) continue;
-            auto image = intensityImage(part, frame.sequence);
+            auto image = intensityImage(part, frame.sequence, frameStorage);
             if (!image) continue;
             result.addImage(resourceId("image", index), std::move(*image),
                             part.name.empty() ? std::string("Intensity") : part.name, kResourceGroup);

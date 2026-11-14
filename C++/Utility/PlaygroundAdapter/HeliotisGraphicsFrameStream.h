@@ -31,6 +31,11 @@ public:
         FrameReceiptCallback receiptCallback);
     ~HeliotisGraphicsFrameStream();
 
+    /** Storage for one image; see HeliotisC4GraphicsFrameAdapter::FrameStorage. */
+    using FrameStorage = std::function<std::shared_ptr<std::uint8_t>(std::size_t bytes)>;
+    /** Forwards the storage intensity images are written into; callable while acquiring. */
+    void setFrameStorage(FrameStorage storage);
+
     HeliotisGraphicsFrameStream(const HeliotisGraphicsFrameStream&) = delete;
     HeliotisGraphicsFrameStream& operator=(const HeliotisGraphicsFrameStream&) = delete;
 

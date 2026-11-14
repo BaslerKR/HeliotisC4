@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Write intensity images into host-provided frame storage when Playground supplies it (`IFrameStorageClient`); without it the adapter keeps storage of its own. No storage drops that image. Range data is unchanged. Needs a Playground release that ships `FrameStorage.h`.
+
 ## v0.3.0 (2026-11-13)
 
 - Require Playground 0.6.6 or later; this package uses the device plugin interface introduced in that release.

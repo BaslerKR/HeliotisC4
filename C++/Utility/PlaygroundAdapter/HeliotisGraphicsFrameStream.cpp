@@ -41,6 +41,7 @@ public:
     void requestStop() noexcept;
     void stop();
     bool acquiring() const { return _device && _device->isAcquiring(); }
+    void setFrameStorage(FrameStorage storage) { _adapter.setFrameStorage(std::move(storage)); }
     std::atomic<std::uint64_t> delivered{0};
     std::atomic<std::uint64_t> failed{0};
 
@@ -150,6 +151,11 @@ HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
 }
 
 HeliotisGraphicsFrameStream::~HeliotisGraphicsFrameStream() = default;
+
+void HeliotisGraphicsFrameStream::setFrameStorage(FrameStorage storage)
+{
+    if (_impl) _impl->setFrameStorage(std::move(storage));
+}
 
 bool HeliotisGraphicsFrameStream::start(
     const AcquisitionMode mode,
