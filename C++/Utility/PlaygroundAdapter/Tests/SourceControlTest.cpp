@@ -2,7 +2,7 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
-#include "ToolProvider.h"
+#include "Tools/ToolProvider.h"
 
 #include <functional>
 #include <iostream>
