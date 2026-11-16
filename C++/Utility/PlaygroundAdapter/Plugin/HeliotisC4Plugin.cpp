@@ -306,8 +306,8 @@ std::vector<heliotis::DeviceDescriptor> fromDiscoveryData(const QVariantList& va
 /** Owns Heliotis discovery, sessions, and one coherently selected SDK runtime. */
 class HeliotisC4Plugin final : public DevicePluginTemplate, public IDevicePluginSettings {
     Q_OBJECT
-    Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
-    Q_INTERFACES(IDevicePlugin IDevicePluginSettings)
+    Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)
+    Q_INTERFACES(IDeviceRuntime IDevicePluginSettings)
 
 public:
     /** Selects the host-owned INI used for feature favorites; other keys are preserved. */

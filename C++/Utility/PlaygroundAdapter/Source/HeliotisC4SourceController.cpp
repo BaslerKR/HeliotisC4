@@ -2,7 +2,7 @@
 #include "engine/GraphicsFrame.h"
 
 #include "Utility/PlaygroundAdapter/HeliotisGraphicsFrameStream.h"
-#include "SessionFrame.h"
+#include "DeviceRuntime/Contract/SessionFrame.h"
 
 #include <QByteArray>
 #include <QDebug>

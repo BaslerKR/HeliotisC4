@@ -1,6 +1,7 @@
 #pragma once
 
-#include "DevicePlugin/DevicePlugin.h"
+#include "DeviceRuntime/Contract/DeviceRuntime.h"
+#include "DevicePluginSession.h"
 #include "HeliotisC4SourceController.h"
 #include "HeliotisC4System.h"
 #include "Utility/Qt/QHeliotisC4Widget.h"
