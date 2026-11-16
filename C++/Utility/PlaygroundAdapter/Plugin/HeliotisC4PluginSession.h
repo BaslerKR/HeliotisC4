@@ -118,6 +118,7 @@ private:
     bool disconnect(Completion completion) override;
     bool arm(bool continuous, Completion completion) override;
     bool stop(Completion completion) override;
+    bool initialize(Completion completion) override;
 
     /** Requests a non-blocking stop that the acquisition state signal completes. */
     void requestAcquisitionStop();
@@ -149,8 +150,15 @@ private:
      * @param continuous True for host-side Live; false for host-side Single.
      */
     bool requestAcquisitionArm(bool continuous, Completion completion = {});
-    /** Applies the explicit default H8 surface profile requested by Init (widget-only). */
-    void initializeH8ReferenceProfile();
+    /**
+     * Applies the explicit default H8 surface profile and StageInit.
+     *
+     * @param completion Optional caller completion; the widget path passes none.
+     * @return False when the session did not admit the operation; the completion then runs never.
+     * @note The control widget and `heliotis-c4.init` both enter here, so their
+     *       admission, progress and failure behavior cannot diverge.
+     */
+    bool initializeH8ReferenceProfile(Completion completion = {});
     /**
      * Runs one serialized feature mutation away from the session thread.
      *
