@@ -272,6 +272,7 @@ int main(int argc, char** argv)
             "Disconnect must close the device and clear the connection id.");
 
         // Close/reopen three times through the same headless flows.
+        QString previousConnection = connection;
         for (int cycle = 1; cycle <= 3; ++cycle) {
             bool reopened = false;
             DeviceConnectionResult reopenResult;
@@ -284,8 +285,9 @@ int main(int argc, char** argv)
             require(reopenResult.error == DeviceConnectionError::None && fake::opened,
                 "A reconnect must reopen the device.");
             const QString reopenedConnection = controller->connectionId();
-            require(!reopenedConnection.isEmpty() && reopenedConnection != connection,
+            require(!reopenedConnection.isEmpty() && reopenedConnection != previousConnection,
                 "Every reconnect must mint a new connection id.");
+            previousConnection = reopenedConnection;
             bool closed = false;
             require(controller->requestDisconnect(reopenedConnection.toStdString(),
                         [&](DeviceConnectionResult) { closed = true; })
