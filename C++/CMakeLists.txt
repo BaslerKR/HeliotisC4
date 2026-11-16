@@ -293,7 +293,8 @@ if(HELIOTISC4_BUILD_TESTS)
         target_include_directories(heliotis_c4_plugin_session_test PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
-            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin")
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
+            "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
         target_link_libraries(heliotis_c4_plugin_session_test PRIVATE
             Playground::DeviceRuntimeContract HeliotisC4::QtWidget HeliotisC4::PlaygroundAdapter
             Qt6::Widgets Qt6::Concurrent)
