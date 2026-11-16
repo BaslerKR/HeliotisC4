@@ -2,7 +2,11 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QThread>
 
+#include "Tools/ToolProvider.h"
+
+#include <atomic>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -16,6 +20,11 @@ bool opened = false;
 bool acquiring = false;
 std::string deviceName = "H8-0001";
 heliotis::HeliotisC4::FeatureList features;
+std::atomic<int> triggers{0};
+std::atomic<int> initializations{0};
+std::atomic<bool> initSucceeds{true};
+std::atomic<bool> initCancelled{false};
+std::atomic<bool> allowConfigure{true};
 heliotis::HeliotisC4Device::StatusCallback status;
 heliotis::HeliotisC4Device::FrameCallback frame;
 } // namespace fake
@@ -51,8 +60,29 @@ void HeliotisC4Device::close()
 }
 bool HeliotisC4Device::isOpened() const { return fake::opened; }
 std::string HeliotisC4Device::connectedDeviceName() const { return fake::deviceName; }
-bool HeliotisC4Device::configureH8SurfaceExample(std::string*) { return fake::opened; }
-void HeliotisC4Device::requestCancelInitialization() noexcept {}
+bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage,
+    const std::function<bool()>& externallyCancelled)
+{
+    while (!fake::allowConfigure.load()) QThread::msleep(1);
+    if (externallyCancelled && externallyCancelled()) {
+        if (errorMessage) *errorMessage = "H8 reference-profile initialization was cancelled before it started.";
+        return false;
+    }
+    ++fake::initializations;
+    fake::initCancelled.store(false);
+    for (int step = 0; step < 500 && !fake::initCancelled.load()
+        && !(externallyCancelled && externallyCancelled()); ++step) QThread::msleep(1);
+    if (fake::initCancelled.load() || (externallyCancelled && externallyCancelled())) {
+        if (errorMessage) *errorMessage = "H8 reference-profile initialization was cancelled during the fixture run.";
+        return false;
+    }
+    if (!fake::initSucceeds.load()) {
+        if (errorMessage) *errorMessage = "The fixture H8 reference profile failed.";
+        return false;
+    }
+    return fake::opened;
+}
+void HeliotisC4Device::requestCancelInitialization() noexcept { fake::initCancelled.store(true); }
 bool HeliotisC4Device::initializeMotion(std::string*) { return fake::opened; }
 HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage) const
 {
@@ -61,7 +91,11 @@ HeliotisC4::FeatureList HeliotisC4Device::readFeatures(std::string* errorMessage
 }
 bool HeliotisC4Device::writeFeature(const std::string&, const std::string&, std::string*) { return false; }
 bool HeliotisC4Device::executeCommand(const std::string&, std::string*) { return false; }
-bool HeliotisC4Device::triggerSoftware(std::string*) { return fake::acquiring; }
+bool HeliotisC4Device::triggerSoftware(std::string*)
+{
+    ++fake::triggers;
+    return fake::acquiring;
+}
 bool HeliotisC4Device::startAcquisition(AcquisitionMode, FrameCallback callback, std::string* errorMessage)
 {
     if (!fake::opened) {
@@ -86,8 +120,8 @@ void HeliotisC4Device::stopAcquisition()
     if (fake::status) fake::status(Status::Acquisition, false);
 }
 bool HeliotisC4Device::isAcquiring() const { return fake::acquiring; }
-bool HeliotisC4Device::isSoftwareTriggeredAcquisition() const { return false; }
-bool HeliotisC4Device::isSoftwareTriggerAvailable() const { return false; }
+bool HeliotisC4Device::isSoftwareTriggeredAcquisition() const { return fake::acquiring; }
+bool HeliotisC4Device::isSoftwareTriggerAvailable() const { return true; }
 bool HeliotisC4Device::requiresReconnect() const { return false; }
 std::string HeliotisC4Device::lastAcquisitionError() const { return {}; }
 HeliotisC4Device::CallbackId HeliotisC4Device::registerStatusCallback(StatusCallback callback)
@@ -214,6 +248,90 @@ int main(int argc, char** argv)
         require(title == QStringLiteral("Heliotis C4 - H8-0001"),
             "Connect must publish the session title without a widget.");
 
+        // The declared init action uses the same session path as the widget.
+        auto* moduleTools = qobject_cast<IToolProvider*>(controller);
+        auto* execution = qobject_cast<IToolExecution*>(controller);
+        require(moduleTools && execution, "The controller must expose the declared init action.");
+        std::optional<ApiResult<QJsonValue>> initResult;
+        int initProgress = 0;
+        const auto finishInit = [&initResult](ApiResult<QJsonValue> result) {
+            initResult = std::move(result);
+        };
+        const IToolExecution::Progress initProgressSink = [&initProgress](const ApiProgress&) {
+            ++initProgress;
+        };
+        const auto invokeInit = [&](const char* callId, const bool confirmed) {
+            QJsonObject arguments;
+            if (confirmed) arguments.insert(QStringLiteral("confirmed"), true);
+            return execution->requestToolWithProgress(QString::fromLatin1(callId),
+                QStringLiteral("heliotis-c4.init"), 1, arguments, initProgressSink, finishInit);
+        };
+        initResult.reset();
+        require(invokeInit("headless-confirm", false).succeeded() && initResult
+                    && !initResult->succeeded()
+                    && initResult->error()->code == ApiErrorCode::ArgumentRequired
+                    && fake::initializations.load() == 0,
+            "Init must return its typed stage-move confirmation without effect.");
+
+        // Refused while acquisition is armed even though the action exists.
+        bool liveArmed = false;
+        DeviceConnectionResult liveArmResult;
+        require(controller->requestLiveStart(connection.toStdString(),
+                    [&](DeviceConnectionResult result) {
+                        liveArmResult = std::move(result);
+                        liveArmed = true;
+                    }).error == DeviceConnectionError::None
+                && waitFor([&] { return liveArmed && fake::acquiring; }),
+            "Live must arm before the Init refusal check.");
+        require(invokeInit("headless-armed", true).succeeded() == false,
+            "Init must be refused while acquisition is armed.");
+        bool liveStopped = false;
+        require(controller->requestLiveStop(connection.toStdString(),
+                    [&](DeviceConnectionResult) { liveStopped = true; })
+                    .error == DeviceConnectionError::None
+                && waitFor([&] { return liveStopped; }),
+            "Live must stop after the Init refusal check.");
+
+        initResult.reset();
+        initProgress = 0;
+        require(invokeInit("headless-init", true).succeeded() && !initResult,
+            "A confirmed Init must be admitted through the session path.");
+        require(waitFor([&] {
+                    return fake::initializations.load() == 1 && initProgress == 1
+                        && initResult.has_value();
+                }),
+            "Init must run with one progress report and complete without a widget.");
+        require(initResult->succeeded()
+                    && initResult->value().toObject().value("initialized").toBool(),
+            "A successful Init must report its terminal result.");
+        fake::initSucceeds.store(false);
+        initResult.reset();
+        require(invokeInit("headless-init-error", true).succeeded()
+                    && waitFor([&] { return initResult.has_value(); })
+                    && !initResult->succeeded()
+                    && initResult->error()->message.contains(QStringLiteral("failed")),
+            "A failed Init must complete with its error.");
+        fake::initSucceeds.store(true);
+
+        // A cancellation requested before the worker enters the profile must win.
+        const int initializationsBeforeCancel = fake::initializations.load();
+        fake::allowConfigure.store(false);
+        initResult.reset();
+        require(invokeInit("headless-cancel-early", true).succeeded() && !initResult,
+            "An early-cancelled Init must be admitted first.");
+        require(execution->cancelTool(QStringLiteral("headless-cancel-early")).succeeded(),
+            "Early cancellation must be accepted.");
+        fake::allowConfigure.store(true);
+        require(waitFor([&] { return initResult.has_value(); }),
+            "An early-cancelled Init must complete.");
+        require(!initResult->succeeded()
+                    && initResult->error()->code == ApiErrorCode::Cancelled,
+            "An early-cancelled Init must complete as cancelled.");
+        require(fake::initializations.load() == initializationsBeforeCancel,
+            "An Init cancelled before entry must not enter the device profile.");
+
+        // Single issues the software trigger itself and completes after delivery.
+        const int triggersBeforeSingle = fake::triggers.load();
         // Single completes after the acquisition it armed stops, without a widget.
         bool singleDone = false;
         DeviceConnectionResult singleResult;
@@ -224,6 +342,9 @@ int main(int argc, char** argv)
                     }).error == DeviceConnectionError::None,
             "Single must be admitted on the open connection.");
         require(waitFor([&] { return fake::acquiring; }), "Single must arm the device.");
+        // Owner Q7: Single issues the device's software trigger itself.
+        require(waitFor([&] { return fake::triggers.load() > triggersBeforeSingle; }),
+            "Single must issue exactly the device software trigger it needs.");
         fake::frame(validFrame());
         require(waitFor([&] { return delivered == 1; }), "Single must deliver its converted frame.");
         fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);

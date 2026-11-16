@@ -95,8 +95,13 @@ void HeliotisC4PluginSession::connectController()
                 const auto value = _controller->sourceRuntimeDiagnostics(0);
                 if (value) _widget->setRuntimeDiagnostics({value->grabbing, value->delivered, value->failed});
             }
-            if (!acquiring && _widget && heliotisOperationDiagnosticLog().isDebugEnabled() && _device
-                && _device->isOpened() && !_device->requiresReconnect()) {
+            if (!acquiring && _device && _device->isOpened() && !_device->requiresReconnect()
+                && _controller && _controller->parameterWatchesActive()) {
+                // Descriptor writability is observed from the device, never
+                // cached from the locked state held while acquisition was armed.
+                refreshFeatureTree();
+            } else if (!acquiring && _widget && heliotisOperationDiagnosticLog().isDebugEnabled()
+                && _device && _device->isOpened() && !_device->requiresReconnect()) {
                 refreshFeatureTree();
             }
         });
@@ -282,6 +287,11 @@ bool HeliotisC4PluginSession::stop(Completion completion)
     _acquisitionEndCompletion = std::move(completion);
     requestAcquisitionStop();
     return true;
+}
+
+bool HeliotisC4PluginSession::initialize(Completion completion, std::function<bool()> cancelled)
+{
+    return initializeH8ReferenceProfile(std::move(completion), std::move(cancelled));
 }
 
 void HeliotisC4PluginSession::requestAcquisitionStop()
@@ -548,51 +558,59 @@ bool HeliotisC4PluginSession::requestAcquisitionArm(const bool continuous, Compl
     return true;
 }
 
-void HeliotisC4PluginSession::initializeH8ReferenceProfile()
+bool HeliotisC4PluginSession::initializeH8ReferenceProfile(Completion completion, std::function<bool()> cancelled)
 {
-    // Init is the widget-only explicit motion action; the API has no route for it.
-    if (!_widget || !_device || !_device->isOpened()
+    // The control widget and the declared init tool share this admission and
+    // completion path; neither depends on the other existing.
+    if (!_device || !_device->isOpened()
         || (_controller && _controller->isGrabbing()) || sdkOperationPending()) {
         qWarning().noquote() << "[Heliotis C4] H8 reference-profile initialization ignored because the device is unavailable, active, or busy.";
-        return;
+        return false;
     }
 
     qInfo().noquote() << "[Heliotis C4] Explicit H8 default-profile initialization requested."
                       << "Applying all C4Utility h8SurfSimple component, chunk, trigger, encoder, motion, processing, and illumination defaults."
                       << "StageInit follows the verified encoder and motion defaults and may move the stage."
                       << "Optional geometry or illumination capability failures are warning-only.";
-    _widget->setInitializationPending(true);
+    if (_widget) _widget->setInitializationPending(true);
     _initializationWatcher = std::make_unique<QFutureWatcher<HeliotisInitializationResult>>();
     auto* watcher = _initializationWatcher.get();
     QObject::connect(watcher, &QFutureWatcher<HeliotisInitializationResult>::finished, this,
-        [this, watcher]() {
+        [this, watcher, completion = std::move(completion)]() mutable {
             if (!_initializationWatcher || _initializationWatcher.get() != watcher) return;
             const HeliotisInitializationResult result = watcher->result();
             _initializationWatcher.reset();
-            if (!_widget) return;
 
-            refreshFeatureTree([this, result](const bool featuresRefreshed) {
-                if (!_widget) return;
+            refreshFeatureTree([this, result, completion = std::move(completion)](const bool featuresRefreshed) mutable {
+                if (_widget) {
+                    if (!result.initialized) {
+                        _widget->setInitializationError(result.error);
+                    } else {
+                        _widget->setInitializationPending(false);
+                        _widget->setAcquisitionAvailable(true);
+                    }
+                }
                 if (!result.initialized) {
                     qWarning().noquote() << "[Heliotis C4] Explicit H8 default-profile initialization failed; connection and capture controls are preserved:"
                                          << result.error << "elapsedMs=" << result.elapsedMs;
-                    _widget->setInitializationError(result.error);
-                    return;
+                } else {
+                    qInfo().noquote() << "[Heliotis C4] Explicit H8 default-profile initialization completed; acquisition remains available."
+                                      << "featureRefresh=" << featuresRefreshed
+                                      << "elapsedMs=" << result.elapsedMs;
                 }
-
-                _widget->setInitializationPending(false);
-                _widget->setAcquisitionAvailable(true);
-                qInfo().noquote() << "[Heliotis C4] Explicit H8 default-profile initialization completed; acquisition remains available."
-                                  << "featureRefresh=" << featuresRefreshed
-                                  << "elapsedMs=" << result.elapsedMs;
+                if (completion) completion(result.initialized ? QString{} : result.error);
             });
         });
-    watcher->setFuture(QtConcurrent::run([device = _device.get()]() {
+    watcher->setFuture(QtConcurrent::run([device = _device.get(), cancelled = std::move(cancelled)]() {
         const auto started = std::chrono::steady_clock::now();
         std::string error;
         bool initialized = false;
         try {
-            initialized = device && device->configureH8SurfaceExample(&error);
+            if (cancelled && cancelled()) {
+                error = "H8 reference-profile initialization was cancelled before it started.";
+            } else {
+                initialized = device && device->configureH8SurfaceExample(&error, cancelled);
+            }
         } catch (const std::exception& exception) {
             error = exception.what();
         } catch (...) {
@@ -608,6 +626,7 @@ void HeliotisC4PluginSession::initializeH8ReferenceProfile()
             static_cast<qint64>(elapsed.count()),
         };
     }));
+    return true;
 }
 
 bool HeliotisC4PluginSession::runFeatureOperation(
@@ -722,6 +741,9 @@ void HeliotisC4PluginSession::refreshFeatureTree(std::function<void(bool)> compl
                 if (_widget) _widget->setFeatureError(result.error);
             } else {
                 if (_widget) _widget->setFeatures(result.features);
+                // One observation feeds both the widget and API subscriptions;
+                // consumers never depend on a visible widget.
+                if (_controller) _controller->publishParameterSnapshot(result.features);
                 qInfo().noquote() << "[Heliotis C4] Feature tree refreshed with"
                                   << result.features.size() << "feature(s) in"
                                   << result.elapsedMs << "ms.";

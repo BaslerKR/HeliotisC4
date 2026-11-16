@@ -5,6 +5,7 @@
 #include "DeviceRuntime/Contract/DeviceParameterControl.h"
 #include "DeviceRuntime/Contract/FrameStorage.h"
 #include "HeliotisC4System.h"
+#include "Tools/ToolProvider.h"
 
 #include <QFuture>
 #include <QString>
@@ -57,14 +58,26 @@ public:
     virtual bool arm(bool continuous, Completion completion) = 0;
     /** Requests a non-blocking stop and completes when acquisition has stopped. */
     virtual bool stop(Completion completion) = 0;
+    /**
+     * Applies the complete H8 reference profile and runs StageInit.
+     *
+     * @param completion Receives the terminal result or cancellation error.
+     * @param cancelled Optional predicate for a cancellation requested before
+     *        the worker enters the device profile; it must remain valid until
+     *        completion.
+     * @note This is the one path used by the control widget and the declared
+     *       `heliotis-c4.init` tool, so the GUI and API cannot diverge. The
+     *       caller confirms physical stage clearance before invoking it.
+     */
+    virtual bool initialize(Completion completion, std::function<bool()> cancelled = {}) = 0;
 };
 
 /** Adapts worker-owned Heliotis frames, status, tools and parameters into the host contracts. */
 class HeliotisC4SourceController final
     : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl,
-      public IFrameStorageClient {
+      public IFrameStorageClient, public IToolProvider, public IToolExecution {
     Q_OBJECT
-    Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient)
+    Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient IToolProvider IToolExecution)
 
 public:
     void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
@@ -129,6 +142,33 @@ public:
     DeviceParameterResult requestExecuteParameter(DeviceParameterTarget target,
                                                   std::optional<std::uint64_t> expectedRevision,
                                                   IDeviceParameterControl::Completion completion) override;
+    /** Subscribes to revision-stamped descriptor snapshots and deltas for one connection. */
+    DeviceParameterResult requestParameterChanges(std::string connectionId,
+        std::string subscriptionId, ChangeListener delivery) override;
+    /** Stops one subscription and completes after its queued delivery is discarded. */
+    DeviceParameterResult releaseParameterChanges(std::string connectionId,
+        std::string subscriptionId, IDeviceParameterControl::Completion completion) override;
+
+    /** Declares the module-init action alongside the host lifecycle tools. */
+    QList<ToolDescriptor> toolDescriptors() const override;
+    ApiResult<void> requestTool(const QString& name, int version, QJsonObject arguments,
+                                IToolProvider::Completion completion) override;
+    ApiResult<void> requestToolWithProgress(const QString& callId, const QString& name, int version,
+                                            QJsonObject arguments, IToolExecution::Progress progress,
+                                            IToolProvider::Completion completion) override;
+    ApiResult<void> cancelTool(const QString& callId) override;
+
+    /**
+     * Publishes the observed feature tree after a connect, write, stop or refresh.
+     *
+     * @param features Complete SDK feature snapshot already read off the GUI thread.
+     * @note Active subscriptions receive one bounded delta change; a delta that
+     *       cannot fit or that overflows the bounded queue becomes an explicit
+     *       resync snapshot instead of a silent gap.
+     */
+    void publishParameterSnapshot(const heliotis::HeliotisC4::FeatureList& features);
+    /** Reports whether any parameter change subscription currently exists. */
+    [[nodiscard]] bool parameterWatchesActive() const;
 
 signals:
     /** Reports that one continuous SDK frame was received and the next software trigger may be queued. */
@@ -144,6 +184,8 @@ signals:
 
 private:
     struct ToolCall;
+    struct InitToolCall;
+    struct ParameterWatch;
 
     /** Applies one controller mode and reports synchronous arm acceptance. */
     [[nodiscard]] bool startAcquisition(heliotis::HeliotisC4Device::AcquisitionMode mode);
@@ -167,6 +209,21 @@ private:
     /** Converts one feature snapshot entry and assigns its observation revision. */
     [[nodiscard]] std::optional<DeviceParameterDescriptor> observeParameter(
         const heliotis::FeatureDescriptor& feature, const std::string& connection);
+    /** Returns the admission code and reason when the module init action is unavailable. */
+    [[nodiscard]] std::optional<std::pair<ApiErrorCode, QString>> initUnavailable() const;
+    /** Builds the declared init descriptor with its current availability. */
+    [[nodiscard]] ToolDescriptor initToolDescriptor() const;
+    /** Completes one accepted init call exactly once from the session result. */
+    void finishInitTool(const std::shared_ptr<InitToolCall>& call, const QString& error);
+    /** Queues one change for a watch and schedules the bounded drain. */
+    void enqueueParameterChange(const std::shared_ptr<ParameterWatch>& watch,
+                                DeviceParameterChange change, std::string overflowReason);
+    /** Schedules one coalesced delivery pass on the controller thread. */
+    void scheduleParameterDrain();
+    /** Delivers queued changes; the listener may run on this thread only. */
+    void drainParameterChanges();
+    /** Ends every subscription with one terminal error and drops its queue. */
+    void terminateParameterWatches(const QString& message);
 
     heliotis::HeliotisC4Device* _device = nullptr;
     FrameConsumer _frameConsumer;
@@ -182,10 +239,14 @@ private:
 
     HeliotisC4ControlBackend* _backend = nullptr;
     std::shared_ptr<ToolCall> _toolCall;
+    std::shared_ptr<InitToolCall> _initToolCall;
     std::atomic<bool> _parameterBusy{false};
     QFuture<void> _parameterWork;
     mutable std::mutex _stateMutex;
     QString _connectionId;
     std::map<std::string, DeviceParameterDescriptor> _observations;
     std::uint64_t _parameterRevision = 0;
+    mutable std::mutex _watchMutex;
+    std::map<std::string, std::shared_ptr<ParameterWatch>> _parameterWatches;
+    bool _parameterDrainScheduled = false;
 };

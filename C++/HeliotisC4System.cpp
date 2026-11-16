@@ -1419,7 +1419,8 @@ std::string HeliotisC4Device::connectedDeviceName() const
     return _connectedDeviceName;
 }
 
-bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
+bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage,
+    const std::function<bool()>& externallyCancelled)
 {
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
@@ -1465,9 +1466,11 @@ bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
 
     bool configured = false;
     try {
-        configured = [this, errorMessage]() {
-    const auto cancelled = [this, errorMessage](const char* phase) {
-        if (!_cancelInitializationRequested.load()) return false;
+        configured = [this, errorMessage, &externallyCancelled]() {
+    const auto cancelled = [this, errorMessage, &externallyCancelled](const char* phase) {
+        const bool requested = _cancelInitializationRequested.load()
+            || (externallyCancelled && externallyCancelled());
+        if (!requested) return false;
         const std::string message = std::string("H8 reference-profile initialization was cancelled during ")
             + phase + ".";
         if (errorMessage) *errorMessage = message;

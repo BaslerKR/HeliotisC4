@@ -84,6 +84,10 @@ public:
      * preserved.
      *
      * @param errorMessage Optional failure detail.
+     * @param externallyCancelled Optional caller cancellation predicate checked
+     *        before every profile or StageInit step. It is consulted in addition
+     *        to requestCancelInitialization(), so a cancellation requested before
+     *        this call acquires initialization ownership still stops the work.
      * @return True when every required group succeeds; optional capability
      *         failures are treated as compatible.
      * @note The caller must establish stage clearance before invoking this method.
@@ -92,7 +96,8 @@ public:
      *       write failures so logs expose all reachable problems. StageInit is
      *       skipped when required encoder or motion defaults are incomplete.
      */
-    [[nodiscard]] bool configureH8SurfaceExample(std::string* errorMessage = nullptr);
+    [[nodiscard]] bool configureH8SurfaceExample(std::string* errorMessage = nullptr,
+        const std::function<bool()>& externallyCancelled = {});
     /** Requests cancellation of a running H8 profile or motion initialization. */
     void requestCancelInitialization() noexcept;
     /**

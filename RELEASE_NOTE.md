@@ -4,6 +4,12 @@
 
 - Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`. The temporary widget library resolves Qt Widgets and Resources itself until U2 removes it.
 
+- Declare `heliotis-c4.init` as a module action with a semantic presentation, a typed confirm prompt carrying the stage-move warning, one progress step, cooperative cancellation through the device initialization request (including a request accepted before the worker starts), and an explicit refusal while acquisition is armed or no device is connected. The widget Init button and the tool call use the same session path.
+
+- Publish the parameter category tree, visibility and preferred editor in every descriptor, and implement bounded snapshot-plus-delta change subscriptions with an explicit resync snapshot on overflow and a terminal change on disconnect. Post-stop re-observation publishes the device's current writability instead of a cached locked state.
+
+- Issue the device software trigger inside `requestSingle` when the armed route needs one, so the API Single action completes after a delivered frame without a separate trigger call.
+
 - Host the package in Playground's device worker. Discovery, connect, Single/Live arm, stop and disconnect complete without the Qt widget; the control widget mirrors the same session flows when it exists.
 
 - Publish the observed inactive acquisition state when an arm is refused, so a worker Host replaces its optimistic `source.start` with the module's observation.

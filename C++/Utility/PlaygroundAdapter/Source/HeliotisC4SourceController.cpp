@@ -6,6 +6,9 @@
 
 #include <QByteArray>
 #include <QDebug>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QMetaObject>
 #include <QPointer>
 #include <QThread>
@@ -20,6 +23,48 @@
 #include <stdexcept>
 #include <tuple>
 #include <utility>
+#include <algorithm>
+
+/** One accepted `heliotis-c4.init` call; delivery happens exactly once. */
+struct HeliotisC4SourceController::InitToolCall {
+    QString callId;
+    IToolProvider::Completion completion;
+    std::atomic<bool> cancelled{false};
+    std::atomic<bool> delivered{false};
+
+    /** Delivers the single completion unless it already ran or the session dropped it. */
+    void deliver(ApiResult<QJsonValue> result) noexcept
+    {
+        if (delivered.exchange(true)) return;
+        try {
+            if (completion) completion(std::move(result));
+        } catch (...) {
+            qWarning().noquote() << "[Heliotis C4] Init tool consumer callback threw.";
+        }
+    }
+};
+
+/** One bounded parameter change subscription and its undelivered queue. */
+struct HeliotisC4SourceController::ParameterWatch {
+    std::string connectionId;
+    std::string subscriptionId;
+    IDeviceParameterControl::ChangeListener delivery;
+    DeviceParameterChangeQueue queue{deviceParameterChangeQueueLimit};
+    std::map<std::string, DeviceParameterDescriptor> delivered;
+    std::uint64_t sequence = 0;
+    std::atomic<bool> active{true};
+
+    /** Builds the next change of one kind with this subscription's identities. */
+    DeviceParameterChange change(DeviceParameterChangeKind kind) const
+    {
+        DeviceParameterChange value;
+        value.kind = kind;
+        value.connectionId = connectionId;
+        value.subscriptionId = subscriptionId;
+        value.sequence = sequence + 1;
+        return value;
+    }
+};
 
 HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Device* device, QObject* parent)
     : AbstractSourceController(parent),
@@ -35,6 +80,7 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
                 _connectionId = active ? QUuid::createUuid().toString(QUuid::WithoutBraces) : QString();
                 _observations.clear();
             }
+            if (!active) terminateParameterWatches(QStringLiteral("Device is disconnected."));
             QMetaObject::invokeMethod(this, [this] { emit controlChanged(); }, Qt::QueuedConnection);
             return;
         }
@@ -96,6 +142,13 @@ void HeliotisC4SourceController::setFrameStorageProvider(std::shared_ptr<IFrameS
 HeliotisC4SourceController::~HeliotisC4SourceController()
 {
     setControlBackend(nullptr);
+    {
+        // No listener runs after controller destruction; the transport must
+        // release its subscriptions before this point.
+        std::lock_guard<std::mutex> lock(_watchMutex);
+        for (const auto& entry : _parameterWatches) entry.second->active.store(false);
+        _parameterWatches.clear();
+    }
     // Accepted parameter work completes before the device facade is released.
     _parameterWork.waitForFinished();
     stop();
@@ -216,6 +269,7 @@ void HeliotisC4SourceController::handleFrame(GraphicsFrame&& payload, const unsi
 struct HeliotisC4SourceController::ToolCall {
     IDeviceConnectionControl::Completion completion;
     IDeviceConnectionControl::TargetsCompletion targets;
+    std::shared_ptr<QMetaObject::Connection> triggerConnection;
     std::atomic<bool> delivered{false};
 
     /** Delivers a state result, or a target catalog for discovery, exactly once. */
@@ -244,6 +298,51 @@ using ParameterError = DeviceParameterError;
 using ParameterKind = DeviceParameterKind;
 
 constexpr const char* kParameterScope = "Device";
+constexpr auto kInitToolName = "heliotis-c4.init";
+constexpr int kInitToolVersion = 1;
+constexpr auto kInitConfirmationArgument = "confirmed";
+constexpr auto kInitConfirmMessage = "StageInit can move the stage. Confirm that the cell is clear.";
+
+/** Splits the SDK category text into the bounded tree path used by the API. */
+std::vector<std::string> categorySegments(const std::string& path)
+{
+    std::vector<std::string> segments;
+    std::size_t begin = 0;
+    while (begin <= path.size() && segments.size() < deviceParameterCategoryDepthLimit) {
+        const std::size_t end = path.find('/', begin);
+        const std::size_t length = end == std::string::npos ? path.size() - begin : end - begin;
+        std::string segment = path.substr(begin, length);
+        // Trim whitespace and drop empty segments; the tree contract rejects both.
+        const auto first = segment.find_first_not_of(" \t\r\n");
+        const auto last = segment.find_last_not_of(" \t\r\n");
+        segment = first == std::string::npos ? std::string{}
+            : segment.substr(first, last - first + 1);
+        if (segment.size() > deviceParameterCategorySegmentLimit) {
+            std::size_t cut = deviceParameterCategorySegmentLimit;
+            while (cut > 0 && (static_cast<unsigned char>(segment[cut]) & 0xC0U) == 0x80U) --cut;
+            segment.resize(cut);
+        }
+        if (!segment.empty() && segment.find('\0') == std::string::npos)
+            segments.push_back(std::move(segment));
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return segments;
+}
+
+/** Derives the preferred editor from the feature kind. */
+DeviceParameterRepresentation representationFor(const ParameterKind kind)
+{
+    switch (kind) {
+    case ParameterKind::Integer:
+    case ParameterKind::Float: return DeviceParameterRepresentation::Number;
+    case ParameterKind::Boolean: return DeviceParameterRepresentation::Toggle;
+    case ParameterKind::Enumeration: return DeviceParameterRepresentation::Choice;
+    case ParameterKind::String: return DeviceParameterRepresentation::Text;
+    case ParameterKind::Command: return DeviceParameterRepresentation::Automatic;
+    }
+    return DeviceParameterRepresentation::Automatic;
+}
 
 /** Encodes the exact discovery identity that `HeliotisC4Device::open()` re-verifies. */
 QString targetId(const heliotis::DeviceDescriptor& device)
@@ -332,7 +431,8 @@ bool sameObservation(const DeviceParameterDescriptor& a, const DeviceParameterDe
         return std::tie(d.kind, d.displayName, d.description, d.unit, d.available, d.readable,
             d.writable, d.unavailableReason, d.observationError, d.value, d.integerMinimum,
             d.integerMaximum, d.integerIncrement, d.floatMinimum, d.floatMaximum,
-            d.floatIncrement, d.enumEntries);
+            d.floatIncrement, d.enumEntries, d.categoryPath, d.visibility, d.representation,
+            d.selectorRelations, d.producerShared);
     };
     return fields(a) == fields(b);
 }
@@ -374,11 +474,18 @@ void HeliotisC4SourceController::setControlBackend(HeliotisC4ControlBackend* bac
                        DeviceConnectionEffect::Unknown});
         emit controlChanged();
     }
+    if (!backend && _initToolCall) {
+        const auto call = std::exchange(_initToolCall, {});
+        call->deliver(ApiResult<QJsonValue>::failure(ApiErrorCode::Unavailable,
+            QStringLiteral("The Heliotis session closed before Init completed."),
+            QJsonObject{{QStringLiteral("effect"), QStringLiteral("unknown")}}));
+        emit controlChanged();
+    }
 }
 
 bool HeliotisC4SourceController::externalBusy() const noexcept
 {
-    return _parameterBusy.load() || _toolCall != nullptr;
+    return _parameterBusy.load() || _toolCall != nullptr || _initToolCall != nullptr;
 }
 
 QString HeliotisC4SourceController::connectionId() const
@@ -392,10 +499,22 @@ DeviceConnectionState HeliotisC4SourceController::connectionState() const
     const QString connection = connectionId();
     const bool connected = _device && _device->isOpened() && !connection.isEmpty();
     const auto target = connected && _backend ? _backend->connectedTarget() : std::nullopt;
-    return {connected, connected && _isGrabbing.load() && _isContinuous.load(),
+    const bool reconnectRequired = connected && _device->requiresReconnect();
+    DeviceConnectionState state{connected, connected && _isGrabbing.load() && _isContinuous.load(),
             connected ? connection.toStdString() : std::string(),
             target ? targetId(*target).toStdString() : std::string(),
             target ? target->deviceName : std::string(), _deliveredFrames.load()};
+    if (reconnectRequired)
+        state.error = "The previous acquisition did not stop cleanly. Disconnect and reconnect before another acquisition or Init.";
+    if (connected) {
+        const DeviceConnectionAvailability ready{true, {}};
+        const DeviceConnectionAvailability acquire = reconnectRequired
+            ? DeviceConnectionAvailability{false,
+                "Reconnect after the failed acquisition stop before arming acquisition."}
+            : ready;
+        state.capabilities = DeviceConnectionAvailabilitySet{ready, ready, ready, ready, acquire, acquire};
+    }
+    return state;
 }
 
 DeviceConnectionCapabilities HeliotisC4SourceController::connectionCapabilities() const
@@ -517,14 +636,47 @@ DeviceConnectionResult HeliotisC4SourceController::admitLifecycle(const Lifecycl
     emit controlChanged();
     const std::uint64_t framesBefore = _deliveredFrames.load();
     const QPointer<HeliotisC4SourceController> guard(this);
-    auto done = [guard, call, operation, framesBefore](const QString& error) {
-        if (guard) guard->finishTool(call, operation, error, framesBefore);
+    // Single owns its software trigger: the device needs one after arming, and
+    // the API call must complete only after the delivered frame (owner Q7).
+    auto triggerFailure = std::make_shared<QString>();
+    auto done = [guard, call, operation, framesBefore, triggerFailure](const QString& error) {
+        QString resolved = error;
+        if (resolved.isEmpty() && !triggerFailure->isEmpty()) resolved = *triggerFailure;
+        if (guard) guard->finishTool(call, operation, resolved, framesBefore);
     };
     bool admitted = false;
     if (operation == Lifecycle::Discover) admitted = _backend->discover(done);
     else if (operation == Lifecycle::Connect) admitted = _backend->connectTarget(targetIndex, done);
     else if (operation == Lifecycle::Disconnect) admitted = _backend->disconnect(done);
-    else if (operation == Lifecycle::Single) admitted = _backend->arm(false, done);
+    else if (operation == Lifecycle::Single) {
+        admitted = _backend->arm(false, done);
+        if (admitted) {
+            auto triggered = std::make_shared<bool>(false);
+            auto issueTrigger = [this, triggered, triggerFailure]() {
+                if (*triggered) return;
+                *triggered = true;
+                if (!_device || !_device->isSoftwareTriggeredAcquisition()) return;
+                std::string triggerError;
+                if (_device->triggerSoftware(&triggerError)) return;
+                *triggerFailure = triggerError.empty()
+                    ? QStringLiteral("The Heliotis software trigger was refused.")
+                    : QString::fromStdString(triggerError);
+                _device->requestStopAcquisition();
+            };
+            auto connection = std::make_shared<QMetaObject::Connection>();
+            *connection = QObject::connect(this, &HeliotisC4SourceController::acquisitionStateChanged, this,
+                [this, call, connection, issueTrigger](const bool active, const bool, const bool) {
+                    if (!active) return;
+                    QObject::disconnect(*connection);
+                    if (_toolCall != call) return;
+                    issueTrigger();
+                });
+            call->triggerConnection = connection;
+            // The arm may already have reported active while this handler was
+            // being installed; the observed device state is authoritative.
+            if (_isGrabbing.load()) issueTrigger();
+        }
+    }
     else if (operation == Lifecycle::LiveStart) admitted = _backend->arm(true, done);
     else admitted = _backend->stop(done);
     if (!admitted) {
@@ -540,6 +692,10 @@ void HeliotisC4SourceController::finishTool(const std::shared_ptr<ToolCall>& cal
 {
     Q_ASSERT(QThread::currentThread() == thread());
     if (_toolCall == call) _toolCall.reset();
+    if (call->triggerConnection) {
+        QObject::disconnect(*call->triggerConnection);
+        call->triggerConnection.reset();
+    }
     DeviceConnectionResult result{{}, {}, DeviceConnectionEffect::Applied, connectionState()};
     if (!error.isEmpty()) {
         // Discovery keeps its previous snapshot; device commands leave an uncertain effect.
@@ -553,6 +709,164 @@ void HeliotisC4SourceController::finishTool(const std::shared_ptr<ToolCall>& cal
     emit controlChanged();
     call->deliver(std::move(result), operation == Lifecycle::Discover && _backend ? _backend->targets()
                                                                                 : std::vector<heliotis::DeviceDescriptor>{});
+}
+
+// --- Declared module actions ---------------------------------------------
+
+std::optional<std::pair<ApiErrorCode, QString>> HeliotisC4SourceController::initUnavailable() const
+{
+    if (!_backend)
+        return std::pair{ApiErrorCode::Unavailable, QStringLiteral("Device control has no session.")};
+    if (!_device || !_device->isOpened() || connectionId().isEmpty())
+        return std::pair{ApiErrorCode::Unavailable, QStringLiteral("Connect a device before Init.")};
+    if (_device->requiresReconnect())
+        return std::pair{ApiErrorCode::Unavailable,
+            QStringLiteral("Reconnect after the failed acquisition stop before Init.")};
+    if (_isGrabbing.load())
+        return std::pair{ApiErrorCode::Busy, QStringLiteral("Stop the active acquisition before Init.")};
+    if (_parameterBusy.load() || _initToolCall || _backend->controlBusy())
+        return std::pair{ApiErrorCode::Busy, QStringLiteral("Another Heliotis operation is active.")};
+    return std::nullopt;
+}
+
+ToolDescriptor HeliotisC4SourceController::initToolDescriptor() const
+{
+    ToolDescriptor descriptor;
+    descriptor.name = QString::fromLatin1(kInitToolName);
+    descriptor.version = kInitToolVersion;
+    descriptor.title = QStringLiteral("Initialize H8");
+    descriptor.description = QStringLiteral(
+        "Apply the complete C4Utility H8 surface capture profile and run StageInit. "
+        "This can move the stage; the call requires an explicit confirm. "
+        "It is refused while acquisition is armed, while another operation is active, "
+        "or before a device is connected. The same call path backs the control widget Init button.");
+    descriptor.effect = ToolEffect::Device;
+    descriptor.egress = ToolEgress::Metadata;
+    descriptor.inputSchema = QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("properties"), QJsonObject{
+            {QString::fromLatin1(kInitConfirmationArgument), QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("boolean")},
+                {QStringLiteral("format"), QStringLiteral("confirm")},
+                {QStringLiteral("description"), QString::fromLatin1(kInitConfirmMessage)}}},
+        }},
+        {QStringLiteral("additionalProperties"), false},
+    };
+    descriptor.outputSchema = QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("properties"), QJsonObject{
+            {QStringLiteral("initialized"), QJsonObject{{QStringLiteral("type"), QStringLiteral("boolean")}}},
+        }},
+        {QStringLiteral("required"), QJsonArray{QStringLiteral("initialized")}},
+        {QStringLiteral("additionalProperties"), false},
+    };
+    descriptor.presentation = {QString::fromLatin1(kInitToolName), QStringLiteral("setting"),
+        QStringLiteral("device"), 35};
+    descriptor.cancellable = true;
+    const auto unavailable = initUnavailable();
+    descriptor.available = !unavailable.has_value();
+    descriptor.unavailableReason = unavailable ? unavailable->second : QString{};
+    return descriptor;
+}
+
+QList<ToolDescriptor> HeliotisC4SourceController::toolDescriptors() const
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    return {initToolDescriptor()};
+}
+
+ApiResult<void> HeliotisC4SourceController::requestTool(const QString& name, const int version,
+                                                       QJsonObject arguments, IToolProvider::Completion completion)
+{
+    return requestToolWithProgress({}, name, version, std::move(arguments), {}, std::move(completion));
+}
+
+ApiResult<void> HeliotisC4SourceController::requestToolWithProgress(const QString& callId, const QString& name,
+    const int version, QJsonObject arguments, IToolExecution::Progress progress,
+    IToolProvider::Completion completion)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (name != QLatin1String(kInitToolName))
+        return ApiResult<void>::failure(ApiErrorCode::NotFound, QStringLiteral("The Heliotis module does not declare this tool."));
+    if (version != kInitToolVersion)
+        return ApiResult<void>::failure(ApiErrorCode::Unsupported, QStringLiteral("The Heliotis init tool version is unsupported."));
+    if (!completion)
+        return ApiResult<void>::failure(ApiErrorCode::InvalidArgument, QStringLiteral("A copied completion is required."));
+    const auto confirmation = arguments.value(QString::fromLatin1(kInitConfirmationArgument));
+    if (!confirmation.isUndefined() && !confirmation.isBool())
+        return ApiResult<void>::failure(ApiErrorCode::InvalidArgument,
+            QStringLiteral("The Init confirmation must be a boolean."));
+    // A retry with the accepted call identity is a conflict even while the
+    // first call is active; a different identity is refused as busy below.
+    if (!callId.isEmpty() && _initToolCall && _initToolCall->callId == callId)
+        return ApiResult<void>::failure(ApiErrorCode::Conflict,
+            QStringLiteral("The same Init call identity is already active."));
+    // Availability is checked before the prompt so an armed or absent device
+    // is refused without asking the operator to confirm anything.
+    const auto unavailable = initUnavailable();
+    if (unavailable)
+        return ApiResult<void>::failure(unavailable->first, unavailable->second);
+    if (!confirmation.toBool()) {
+        // The call made no changes; the Host renders the prompt and retries.
+        completion(argumentRequiredFailure(QString::fromLatin1(kInitConfirmationArgument),
+            QStringLiteral("confirm"), QString::fromLatin1(kInitConfirmMessage)));
+        return ApiResult<void>::success();
+    }
+    if (!_backend)
+        return ApiResult<void>::failure(ApiErrorCode::Unavailable, QStringLiteral("Device control has no session."));
+
+    auto call = std::make_shared<InitToolCall>();
+    call->callId = callId;
+    call->completion = std::move(completion);
+    _initToolCall = call;
+    emit controlChanged();
+    const QPointer<HeliotisC4SourceController> guard(this);
+    auto done = [guard, call](const QString& error) {
+        if (guard) guard->finishInitTool(call, error);
+    };
+    if (!_backend->initialize(done, [call] { return call->cancelled.load(); })) {
+        if (_initToolCall == call) _initToolCall.reset();
+        emit controlChanged();
+        return ApiResult<void>::failure(ApiErrorCode::Busy,
+            QStringLiteral("The Heliotis session did not admit Init."));
+    }
+    if (progress) {
+        progress(ApiProgress{QStringLiteral("applying"),
+            QStringLiteral("Applying the H8 defaults; StageInit can move the stage."), 0, 0, true});
+    }
+    return ApiResult<void>::success();
+}
+
+ApiResult<void> HeliotisC4SourceController::cancelTool(const QString& callId)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (callId.isEmpty() || !validApiIdentifier(callId))
+        return ApiResult<void>::failure(ApiErrorCode::InvalidArgument,
+            QStringLiteral("The accepted-call identity is invalid."));
+    if (!_initToolCall || _initToolCall->callId != callId)
+        return ApiResult<void>::failure(ApiErrorCode::NotFound,
+            QStringLiteral("The Heliotis session holds no accepted Init call with that identity."));
+    if (!_initToolCall->cancelled.exchange(true) && _device)
+        _device->requestCancelInitialization();
+    return ApiResult<void>::success();
+}
+
+void HeliotisC4SourceController::finishInitTool(const std::shared_ptr<InitToolCall>& call, const QString& error)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (_initToolCall == call) _initToolCall.reset();
+    emit controlChanged();
+    if (error.isEmpty()) {
+        call->deliver(ApiResult<QJsonValue>::success(QJsonObject{{QStringLiteral("initialized"), true}}));
+        return;
+    }
+    if (call->cancelled.load()) {
+        call->deliver(ApiResult<QJsonValue>::failure(ApiErrorCode::Cancelled, error,
+            QJsonObject{{QStringLiteral("effect"), QStringLiteral("unknown")}}));
+        return;
+    }
+    call->deliver(ApiResult<QJsonValue>::failure(ApiErrorCode::Internal, error,
+        QJsonObject{{QStringLiteral("effect"), QStringLiteral("unknown")}}));
 }
 
 // --- Device parameters ---------------------------------------------------
@@ -605,6 +919,16 @@ std::optional<DeviceParameterDescriptor> HeliotisC4SourceController::observePara
     result.floatMaximum = feature.floatMaximum;
     result.floatIncrement = feature.floatIncrement;
     if (*kind == ParameterKind::Enumeration) result.enumEntries = feature.enumEntries;
+    // The SDK-neutral feature contract exposes one category text; the API tree
+    // path is its slash-separated form, bounded to the contract limits.
+    result.categoryPath = categorySegments(feature.categoryPath);
+    result.representation = representationFor(*kind);
+    result.visibility = DeviceParameterVisibility::Primary;
+    // C4 selects and refreshes dependent features through its SDK node map; the
+    // neutral feature contract has no selector identity, so the consumer sees
+    // structural changes through revisioned snapshots and deltas instead.
+    result.selectorRelations.clear();
+    result.producerShared = false;
 
     std::lock_guard<std::mutex> lock(_stateMutex);
     const auto key = connection + "/" + kParameterScope + "/" + feature.displayName;
@@ -750,6 +1074,11 @@ DeviceParameterResult HeliotisC4SourceController::requestParameter(
                                 result.effect = DeviceParameterEffect::Applied;
                                 std::string readbackError;
                                 const auto readback = _device->readFeatures(&readbackError);
+                                if (readbackError.empty()) {
+                                    // A selector write can change other features;
+                                    // publish the complete re-observed tree.
+                                    publishParameterSnapshot(readback);
+                                }
                                 if (const auto* observed = readbackError.empty()
                                         ? findFeature(readback, target.name) : nullptr) {
                                     result.descriptor = observeParameter(*observed, target.connectionId);
@@ -783,6 +1112,311 @@ DeviceParameterResult HeliotisC4SourceController::requestParameter(
         completeParameter(completion, std::move(result));
     });
     return {};
+}
+
+// --- Parameter change subscriptions --------------------------------------
+
+bool HeliotisC4SourceController::parameterWatchesActive() const
+{
+    std::lock_guard<std::mutex> lock(_watchMutex);
+    return !_parameterWatches.empty();
+}
+
+void HeliotisC4SourceController::scheduleParameterDrain()
+{
+    {
+        std::lock_guard<std::mutex> lock(_watchMutex);
+        if (_parameterDrainScheduled) return;
+        _parameterDrainScheduled = true;
+    }
+    QMetaObject::invokeMethod(this, [this] { drainParameterChanges(); }, Qt::QueuedConnection);
+}
+
+void HeliotisC4SourceController::enqueueParameterChange(const std::shared_ptr<ParameterWatch>& watch,
+    DeviceParameterChange change, std::string overflowReason)
+{
+    if (!watch || !watch->active.load()) return;
+    const bool queued = watch->queue.push(std::move(change));
+    if (!queued) {
+        // The bounded queue refuses the new delta; replace every pending delta
+        // with one explicit resync snapshot so no sequence gap is silent.
+        DeviceParameterChange snapshot;
+        snapshot.kind = DeviceParameterChangeKind::Snapshot;
+        snapshot.connectionId = watch->connectionId;
+        snapshot.subscriptionId = watch->subscriptionId;
+        snapshot.sequence = ++watch->sequence;
+        std::uint64_t revision = 0;
+        for (const auto& entry : watch->delivered) {
+            snapshot.descriptors.push_back(entry.second);
+            revision = std::max(revision, entry.second.revision);
+        }
+        snapshot.revision = revision;
+        watch->queue.replaceWithSnapshot(std::move(snapshot), std::move(overflowReason));
+    }
+}
+
+void HeliotisC4SourceController::drainParameterChanges()
+{
+    {
+        std::lock_guard<std::mutex> lock(_watchMutex);
+        _parameterDrainScheduled = false;
+    }
+    std::vector<std::shared_ptr<ParameterWatch>> watches;
+    {
+        std::lock_guard<std::mutex> lock(_watchMutex);
+        watches.reserve(_parameterWatches.size());
+        for (const auto& entry : _parameterWatches) watches.push_back(entry.second);
+    }
+    for (const auto& watch : watches) {
+        if (!watch->active.load()) continue;
+        while (auto change = watch->queue.pop()) {
+            if (!watch->active.load()) break;
+            if (!watch->delivery) continue;
+            try {
+                watch->delivery(std::move(*change));
+            } catch (...) {
+                qWarning().noquote() << "[Heliotis C4] Parameter change consumer callback threw.";
+                watch->active.store(false);
+                break;
+            }
+        }
+    }
+}
+
+void HeliotisC4SourceController::terminateParameterWatches(const QString& message)
+{
+    std::vector<std::shared_ptr<ParameterWatch>> watches;
+    {
+        std::lock_guard<std::mutex> lock(_watchMutex);
+        watches.reserve(_parameterWatches.size());
+        for (const auto& entry : _parameterWatches) watches.push_back(entry.second);
+        _parameterWatches.clear();
+    }
+    for (const auto& watch : watches) {
+        watch->active.store(false);
+        while (watch->queue.pop()) {}
+        if (!watch->delivery) continue;
+        DeviceParameterChange terminal;
+        terminal.kind = DeviceParameterChangeKind::Delta;
+        terminal.connectionId = watch->connectionId;
+        terminal.subscriptionId = watch->subscriptionId;
+        terminal.sequence = ++watch->sequence;
+        terminal.error = DeviceParameterError::Disconnected;
+        terminal.message = message.left(int(deviceParameterChangeTextLimit)).toStdString();
+        try {
+            watch->delivery(std::move(terminal));
+        } catch (...) {
+            qWarning().noquote() << "[Heliotis C4] Parameter change consumer callback threw.";
+        }
+    }
+}
+
+DeviceParameterResult HeliotisC4SourceController::requestParameterChanges(
+    std::string connectionId, std::string subscriptionId, ChangeListener delivery)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (validateDeviceParameterSubscription(connectionId, subscriptionId) != DeviceParameterError::None
+        || !delivery) {
+        return parameterFailure(ParameterError::InvalidArgument,
+            "The parameter change subscription identity is invalid.");
+    }
+    if (!_backend)
+        return parameterFailure(ParameterError::Unavailable, "Device control has no session.");
+    if (!_device || !_device->isOpened() || this->connectionId().isEmpty())
+        return parameterFailure(ParameterError::Disconnected, "Device is disconnected.");
+    if (connectionId != this->connectionId().toStdString())
+        return parameterFailure(ParameterError::Conflict, "Connection generation is not active.");
+    if (_device->requiresReconnect())
+        return parameterFailure(ParameterError::Unavailable,
+            "Reconnect after the failed acquisition stop.");
+    if (_isGrabbing.load())
+        return parameterFailure(ParameterError::Busy,
+            "Parameter observation is unavailable while acquisition is armed.");
+    if (_parameterBusy.load() || _toolCall || _initToolCall
+        || (_backend && _backend->controlBusy())) {
+        return parameterFailure(ParameterError::Busy, "A GUI or API control operation is active.");
+    }
+    auto watch = std::make_shared<ParameterWatch>();
+    watch->connectionId = connectionId;
+    watch->subscriptionId = subscriptionId;
+    watch->delivery = std::move(delivery);
+    {
+        std::lock_guard<std::mutex> lock(_watchMutex);
+        if (_parameterWatches.count(subscriptionId))
+            return parameterFailure(ParameterError::Busy,
+                "The parameter change subscription is already active.");
+        if (_parameterWatches.size() >= deviceParameterSubscriptionLimit)
+            return parameterFailure(ParameterError::Busy,
+                "The parameter change subscription bound is reached.");
+        _parameterWatches.emplace(subscriptionId, watch);
+    }
+
+    _parameterBusy.store(true);
+    emit controlChanged();
+    _parameterWork = QtConcurrent::run([this, watch] {
+        heliotis::HeliotisC4::FeatureList features;
+        QString failure;
+        try {
+            std::string error;
+            features = _device->readFeatures(&error);
+            if (!error.empty()) failure = QString::fromStdString(error);
+        } catch (const std::exception& error) {
+            failure = QString::fromLocal8Bit(error.what());
+        } catch (...) {
+            failure = QStringLiteral("Unexpected Heliotis feature read failure.");
+        }
+        if (!watch->active.load()) {
+            _parameterBusy.store(false);
+            emit controlChanged();
+            return;
+        }
+        if (!failure.isEmpty()) {
+            watch->active.store(false);
+            DeviceParameterChange terminal;
+            terminal.kind = DeviceParameterChangeKind::Delta;
+            terminal.connectionId = watch->connectionId;
+            terminal.subscriptionId = watch->subscriptionId;
+            terminal.sequence = ++watch->sequence;
+            terminal.error = DeviceParameterError::BackendFailure;
+            terminal.message = failure.left(int(deviceParameterChangeTextLimit)).toStdString();
+            try {
+                watch->delivery(std::move(terminal));
+            } catch (...) {
+                qWarning().noquote() << "[Heliotis C4] Parameter change consumer callback threw.";
+            }
+            _parameterBusy.store(false);
+            emit controlChanged();
+            return;
+        }
+        std::vector<DeviceParameterDescriptor> descriptors;
+        std::uint64_t revision = 0;
+        for (const auto& feature : features) {
+            if (auto descriptor = observeParameter(feature, watch->connectionId)) {
+                revision = std::max(revision, descriptor->revision);
+                descriptors.push_back(std::move(*descriptor));
+            }
+        }
+        bool queued = false;
+        {
+            std::lock_guard<std::mutex> lock(_watchMutex);
+            if (!watch->active.load()) {
+                // Subscription was released while the snapshot read ran.
+            } else {
+                watch->delivered.clear();
+                for (const auto& descriptor : descriptors)
+                    watch->delivered[descriptor.target.name] = descriptor;
+                DeviceParameterChange snapshot = watch->change(DeviceParameterChangeKind::Snapshot);
+                watch->sequence = snapshot.sequence;
+                snapshot.revision = revision;
+                snapshot.descriptors = std::move(descriptors);
+                queued = watch->queue.push(std::move(snapshot));
+                if (!queued) {
+                    DeviceParameterChange replacement = watch->change(DeviceParameterChangeKind::Snapshot);
+                    watch->sequence = replacement.sequence;
+                    replacement.revision = revision;
+                    for (const auto& entry : watch->delivered)
+                        replacement.descriptors.push_back(entry.second);
+                    watch->queue.replaceWithSnapshot(std::move(replacement),
+                        "The Heliotis parameter change queue overflowed.");
+                    queued = true;
+                }
+            }
+        }
+        if (queued) scheduleParameterDrain();
+        _parameterBusy.store(false);
+        emit controlChanged();
+    });
+    return {};
+}
+
+DeviceParameterResult HeliotisC4SourceController::releaseParameterChanges(
+    std::string connectionId, std::string subscriptionId, IDeviceParameterControl::Completion completion)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!completion)
+        return parameterFailure(ParameterError::InvalidArgument, "A completion is required.");
+    if (validateDeviceParameterSubscription(connectionId, subscriptionId) != DeviceParameterError::None)
+        return parameterFailure(ParameterError::InvalidArgument,
+            "The parameter change subscription identity is invalid.");
+    std::shared_ptr<ParameterWatch> watch;
+    {
+        std::lock_guard<std::mutex> lock(_watchMutex);
+        const auto found = _parameterWatches.find(subscriptionId);
+        if (found == _parameterWatches.end() || found->second->connectionId != connectionId)
+            return parameterFailure(ParameterError::NotFound,
+                "The parameter change subscription is not active.");
+        watch = found->second;
+        _parameterWatches.erase(found);
+    }
+    watch->active.store(false);
+    while (watch->queue.pop()) {}
+    completeParameter(completion, DeviceParameterResult{});
+    return {};
+}
+
+void HeliotisC4SourceController::publishParameterSnapshot(
+    const heliotis::HeliotisC4::FeatureList& features)
+{
+    const std::string connection = connectionId().toStdString();
+    if (connection.empty()) return;
+    std::vector<DeviceParameterDescriptor> descriptors;
+    std::uint64_t revision = 0;
+    for (const auto& feature : features) {
+        if (auto descriptor = observeParameter(feature, connection)) {
+            revision = std::max(revision, descriptor->revision);
+            descriptors.push_back(std::move(*descriptor));
+        }
+    }
+
+    bool queued = false;
+    {
+        std::lock_guard<std::mutex> lock(_watchMutex);
+        for (auto it = _parameterWatches.cbegin(); it != _parameterWatches.cend(); ++it) {
+            const auto& watch = it->second;
+            if (!watch->active.load() || watch->connectionId != connection) continue;
+            std::vector<DeviceParameterDescriptor> changed;
+            std::vector<DeviceParameterTarget> invalidated;
+            for (const auto& descriptor : descriptors) {
+                const auto previous = watch->delivered.find(descriptor.target.name);
+                if (previous == watch->delivered.end() || !sameObservation(previous->second, descriptor))
+                    changed.push_back(descriptor);
+            }
+            for (const auto& entry : watch->delivered) {
+                const auto current = std::find_if(descriptors.begin(), descriptors.end(),
+                    [&entry](const DeviceParameterDescriptor& descriptor) {
+                        return descriptor.target.name == entry.first;
+                    });
+                if (current == descriptors.end()) invalidated.push_back(entry.second.target);
+            }
+            if (changed.empty() && invalidated.empty()) continue;
+            if (changed.size() > deviceParameterDeltaDescriptorLimit
+                || invalidated.size() > deviceParameterDeltaInvalidationLimit) {
+                DeviceParameterChange snapshot = watch->change(DeviceParameterChangeKind::Snapshot);
+                watch->sequence = snapshot.sequence;
+                snapshot.revision = revision;
+                snapshot.descriptors = descriptors;
+                watch->delivered.clear();
+                for (const auto& descriptor : descriptors)
+                    watch->delivered[descriptor.target.name] = descriptor;
+                enqueueParameterChange(watch, std::move(snapshot),
+                    "The Heliotis parameter change queue overflowed.");
+                queued = true;
+                continue;
+            }
+            DeviceParameterChange delta = watch->change(DeviceParameterChangeKind::Delta);
+            watch->sequence = delta.sequence;
+            delta.revision = revision;
+            delta.descriptors = std::move(changed);
+            delta.invalidated = std::move(invalidated);
+            for (const auto& descriptor : delta.descriptors)
+                watch->delivered[descriptor.target.name] = descriptor;
+            for (const auto& target : delta.invalidated) watch->delivered.erase(target.name);
+            enqueueParameterChange(watch, std::move(delta),
+                "The Heliotis parameter change queue overflowed.");
+            queued = true;
+        }
+    }
+    if (queued) scheduleParameterDrain();
 }
 
 std::optional<SourceRuntimeDiagnostics> HeliotisC4SourceController::sourceRuntimeDiagnostics(unsigned sourceIndex) const

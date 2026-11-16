@@ -36,7 +36,7 @@ The SDK-enabled implementation is currently Windows x64 only because that is the
 
 ## Safety and Ownership
 
-`HeliotisC4Device::open()` and the integrated Qt connection flow preserve the selected device preset: they do not load a user set, apply a capture profile, initialize motion, or move the stage. The explicit Init action calls `configureH8SurfaceExample()` and resets the complete C4Utility h8SurfSimple capture defaults: surface components, chunks, canonical Software/Stage triggers, `EncoderSelector=Camera`, `EncoderInverter=1`, `ScanPosition=-1.4`, `ScanRange=0.5`, `ScanSpeed=5.0`, `GeneralSpeed=10.0`, `ScanMode=Down`, processing, and illumination. `StageInit` runs only after all required encoder and motion defaults are verified. Required groups continue independently for complete diagnostics; optional Scan3d geometry and illumination failures are warning-only. The separate `initializeMotion()` API remains an explicit consumer-owned motion operation; no connection path invokes it. The consumer must establish physical clearance before invoking Init or any direct motion operation.
+`HeliotisC4Device::open()` and the integrated Qt connection flow preserve the selected device preset: they do not load a user set, apply a capture profile, initialize motion, or move the stage. The explicit Init action calls `configureH8SurfaceExample()` and resets the complete C4Utility h8SurfSimple capture defaults: surface components, chunks, canonical Software/Stage triggers, `EncoderSelector=Camera`, `EncoderInverter=1`, `ScanPosition=-1.4`, `ScanRange=0.5`, `ScanSpeed=5.0`, `GeneralSpeed=10.0`, `ScanMode=Down`, processing, and illumination. `StageInit` runs only after all required encoder and motion defaults are verified. Required groups continue independently for complete diagnostics; optional Scan3d geometry and illumination failures are warning-only. The separate `initializeMotion()` API remains an explicit consumer-owned motion operation; no connection path invokes it. The consumer must establish physical clearance before invoking Init or any direct motion operation; the declared `heliotis-c4.init` tool additionally requires its typed confirm argument carrying the stage-move warning.
 
 Every `heliotis::Frame` is copied before the C4 buffer is released. Consumers may retain it independently of the SDK lifetime. `ChunkPartType` and pixel-format metadata are classification hints: missing or unsupported values are recovered through an unambiguous typed data probe when possible, and an uncopyable part is isolated while other safely copied parts remain deliverable. Such parts remain `FramePartKind::Unknown` until a consumer can classify them. Feature writes and commands recheck live type and access information.
 
@@ -82,6 +82,10 @@ target. The presentation target does not install an application theme.
 The Playground source controller exposes the standard connection lifecycle and
 typed parameters through `IDeviceConnectionControl` and `IDeviceParameterControl`
 (Playground declares the canonical `device.*` tools), reusing the session's
-widget-independent flows and the module feature channel. The Qt widget mirrors
+widget-independent flows and the module feature channel. It also declares
+`heliotis-c4.init` with a typed stage-move confirmation, progress and
+cancellation; the widget Init button and the tool call use the same session
+path. Parameter descriptors carry the category tree and a preferred editor, and
+bounded change subscriptions publish snapshots and deltas. The Qt widget mirrors
 that state when it exists; a device worker or API-only session needs no widget.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#application-control-boundary).
