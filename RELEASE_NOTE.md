@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use the shared Resources `deviceCounter` statusbar bubble for live fps telemetry instead of the removed `deviceFps` role; the monospace presentation is unchanged.
+
 - Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`. The temporary widget library resolves Qt Widgets and Resources itself until U2 removes it.
 
 - Host the package in Playground's device worker. Discovery, connect, Single/Live arm, stop and disconnect complete without the Qt widget; the control widget mirrors the same session flows when it exists.

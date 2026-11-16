@@ -129,7 +129,7 @@ void HeliotisC4ControlUi::create(QWidget* owner, const QString& settingsFile, co
     _failedLabel->hide();
     _fpsLabel = new QLabel(owner);
     _fpsLabel->setObjectName(QStringLiteral("HeliotisC4FpsLabel"));
-    _fpsLabel->setProperty("statusRole", QStringLiteral("deviceFps"));
+    _fpsLabel->setProperty("statusRole", QStringLiteral("deviceCounter"));
     _fpsLabel->setAlignment(Qt::AlignCenter);
     _fpsLabel->hide();
     _statusBar->addPermanentWidget(_failedLabel);
