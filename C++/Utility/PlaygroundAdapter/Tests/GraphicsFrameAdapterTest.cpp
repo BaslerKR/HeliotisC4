@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -193,6 +194,8 @@ int main()
 
     // A provided storage function receives the range channels and the image
     // bytes; every range array is borrowed from the block the writer acquired.
+    // Each converted payload takes exactly one acquire: one range block and one
+    // intensity image block for this frame.
     RecordingStorage providedStorage;
     adapter.setFrameStorage(providedStorage.function());
     const auto providedScene = adapter.convertFrame(frame, {});
@@ -359,6 +362,210 @@ int main()
     {
         std::cerr << "An invalid auxiliary part must not hide a valid displayable part.\n";
         return 1;
+    }
+
+    // Every converted field of a range + intensity + confidence frame, with a
+    // non-finite sample in each floating channel to exercise the masks.
+    {
+        heliotis::Frame full;
+        full.sequence = 9;
+        full.frameId = "h8-9";
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        full.parts = {
+            {
+                heliotis::FramePartKind::Range,
+                "Range",
+                "Coord3D_ABC32f",
+                2,
+                2,
+                64,
+                std::vector<double>{1.5, nan, 3.5, 4.5}
+            },
+            {
+                heliotis::FramePartKind::Intensity,
+                "Intensity",
+                "Mono16",
+                2,
+                2,
+                16,
+                std::vector<double>{5.0, nan, 15.0, 20.0}
+            },
+            {
+                heliotis::FramePartKind::Confidence,
+                "Confidence",
+                "Confidence32f",
+                2,
+                2,
+                32,
+                std::vector<std::uint16_t>{1U, 2U, 3U, 4U}
+            }
+        };
+        full.scan3dGeometry = heliotis::Scan3dGeometry{
+            "RectifiedC", "um", 2.0, 3.0, 0.5, 100.0, 200.0, -10.0};
+
+        RecordingStorage storage;
+        adapter.setFrameStorage(storage.function());
+        const auto converted = adapter.convertFrame(full, {});
+        const RangeFrame* range = rangeOf(converted);
+        if (!converted || !range || converted->ranges.size() != 1U || !converted->images.empty()
+            || converted->ranges.front().descriptor.id != "range.0:0.0"
+            || converted->ranges.front().descriptor.displayName != "Range"
+            || converted->ranges.front().descriptor.groupId != "0:0"
+            || converted->metadata.sourceName != "Heliotis C4"
+            || converted->metadata.frameId != "h8-9"
+            || converted->metadata.frameIndex != 9U
+            || !converted->metadata.cohortId.empty()
+            || range->width != 2 || range->height != 2
+            || range->lengthUnit != GraphicsLengthUnit::Micrometer
+            || range->xyCoordinateMode != RangeFrameXYCoordinateMode::UniformPhysical
+            || std::fabs(range->xScale - 2.0) > 0.0000001
+            || std::fabs(range->yScale - 3.0) > 0.0000001
+            || std::fabs(range->zScale - 0.5) > 0.0000001
+            || std::fabs(range->xOffset - 100.0) > 0.0000001
+            || std::fabs(range->yOffset - 200.0) > 0.0000001
+            || std::fabs(range->zOffset + 10.0) > 0.0000001
+            || range->sensorType != "Heliotis H8"
+            || range->frameId != "h8-9"
+            || range->rangeBits != 64U
+            || range->intensityBits != 16U
+            || range->confidenceBits != 32U
+            || range->rangeField.id != "heliotis.range"
+            || range->rangeField.displayName != "Range"
+            || range->rangeField.unitSymbol != ""
+            || range->rangeField.domain != MeasurementValueDomain::Calibrated
+            || range->rangeField.sampleKind != MeasurementSampleKind::GridSample
+            || range->rangeField.bitsPerSample != 64U
+            || range->intensityField.id != "heliotis.intensity"
+            || range->intensityField.displayName != "Intensity"
+            || range->intensityField.unitSymbol != ""
+            || range->intensityField.domain != MeasurementValueDomain::Native
+            || range->intensityField.sampleKind != MeasurementSampleKind::GridSample
+            || range->intensityField.bitsPerSample != 16U
+            || range->confidenceField.id != "heliotis.confidence"
+            || range->confidenceField.displayName != "Confidence"
+            || range->confidenceField.unitSymbol != ""
+            || range->confidenceField.domain != MeasurementValueDomain::Native
+            || range->confidenceField.sampleKind != MeasurementSampleKind::GridSample
+            || range->confidenceField.bitsPerSample != 32U
+            || range->zValues.size() != 4U || range->intensity.size() != 4U
+            || range->confidence.size() != 4U
+            || range->validMask.size() != 4U || range->intensityValidMask.size() != 4U
+            || !range->confidenceValidMask.empty()
+            || range->rangeRaw.size() != 0U || range->intensityRaw.size() != 0U
+            || range->confidenceRaw.size() != 4U
+            || std::fabs(range->zValues.at(0) - 1.5F) > 0.0001F
+            || !std::isnan(range->zValues.at(1))
+            || range->validMask.at(0) != 1U || range->validMask.at(1) != 0U
+            || range->validMask.at(2) != 1U || range->validMask.at(3) != 1U
+            || std::fabs(range->intensity.at(0) - 5.0F) > 0.0001F
+            || !std::isnan(range->intensity.at(1))
+            || range->intensityValidMask.at(0) != 1U || range->intensityValidMask.at(1) != 0U
+            || std::fabs(range->confidence.at(3) - 4.0F) > 0.0001F
+            || range->confidenceRaw.at(2) != 3U
+            || storage.calls != 1U
+            || !range->zValues.isBorrowed() || !range->intensity.isBorrowed()
+            || !range->confidenceRaw.isBorrowed()
+            || !storage.contains(range->zValues.data())
+            || !storage.contains(range->confidenceRaw.data()))
+        {
+            std::cerr << "Every converted range, intensity and confidence field must survive.\n";
+            return 1;
+        }
+        adapter.setFrameStorage({});
+    }
+
+    // Integer range + intensity + confidence samples keep every raw channel and
+    // take exactly one provided-storage acquire for the range block and one for
+    // the intensity image.
+    {
+        heliotis::Frame raw;
+        raw.sequence = 10;
+        raw.frameId = "h8-10";
+        raw.parts = {
+            {
+                heliotis::FramePartKind::Range,
+                "Range",
+                "Mono16",
+                2,
+                2,
+                16,
+                std::vector<std::uint16_t>{2U, 4U, 6U, 8U}
+            },
+            {
+                heliotis::FramePartKind::Intensity,
+                "Intensity",
+                "Mono16",
+                2,
+                2,
+                16,
+                std::vector<std::uint16_t>{10U, 20U, 30U, 40U}
+            },
+            {
+                heliotis::FramePartKind::Confidence,
+                "Confidence",
+                "Mono16",
+                2,
+                2,
+                16,
+                std::vector<std::uint16_t>{1U, 2U, 3U, 4U}
+            }
+        };
+        raw.parts.at(0).sampleScale = 0.5;
+        raw.parts.at(1).sampleScale = 0.5;
+
+        RecordingStorage storage;
+        adapter.setFrameStorage(storage.function());
+        const auto converted = adapter.convertFrame(raw, {});
+        const RangeFrame* range = rangeOf(converted);
+        const std::array<std::uint16_t, 4> expectedRange{2U, 4U, 6U, 8U};
+        const std::array<std::uint16_t, 4> expectedIntensity{10U, 20U, 30U, 40U};
+        const std::array<std::uint16_t, 4> expectedConfidence{1U, 2U, 3U, 4U};
+        if (!converted || !range || converted->ranges.size() != 1U
+            || converted->images.size() != 1U)
+        {
+            std::cerr << "Integer range, intensity and confidence parts must convert.\n";
+            return 1;
+        }
+        if (range->xyCoordinateMode != RangeFrameXYCoordinateMode::PixelGrid
+            || std::isfinite(range->xScale) || std::isfinite(range->yScale))
+        {
+            std::cerr << "An integer range without Scan3d geometry must stay a PixelGrid height map.\n";
+            return 1;
+        }
+        if (!range->rangeRaw.isBorrowed() || !range->intensityRaw.isBorrowed()
+            || !range->confidenceRaw.isBorrowed()
+            || range->rangeRaw.size() != 4U || range->intensityRaw.size() != 4U
+            || range->confidenceRaw.size() != 4U)
+        {
+            std::cerr << "Every integer raw channel must be a borrowed four-sample array.\n";
+            return 1;
+        }
+        if (!range->validMask.empty() || !range->intensityValidMask.empty()
+            || !range->confidenceValidMask.empty())
+        {
+            std::cerr << "All-finite integer samples must not allocate a validity mask.\n";
+            return 1;
+        }
+        if (!std::equal(expectedRange.begin(), expectedRange.end(), range->rangeRaw.cbegin())
+            || !std::equal(expectedIntensity.begin(), expectedIntensity.end(),
+                   range->intensityRaw.cbegin())
+            || !std::equal(expectedConfidence.begin(), expectedConfidence.end(),
+                   range->confidenceRaw.cbegin()))
+        {
+            std::cerr << "Integer raw channels must preserve their sensor codes.\n";
+            return 1;
+        }
+        if (storage.calls != 2U || storage.blocks.size() != 2U
+            || storage.blocks[0] == storage.blocks[1]
+            || !storage.contains(range->rangeRaw.data())
+            || !storage.contains(range->intensityRaw.data())
+            || !storage.contains(range->confidenceRaw.data())
+            || converted->images.front().payload.data() != storage.blocks.back().get())
+        {
+            std::cerr << "One range block and one intensity image block must carry the frame.\n";
+            return 1;
+        }
+        adapter.setFrameStorage({});
     }
 
     return 0;

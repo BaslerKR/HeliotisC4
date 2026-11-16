@@ -173,6 +173,9 @@ bool HeliotisC4SourceController::startAcquisition(const heliotis::HeliotisC4Devi
             ? std::string("Heliotis acquisition could not be started.")
             : error);
         qWarning().noquote() << "[Heliotis C4]" << message;
+        // Publish the observed inactive state before the error. A worker Host learns acquisition
+        // state from this diagnostic signal; without it the proxy would keep its optimistic start.
+        emit diagnosticAcquisitionChanged(false, QStringLiteral("heliotis"));
         emit acquisitionStateChanged(false, false, false);
         emit acquisitionError(message);
     }

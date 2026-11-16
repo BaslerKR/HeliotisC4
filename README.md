@@ -82,5 +82,6 @@ target. The presentation target does not install an application theme.
 The Playground source controller exposes the standard connection lifecycle and
 typed parameters through `IDeviceConnectionControl` and `IDeviceParameterControl`
 (Playground declares the canonical `device.*` tools), reusing the session's
-GUI flows and the module feature channel. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#application-control-boundary).
+widget-independent flows and the module feature channel. The Qt widget mirrors
+that state when it exists; a device worker or API-only session needs no widget.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#application-control-boundary).

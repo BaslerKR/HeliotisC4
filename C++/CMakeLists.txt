@@ -139,6 +139,8 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
     file(TO_CMAKE_PATH "${HELIOTISC4_C4UTILITY_ROOT}" heliotis_c4_plugin_sdk_root)
     add_library(HeliotisC4Plugin MODULE
         Utility/PlaygroundAdapter/Plugin/HeliotisC4Plugin.cpp
+        Utility/PlaygroundAdapter/Plugin/HeliotisC4PluginSession.h
+        Utility/PlaygroundAdapter/Plugin/HeliotisC4PluginSession.cpp
         Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.h
         Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.cpp
     )
@@ -270,6 +272,33 @@ if(HELIOTISC4_BUILD_TESTS)
             add_test(NAME heliotis_c4_source_control COMMAND heliotis_c4_source_control_test)
             set_tests_properties(heliotis_c4_source_control PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
         endif()
+
+        # The session drives discovery, connect, Single, stop and disconnect without a widget,
+        # as a device worker and an API-only session do; the link-time device fake needs no SDK.
+        add_executable(heliotis_c4_plugin_session_test
+            Utility/PlaygroundAdapter/Tests/PluginSessionHeadlessTest.cpp
+            Utility/PlaygroundAdapter/Plugin/HeliotisC4PluginSession.cpp
+            Utility/PlaygroundAdapter/Plugin/HeliotisC4PluginSession.h
+            Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.cpp
+            Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.h)
+        set_target_properties(heliotis_c4_plugin_session_test PROPERTIES AUTOMOC ON)
+        target_include_directories(heliotis_c4_plugin_session_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin")
+        target_link_libraries(heliotis_c4_plugin_session_test PRIVATE
+            Playground::DevicePlugin HeliotisC4::QtWidget HeliotisC4::PlaygroundAdapter
+            Qt6::Widgets Qt6::Concurrent)
+        if(WIN32)
+            add_test(NAME heliotis_c4_plugin_session
+                COMMAND ${CMAKE_COMMAND} -E env
+                    "QT_QPA_PLATFORM=offscreen"
+                    "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"
+                    $<TARGET_FILE:heliotis_c4_plugin_session_test>)
+        else()
+            add_test(NAME heliotis_c4_plugin_session COMMAND heliotis_c4_plugin_session_test)
+            set_tests_properties(heliotis_c4_plugin_session PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+        endif()
     endif()
 
     if(HELIOTISC4_BUILD_QT_UI)
@@ -301,7 +330,7 @@ if(HELIOTISC4_BUILD_TESTS)
 endif()
 
 # Keep contract assertions active in Release validation.
-foreach(module_test IN ITEMS heliotis_c4_sdk_layout_test heliotis_c4_runtime_open_test heliotis_c4_frame_contract_test heliotis_c4_acquisition_policy_test heliotis_c4_graphics_adapter_test heliotis_c4_graphics_stream_test heliotis_c4_source_control_test heliotis_c4_widget_test)
+foreach(module_test IN ITEMS heliotis_c4_sdk_layout_test heliotis_c4_runtime_open_test heliotis_c4_frame_contract_test heliotis_c4_acquisition_policy_test heliotis_c4_graphics_adapter_test heliotis_c4_graphics_stream_test heliotis_c4_source_control_test heliotis_c4_plugin_session_test heliotis_c4_widget_test)
     if(TARGET ${module_test})
         target_compile_options(${module_test} PRIVATE
             $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
