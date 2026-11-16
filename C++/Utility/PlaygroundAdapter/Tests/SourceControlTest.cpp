@@ -522,9 +522,10 @@ int main(int argc, char** argv)
         fake::acquiring = true;
         fake::status(heliotis::HeliotisC4Device::Status::Acquisition, true);
         initResult.reset();
-        require(invokeInit("init-armed", true).succeeded()
-                    == false && !initResult,
+        require(invokeInit("init-armed", true).succeeded() == false && !initResult,
                 "Init must be refused while acquisition is armed.");
+        require(invokeInit("init-armed-no-confirm", false).succeeded() == false && !initResult,
+                "An armed device must be refused before any confirmation prompt.");
         fake::acquiring = false;
         fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
         QCoreApplication::processEvents();

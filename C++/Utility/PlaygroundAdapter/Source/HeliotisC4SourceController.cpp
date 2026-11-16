@@ -796,6 +796,11 @@ ApiResult<void> HeliotisC4SourceController::requestToolWithProgress(const QStrin
     if (!confirmation.isUndefined() && !confirmation.isBool())
         return ApiResult<void>::failure(ApiErrorCode::InvalidArgument,
             QStringLiteral("The Init confirmation must be a boolean."));
+    // Availability is checked before the prompt so an armed or absent device
+    // is refused without asking the operator to confirm anything.
+    const auto unavailable = initUnavailable();
+    if (unavailable)
+        return ApiResult<void>::failure(unavailable->first, unavailable->second);
     if (!confirmation.toBool()) {
         // The call made no changes; the Host renders the prompt and retries.
         completion(argumentRequiredFailure(QString::fromLatin1(kInitConfirmationArgument),
@@ -805,9 +810,6 @@ ApiResult<void> HeliotisC4SourceController::requestToolWithProgress(const QStrin
     if (!callId.isEmpty() && _initToolCall && _initToolCall->callId == callId)
         return ApiResult<void>::failure(ApiErrorCode::Conflict,
             QStringLiteral("The same Init call identity is already active."));
-    const auto unavailable = initUnavailable();
-    if (unavailable)
-        return ApiResult<void>::failure(unavailable->first, unavailable->second);
     if (!_backend)
         return ApiResult<void>::failure(ApiErrorCode::Unavailable, QStringLiteral("Device control has no session."));
 
