@@ -28,15 +28,19 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
     set(HELIOTISC4_BUILD_QT_UI ON)
     set(HELIOTISC4_ENABLE_SDK ON)
 endif()
-# The Qt UI also consumes the SDK-exported Resources::Widgets browser.
+# The Qt UI also consumes the SDK-provided Resources::Widgets browser.
 if(PROJECT_NAME STREQUAL "HeliotisC4" AND PROJECT_IS_TOP_LEVEL AND
    (HELIOTISC4_BUILD_QT_UI OR HELIOTISC4_BUILD_PLAYGROUND_ADAPTER OR HELIOTISC4_BUILD_PLAYGROUND_PLUGIN))
-    find_package(PlaygroundPluginSDK 0.2 CONFIG REQUIRED)
+    find_package(PlaygroundPluginSDK 0.3 CONFIG REQUIRED)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
 if(HELIOTISC4_BUILD_QT_UI)
     find_package(Qt6 REQUIRED COMPONENTS Widgets)
+    # U2-gated widget libraries resolve the SDK's temporary Resources package
+    # themselves; the runtime contract target does not depend on it.
+    find_package(ResourcesWidgets CONFIG REQUIRED
+        HINTS "${PlaygroundPluginSDK_PREFIX}/lib/cmake/ResourcesWidgets")
 
     add_subdirectory(Utility/Qt)
     add_library(HeliotisC4QtWidget STATIC
@@ -123,10 +127,10 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
             "HELIOTISC4_ENABLE_SDK."
         )
     endif()
-    if(NOT TARGET Playground::DevicePlugin)
+    if(NOT TARGET Playground::DeviceRuntimeContract)
         message(FATAL_ERROR
             "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires "
-            "Playground::DevicePlugin."
+            "Playground::DeviceRuntimeContract."
         )
     endif()
     if(NOT TARGET Qt6::Widgets)
@@ -144,6 +148,7 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
         Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.h
         Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.cpp
     )
+    playground_sdk_add_runtime_contract(HeliotisC4Plugin)
     set_target_properties(HeliotisC4Plugin PROPERTIES
         PREFIX ""
         OUTPUT_NAME HeliotisC4Plugin
@@ -156,12 +161,13 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
         "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
+        "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}"
     )
     target_compile_definitions(HeliotisC4Plugin PRIVATE
         HELIOTISC4_SDK_ROOT="${heliotis_c4_plugin_sdk_root}"
     )
     target_link_libraries(HeliotisC4Plugin PRIVATE
-        Playground::DevicePlugin
+        Playground::DeviceRuntimeContract
         HeliotisC4::QtWidget
         HeliotisC4::PlaygroundAdapter
         Qt6::Widgets
@@ -256,12 +262,13 @@ if(HELIOTISC4_BUILD_TESTS)
             Utility/PlaygroundAdapter/Tests/SourceControlTest.cpp
             Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.cpp
             Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.h)
+        playground_sdk_add_runtime_contract(heliotis_c4_source_control_test)
         set_target_properties(heliotis_c4_source_control_test PROPERTIES AUTOMOC ON)
         target_include_directories(heliotis_c4_source_control_test PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source")
         target_link_libraries(heliotis_c4_source_control_test PRIVATE
-            Playground::DevicePlugin HeliotisC4::PlaygroundAdapter Qt6::Widgets Qt6::Concurrent)
+            Playground::DeviceRuntimeContract HeliotisC4::PlaygroundAdapter Qt6::Widgets Qt6::Concurrent)
         if(WIN32)
             add_test(NAME heliotis_c4_source_control
                 COMMAND ${CMAKE_COMMAND} -E env
@@ -281,13 +288,15 @@ if(HELIOTISC4_BUILD_TESTS)
             Utility/PlaygroundAdapter/Plugin/HeliotisC4PluginSession.h
             Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.cpp
             Utility/PlaygroundAdapter/Source/HeliotisC4SourceController.h)
+        playground_sdk_add_runtime_contract(heliotis_c4_plugin_session_test)
         set_target_properties(heliotis_c4_plugin_session_test PROPERTIES AUTOMOC ON)
         target_include_directories(heliotis_c4_plugin_session_test PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
-            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin")
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
+            "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
         target_link_libraries(heliotis_c4_plugin_session_test PRIVATE
-            Playground::DevicePlugin HeliotisC4::QtWidget HeliotisC4::PlaygroundAdapter
+            Playground::DeviceRuntimeContract HeliotisC4::QtWidget HeliotisC4::PlaygroundAdapter
             Qt6::Widgets Qt6::Concurrent)
         if(WIN32)
             add_test(NAME heliotis_c4_plugin_session

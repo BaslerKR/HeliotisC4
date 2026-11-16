@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`. The temporary widget library resolves Qt Widgets and Resources itself until U2 removes it.
+
 - Declare `heliotis-c4.init` as a module action with a semantic presentation, a typed confirm prompt carrying the stage-move warning, one progress step, cooperative cancellation through the device initialization request, and an explicit refusal while acquisition is armed or no device is connected. The widget Init button and the tool call use the same session path.
 
 - Publish the parameter category tree, visibility and preferred editor in every descriptor, and implement bounded snapshot-plus-delta change subscriptions with an explicit resync snapshot on overflow and a terminal change on disconnect. Post-stop re-observation publishes the device's current writability instead of a cached locked state.
@@ -93,8 +95,8 @@
 - Require ABI / Qt IID 5.0 and recompilation; older packages are rejected. Declare immutable GraphicsEngine + Script Editor capabilities directly on the session.
 
 - Fix the hardware-free stream regression test's device and stream includes.
-- Link `Playground::DevicePlugin` for the `IDevicePlugin` MODULE.
-- Own package identity in `C++/Utility/PlaygroundAdapter/Package/Package.cmake`; the host emits `plugin.json` from `DevicePluginPackage.h`.
+- Link `Playground::DeviceRuntimeContract` for the `IDeviceRuntime` MODULE.
+- Own package identity in `C++/Utility/PlaygroundAdapter/Package/Package.cmake`; the host emits `plugin.json` from `DeviceRuntime.h`.
 - Keep the session source controller in `C++/Utility/PlaygroundAdapter/Source` as `HeliotisC4SourceController`.
 - Declare the Playground plugin runtime payload from this module; the host copies it into the package.
 - Move the GraphicsFrame stream/adapter into `Utility/PlaygroundAdapter` as `HeliotisC4::PlaygroundAdapter`.

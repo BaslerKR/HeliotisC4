@@ -4,7 +4,7 @@
 #include <QElapsedTimer>
 #include <QThread>
 
-#include "ToolProvider.h"
+#include "Tools/ToolProvider.h"
 
 #include <atomic>
 #include <functional>
