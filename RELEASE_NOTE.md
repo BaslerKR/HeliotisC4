@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+- Host the package in Playground's device worker. Discovery, connect, Single/Live arm, stop and disconnect complete without the Qt widget; the control widget mirrors the same session flows when it exists.
+
+- Publish the observed inactive acquisition state when an arm is refused, so a worker Host replaces its optimistic `source.start` with the module's observation.
+
 - Deliver H8 range data through the GraphicsEngine range writer into Playground shared frame storage. Z, X/Y, masks, intensity, confidence and raw channels are written once into provided storage; an empty result drops the range.
+
+- Cover the headless session lifecycle with a link-time device fake and check every converted range, intensity and confidence field with exactly one provided-storage acquire per converted payload.
 
 ## v0.4.0 (2026-11-14)
 
