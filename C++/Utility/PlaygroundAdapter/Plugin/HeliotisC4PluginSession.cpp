@@ -289,9 +289,9 @@ bool HeliotisC4PluginSession::stop(Completion completion)
     return true;
 }
 
-bool HeliotisC4PluginSession::initialize(Completion completion)
+bool HeliotisC4PluginSession::initialize(Completion completion, std::function<bool()> cancelled)
 {
-    return initializeH8ReferenceProfile(std::move(completion));
+    return initializeH8ReferenceProfile(std::move(completion), std::move(cancelled));
 }
 
 void HeliotisC4PluginSession::requestAcquisitionStop()
@@ -558,7 +558,7 @@ bool HeliotisC4PluginSession::requestAcquisitionArm(const bool continuous, Compl
     return true;
 }
 
-bool HeliotisC4PluginSession::initializeH8ReferenceProfile(Completion completion)
+bool HeliotisC4PluginSession::initializeH8ReferenceProfile(Completion completion, std::function<bool()> cancelled)
 {
     // The control widget and the declared init tool share this admission and
     // completion path; neither depends on the other existing.
@@ -601,12 +601,16 @@ bool HeliotisC4PluginSession::initializeH8ReferenceProfile(Completion completion
                 if (completion) completion(result.initialized ? QString{} : result.error);
             });
         });
-    watcher->setFuture(QtConcurrent::run([device = _device.get()]() {
+    watcher->setFuture(QtConcurrent::run([device = _device.get(), cancelled = std::move(cancelled)]() {
         const auto started = std::chrono::steady_clock::now();
         std::string error;
         bool initialized = false;
         try {
-            initialized = device && device->configureH8SurfaceExample(&error);
+            if (cancelled && cancelled()) {
+                error = "H8 reference-profile initialization was cancelled before it started.";
+            } else {
+                initialized = device && device->configureH8SurfaceExample(&error, cancelled);
+            }
         } catch (const std::exception& exception) {
             error = exception.what();
         } catch (...) {

@@ -61,11 +61,15 @@ public:
     /**
      * Applies the complete H8 reference profile and runs StageInit.
      *
+     * @param completion Receives the terminal result or cancellation error.
+     * @param cancelled Optional predicate for a cancellation requested before
+     *        the worker enters the device profile; it must remain valid until
+     *        completion.
      * @note This is the one path used by the control widget and the declared
      *       `heliotis-c4.init` tool, so the GUI and API cannot diverge. The
      *       caller confirms physical stage clearance before invoking it.
      */
-    virtual bool initialize(Completion completion) = 0;
+    virtual bool initialize(Completion completion, std::function<bool()> cancelled = {}) = 0;
 };
 
 /** Adapts worker-owned Heliotis frames, status, tools and parameters into the host contracts. */

@@ -24,6 +24,7 @@ std::atomic<int> triggers{0};
 std::atomic<int> initializations{0};
 std::atomic<bool> initSucceeds{true};
 std::atomic<bool> initCancelled{false};
+std::atomic<bool> allowConfigure{true};
 heliotis::HeliotisC4Device::StatusCallback status;
 heliotis::HeliotisC4Device::FrameCallback frame;
 } // namespace fake
@@ -59,12 +60,19 @@ void HeliotisC4Device::close()
 }
 bool HeliotisC4Device::isOpened() const { return fake::opened; }
 std::string HeliotisC4Device::connectedDeviceName() const { return fake::deviceName; }
-bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
+bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage,
+    const std::function<bool()>& externallyCancelled)
 {
+    while (!fake::allowConfigure.load()) QThread::msleep(1);
+    if (externallyCancelled && externallyCancelled()) {
+        if (errorMessage) *errorMessage = "H8 reference-profile initialization was cancelled before it started.";
+        return false;
+    }
     ++fake::initializations;
     fake::initCancelled.store(false);
-    for (int step = 0; step < 500 && !fake::initCancelled.load(); ++step) QThread::msleep(1);
-    if (fake::initCancelled.load()) {
+    for (int step = 0; step < 500 && !fake::initCancelled.load()
+        && !(externallyCancelled && externallyCancelled()); ++step) QThread::msleep(1);
+    if (fake::initCancelled.load() || (externallyCancelled && externallyCancelled())) {
         if (errorMessage) *errorMessage = "H8 reference-profile initialization was cancelled during the fixture run.";
         return false;
     }
@@ -304,6 +312,23 @@ int main(int argc, char** argv)
                     && initResult->error()->message.contains(QStringLiteral("failed")),
             "A failed Init must complete with its error.");
         fake::initSucceeds.store(true);
+
+        // A cancellation requested before the worker enters the profile must win.
+        const int initializationsBeforeCancel = fake::initializations.load();
+        fake::allowConfigure.store(false);
+        initResult.reset();
+        require(invokeInit("headless-cancel-early", true).succeeded() && !initResult,
+            "An early-cancelled Init must be admitted first.");
+        require(execution->cancelTool(QStringLiteral("headless-cancel-early")).succeeded(),
+            "Early cancellation must be accepted.");
+        fake::allowConfigure.store(true);
+        require(waitFor([&] { return initResult.has_value(); }),
+            "An early-cancelled Init must complete.");
+        require(!initResult->succeeded()
+                    && initResult->error()->code == ApiErrorCode::Cancelled,
+            "An early-cancelled Init must complete as cancelled.");
+        require(fake::initializations.load() == initializationsBeforeCancel,
+            "An Init cancelled before entry must not enter the device profile.");
 
         // Single issues the software trigger itself and completes after delivery.
         const int triggersBeforeSingle = fake::triggers.load();

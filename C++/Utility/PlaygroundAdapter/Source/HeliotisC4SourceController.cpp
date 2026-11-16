@@ -796,6 +796,11 @@ ApiResult<void> HeliotisC4SourceController::requestToolWithProgress(const QStrin
     if (!confirmation.isUndefined() && !confirmation.isBool())
         return ApiResult<void>::failure(ApiErrorCode::InvalidArgument,
             QStringLiteral("The Init confirmation must be a boolean."));
+    // A retry with the accepted call identity is a conflict even while the
+    // first call is active; a different identity is refused as busy below.
+    if (!callId.isEmpty() && _initToolCall && _initToolCall->callId == callId)
+        return ApiResult<void>::failure(ApiErrorCode::Conflict,
+            QStringLiteral("The same Init call identity is already active."));
     // Availability is checked before the prompt so an armed or absent device
     // is refused without asking the operator to confirm anything.
     const auto unavailable = initUnavailable();
@@ -807,9 +812,6 @@ ApiResult<void> HeliotisC4SourceController::requestToolWithProgress(const QStrin
             QStringLiteral("confirm"), QString::fromLatin1(kInitConfirmMessage)));
         return ApiResult<void>::success();
     }
-    if (!callId.isEmpty() && _initToolCall && _initToolCall->callId == callId)
-        return ApiResult<void>::failure(ApiErrorCode::Conflict,
-            QStringLiteral("The same Init call identity is already active."));
     if (!_backend)
         return ApiResult<void>::failure(ApiErrorCode::Unavailable, QStringLiteral("Device control has no session."));
 
@@ -822,7 +824,7 @@ ApiResult<void> HeliotisC4SourceController::requestToolWithProgress(const QStrin
     auto done = [guard, call](const QString& error) {
         if (guard) guard->finishInitTool(call, error);
     };
-    if (!_backend->initialize(done)) {
+    if (!_backend->initialize(done, [call] { return call->cancelled.load(); })) {
         if (_initToolCall == call) _initToolCall.reset();
         emit controlChanged();
         return ApiResult<void>::failure(ApiErrorCode::Busy,

@@ -62,12 +62,18 @@ bool HeliotisC4Device::triggerSoftware(std::string*)
     ++fake::triggers;
     return true;
 }
-bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage)
+bool HeliotisC4Device::configureH8SurfaceExample(std::string* errorMessage,
+    const std::function<bool()>& externallyCancelled)
 {
+    if (externallyCancelled && externallyCancelled()) {
+        if (errorMessage) *errorMessage = "H8 reference-profile initialization was cancelled before it started.";
+        return false;
+    }
     ++fake::initializations;
     fake::initCancelled.store(false);
-    for (int step = 0; step < 500 && !fake::initCancelled.load(); ++step) QThread::msleep(1);
-    if (fake::initCancelled.load()) {
+    for (int step = 0; step < 500 && !fake::initCancelled.load()
+        && !(externallyCancelled && externallyCancelled()); ++step) QThread::msleep(1);
+    if (fake::initCancelled.load() || (externallyCancelled && externallyCancelled())) {
         if (errorMessage) *errorMessage = "H8 reference-profile initialization was cancelled during the fixture run.";
         return false;
     }
@@ -142,9 +148,10 @@ public:
         return store(continuous ? "live" : "single", std::move(completion));
     }
     bool stop(Completion completion) override { return store("stop", std::move(completion)); }
-    bool initialize(Completion completion) override
+    bool initialize(Completion completion, std::function<bool()> cancelled) override
     {
         ++initializations;
+        cancelledPredicate = std::move(cancelled);
         return store("initialize", std::move(completion));
     }
 
@@ -158,6 +165,7 @@ public:
     bool busy = false;
     bool admit = true;
     int initializations = 0;
+    std::function<bool()> cancelledPredicate;
     std::vector<heliotis::DeviceDescriptor> devices;
     std::optional<heliotis::DeviceDescriptor> connected;
     std::size_t connectIndex = 0;
@@ -495,6 +503,10 @@ int main(int argc, char** argv)
         require(invokeInit("init-error", true).succeeded() && backend.initializations == 1
                     && initProgress == 1 && !initResult,
                 "A confirmed Init must be admitted through the session path with one progress report.");
+        const auto duplicate = invokeInit("init-error", true);
+        require(!duplicate.succeeded() && duplicate.error()
+                    && duplicate.error()->code == ApiErrorCode::Conflict,
+                "A retry with the accepted call identity must conflict.");
         backend.pending(QStringLiteral("The fixture H8 profile failed."));
         require(initResult && !initResult->succeeded()
                     && initResult->error()->details.value("effect") == QLatin1String("unknown"),
@@ -512,8 +524,9 @@ int main(int argc, char** argv)
         require(invokeInit("init-cancel", true).succeeded() && backend.initializations == 3,
                 "A cancellable Init must be admitted with its call identity.");
         require(execution->cancelTool(QStringLiteral("init-cancel")).succeeded()
-                    && fake::initCancelled.load(),
-                "Cancellation must reach the device initialization request.");
+                    && fake::initCancelled.load()
+                    && backend.cancelledPredicate && backend.cancelledPredicate(),
+                "Cancellation must reach the device and the pre-start predicate.");
         backend.pending(QStringLiteral(
             "H8 reference-profile initialization was cancelled during the fixture run."));
         require(initResult && !initResult->succeeded()
