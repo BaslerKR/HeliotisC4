@@ -72,6 +72,6 @@ cancellation through the same session path. Parameter descriptors carry the
 category tree and a preferred editor, and bounded change subscriptions publish
 snapshots and deltas. The session keeps acquisition-error routing, the
 reconnect-required latch and periodic diagnostics sampling without a view, and
-declares `Plugins/HeliotisC4/Favorites/Features` as its favourites settings key
-so the Host panel preserves existing saved entries.
+Existing widget favourites are dropped; the Host panel uses its package-level
+`Plugins/heliotis-c4/Favorites` namespace.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#application-control-boundary).

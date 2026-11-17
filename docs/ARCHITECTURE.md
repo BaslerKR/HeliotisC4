@@ -47,7 +47,7 @@ The reference profile treats Range/Reflectance, multipart `PartCount`/`PartType`
 
 The feature snapshot retains unavailable entries so a consumer can explain them. Integer and float entries carry the SDK-reported bounds and increment when the SDK reports them. Typed writes and commands recheck the live SDK type and access mode. Full feature reads, ordinary writes, and ordinary commands are rejected while acquisition is armed; `triggerSoftware()` is the dedicated armed command path. The Host panel presents the complete snapshot in one connected-device tree using each feature's SDK category path. SDK work runs off the session thread.
 
-Parameter descriptors carry the SDK category path so the Host panel can build its feature tree. Favorites are keyed by SDK feature name only, independent of device, category, and session. The session declares `Plugins/HeliotisC4/Favorites/Features` through `DeviceSessionMetadata::favoritesSettingsKey`, so the Host panel keeps the existing namespace without a migration.
+Parameter descriptors carry the SDK category path so the Host panel can build its feature tree. Favourites saved by the retired widget used the SDK feature name and cannot match the panel's `scope/name` items; they are dropped. The Host panel uses its package-level default `Plugins/heliotis-c4/Favorites`; there is no migration or legacy-key declaration.
 
 ## Application Control Boundary
 

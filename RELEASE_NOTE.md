@@ -6,7 +6,7 @@
 
 - Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`.
 
-- Declare the exact `Plugins/HeliotisC4/Favorites/Features` settings key through `DeviceSessionMetadata::favoritesSettingsKey`, so the Host panel keeps existing saved favourites without a migration.
+- Drop favourites saved by the retired widget: panel item identity changed from the SDK feature name to `scope/name`, so those entries cannot match. The Host panel applies its package-level default `Plugins/heliotis-c4/Favorites`; there is no migration or legacy-key declaration.
 
 - Keep the widget's non-presentation behavior in the session: acquisition errors always route through the session (including the during-disconnect and after-disconnect cases), a reconnect-required error latches acquisition as unavailable until a new connection, and a session-owned timer keeps sampling runtime diagnostics and logging periodic totals.
 

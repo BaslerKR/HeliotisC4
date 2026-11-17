@@ -81,8 +81,8 @@ public:
      * @param system Shared discovery/runtime owner for the plugin instance.
      * @param device Device facade whose SDK lifetime is owned by this session.
      * @param devices Copied discovery snapshot exposed through the device tool contract.
-     * @param settingsFile Host-owned INI retained for constructor compatibility; the declared
-     *        favourites key now tells the Host where saved entries live.
+     * @param settingsFile Host-owned INI retained for constructor compatibility; the Host panel
+     *        owns the favourites store and namespace.
      * @param parent Owning Qt object; the session is a QObject so background completions keep a
      *        connection context without a view.
      */
@@ -95,7 +95,6 @@ public:
     ~HeliotisC4PluginSession() override;
 
     QString title() const override;
-    DeviceSessionMetadata sessionMetadata() const override;
     std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override;
 
     AbstractSourceController* sourceController() const override;

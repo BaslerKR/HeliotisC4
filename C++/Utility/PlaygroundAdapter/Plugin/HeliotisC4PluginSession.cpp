@@ -125,11 +125,6 @@ QString HeliotisC4PluginSession::title() const
     return _title;
 }
 
-DeviceSessionMetadata HeliotisC4PluginSession::sessionMetadata() const
-{
-    return {QStringLiteral("Plugins/HeliotisC4/Favorites/Features")};
-}
-
 std::vector<DevicePluginDock> HeliotisC4PluginSession::createDockWidgets(QWidget* parent)
 {
     Q_UNUSED(parent)
