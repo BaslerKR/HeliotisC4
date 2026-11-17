@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Ship the package icon from this repository (`C++/Utility/PlaygroundAdapter/Package/icon.png`) instead of the SDK-installed Resources brand asset. Include `DeviceRuntime/Contract/DevicePluginSession.h` from the contract include root; the SDK no longer installs a `PlaygroundWidget` header path or vendor icons.
+
 - Migrate to the widget-free device runtime ABI: the plugin retains its discovery result and `createSession` no longer takes an opaque `QVariantMap`, and the session drops its `createDockWidgets` override.
 
 - Ship a widget-free package. Delete `QHeliotisC4Widget`, `HeliotisC4ControlUi`, `HeliotisC4FeatureTree`, `HeliotisC4Presentation`, the widget test and the `Utility/Qt` tree. `HeliotisC4Plugin` derives from `QObject` and `IDeviceRuntime` instead of the widget template, and its session creates no dock. The package target links `Playground::DeviceRuntimeContract`, the adapter and Qt Core/Concurrent only; it links no Qt Widgets, Resources widget/dialog library or OpenGL.

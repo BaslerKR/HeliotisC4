@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DeviceRuntime/Contract/DeviceRuntime.h"
-#include "DevicePluginSession.h"
+#include "DeviceRuntime/Contract/DevicePluginSession.h"
 #include "HeliotisC4SourceController.h"
 #include "HeliotisC4System.h"
 

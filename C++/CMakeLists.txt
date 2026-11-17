@@ -123,7 +123,6 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
         "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
-        "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}"
     )
     target_compile_definitions(HeliotisC4Plugin PRIVATE
         HELIOTISC4_SDK_ROOT="${heliotis_c4_plugin_sdk_root}"
@@ -150,7 +149,7 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
         endif()
         playground_sdk_package_plugin(HeliotisC4Plugin
             PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
-            ICON "${PlaygroundPluginSDK_ICON_DIR}/heliotis-48.png")
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/icon.png")
     endif()
     message(STATUS "[HeliotisC4] HeliotisC4Plugin enabled.")
 endif()
@@ -252,8 +251,7 @@ if(HELIOTISC4_BUILD_TESTS)
         target_include_directories(heliotis_c4_plugin_session_test PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
-            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
-            "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin")
         target_link_libraries(heliotis_c4_plugin_session_test PRIVATE
             Playground::DeviceRuntimeContract HeliotisC4::PlaygroundAdapter
             Qt6::Concurrent)
