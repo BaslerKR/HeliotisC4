@@ -65,9 +65,8 @@ public:
      * @param cancelled Optional predicate for a cancellation requested before
      *        the worker enters the device profile; it must remain valid until
      *        completion.
-     * @note This is the one path used by the control widget and the declared
-     *       `heliotis-c4.init` tool, so the GUI and API cannot diverge. The
-     *       caller confirms physical stage clearance before invoking it.
+     * @note This is the one path used by the declared `heliotis-c4.init` tool.
+     *       The caller confirms physical stage clearance before invoking it.
      */
     virtual bool initialize(Completion completion, std::function<bool()> cancelled = {}) = 0;
 };

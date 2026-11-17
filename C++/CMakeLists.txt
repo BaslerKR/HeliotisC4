@@ -16,7 +16,6 @@ target_include_directories(heliotis_c4_core
 set(HELIOTISC4_C4UTILITY_ROOT "C:/Program Files/C4Utility" CACHE PATH
     "C4Utility installation root used by the SDK-enabled implementation")
 option(HELIOTISC4_ENABLE_SDK "Resolve C4HdlC for implementation work" OFF)
-option(HELIOTISC4_BUILD_QT_UI "Build the optional Qt HeliotisC4 feature-tree widget" OFF)
 option(HELIOTISC4_BUILD_PLAYGROUND_ADAPTER
     "Build the optional HeliotisC4 Playground adapter target." OFF)
 option(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN
@@ -25,38 +24,12 @@ option(HELIOTISC4_BUILD_TESTS "Build the standalone HeliotisC4 module tests" OFF
 
 if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
     set(HELIOTISC4_BUILD_PLAYGROUND_ADAPTER ON)
-    set(HELIOTISC4_BUILD_QT_UI ON)
     set(HELIOTISC4_ENABLE_SDK ON)
 endif()
-# The Qt UI also consumes the SDK-provided Resources::Widgets browser.
 if(PROJECT_NAME STREQUAL "HeliotisC4" AND PROJECT_IS_TOP_LEVEL AND
-   (HELIOTISC4_BUILD_QT_UI OR HELIOTISC4_BUILD_PLAYGROUND_ADAPTER OR HELIOTISC4_BUILD_PLAYGROUND_PLUGIN))
+   (HELIOTISC4_BUILD_PLAYGROUND_ADAPTER OR HELIOTISC4_BUILD_PLAYGROUND_PLUGIN))
     find_package(PlaygroundPluginSDK 0.3 CONFIG REQUIRED)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-endif()
-
-if(HELIOTISC4_BUILD_QT_UI)
-    find_package(Qt6 REQUIRED COMPONENTS Widgets)
-    # U2-gated widget libraries resolve the SDK's temporary Resources package
-    # themselves; the runtime contract target does not depend on it.
-    find_package(ResourcesWidgets CONFIG REQUIRED
-        HINTS "${PlaygroundPluginSDK_PREFIX}/lib/cmake/ResourcesWidgets")
-
-    add_subdirectory(Utility/Qt)
-    add_library(HeliotisC4QtWidget STATIC
-        Utility/Qt/QHeliotisC4Widget.cpp
-        Utility/Qt/QHeliotisC4Widget.h
-    )
-    add_library(HeliotisC4::QtWidget ALIAS HeliotisC4QtWidget)
-    set_target_properties(HeliotisC4QtWidget PROPERTIES AUTOMOC ON)
-    target_compile_features(HeliotisC4QtWidget PUBLIC cxx_std_17)
-    target_compile_definitions(HeliotisC4QtWidget PUBLIC HELIOTISC4_HAS_QT_UI)
-    target_link_libraries(HeliotisC4QtWidget
-        PUBLIC
-            HeliotisC4::Core
-            Qt6::Widgets
-    )
-    message(STATUS "[HeliotisC4] HeliotisC4::QtWidget enabled.")
 endif()
 
 # The module does not distribute the proprietary SDK. Enable SDK discovery only
@@ -115,12 +88,6 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
             "HELIOTISC4_BUILD_PLAYGROUND_ADAPTER."
         )
     endif()
-    if(NOT HELIOTISC4_BUILD_QT_UI)
-        message(FATAL_ERROR
-            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires "
-            "HELIOTISC4_BUILD_QT_UI."
-        )
-    endif()
     if(NOT HELIOTISC4_ENABLE_SDK)
         message(FATAL_ERROR
             "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires "
@@ -133,12 +100,7 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
             "Playground::DeviceRuntimeContract."
         )
     endif()
-    if(NOT TARGET Qt6::Widgets)
-        message(FATAL_ERROR
-            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_PLUGIN=ON requires Qt 6."
-        )
-    endif()
-    find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Concurrent)
+    find_package(Qt6 REQUIRED COMPONENTS Core Concurrent)
 
     file(TO_CMAKE_PATH "${HELIOTISC4_C4UTILITY_ROOT}" heliotis_c4_plugin_sdk_root)
     add_library(HeliotisC4Plugin MODULE
@@ -168,11 +130,8 @@ if(HELIOTISC4_BUILD_PLAYGROUND_PLUGIN)
     )
     target_link_libraries(HeliotisC4Plugin PRIVATE
         Playground::DeviceRuntimeContract
-        HeliotisC4::QtWidget
         HeliotisC4::PlaygroundAdapter
-        Qt6::Widgets
-        Qt6::OpenGL
-        Qt6::OpenGLWidgets
+        Qt6::Core
         Qt6::Concurrent
     )
     if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
@@ -268,7 +227,7 @@ if(HELIOTISC4_BUILD_TESTS)
             "${CMAKE_CURRENT_SOURCE_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source")
         target_link_libraries(heliotis_c4_source_control_test PRIVATE
-            Playground::DeviceRuntimeContract HeliotisC4::PlaygroundAdapter Qt6::Widgets Qt6::Concurrent)
+            Playground::DeviceRuntimeContract HeliotisC4::PlaygroundAdapter Qt6::Concurrent)
         if(WIN32)
             add_test(NAME heliotis_c4_source_control
                 COMMAND ${CMAKE_COMMAND} -E env
@@ -280,7 +239,7 @@ if(HELIOTISC4_BUILD_TESTS)
             set_tests_properties(heliotis_c4_source_control PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
         endif()
 
-        # The session drives discovery, connect, Single, stop and disconnect without a widget,
+        # The session drives discovery, connect, Single, stop and disconnect without a view,
         # as a device worker and an API-only session do; the link-time device fake needs no SDK.
         add_executable(heliotis_c4_plugin_session_test
             Utility/PlaygroundAdapter/Tests/PluginSessionHeadlessTest.cpp
@@ -296,8 +255,8 @@ if(HELIOTISC4_BUILD_TESTS)
             "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
             "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}")
         target_link_libraries(heliotis_c4_plugin_session_test PRIVATE
-            Playground::DeviceRuntimeContract HeliotisC4::QtWidget HeliotisC4::PlaygroundAdapter
-            Qt6::Widgets Qt6::Concurrent)
+            Playground::DeviceRuntimeContract HeliotisC4::PlaygroundAdapter
+            Qt6::Concurrent)
         if(WIN32)
             add_test(NAME heliotis_c4_plugin_session
                 COMMAND ${CMAKE_COMMAND} -E env
@@ -310,43 +269,13 @@ if(HELIOTISC4_BUILD_TESTS)
         endif()
     endif()
 
-    if(HELIOTISC4_BUILD_QT_UI)
-        add_executable(heliotis_c4_widget_test
-            Tests/HeliotisC4WidgetTest.cpp
-        )
-        target_link_libraries(heliotis_c4_widget_test
-            PRIVATE
-                HeliotisC4::QtWidget
-        )
-        if(WIN32)
-            add_test(
-                NAME heliotis_c4_widget
-                COMMAND ${CMAKE_COMMAND} -E env
-                    "QT_QPA_PLATFORM=offscreen"
-                    "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"
-                    $<TARGET_FILE:heliotis_c4_widget_test>
-            )
-        else()
-            add_test(
-                NAME heliotis_c4_widget
-                COMMAND heliotis_c4_widget_test
-            )
-            set_tests_properties(heliotis_c4_widget PROPERTIES
-                ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-            )
-        endif()
-    endif()
 endif()
 
 # Keep contract assertions active in Release validation.
-foreach(module_test IN ITEMS heliotis_c4_sdk_layout_test heliotis_c4_runtime_open_test heliotis_c4_frame_contract_test heliotis_c4_acquisition_policy_test heliotis_c4_graphics_adapter_test heliotis_c4_graphics_stream_test heliotis_c4_source_control_test heliotis_c4_plugin_session_test heliotis_c4_widget_test)
+foreach(module_test IN ITEMS heliotis_c4_sdk_layout_test heliotis_c4_runtime_open_test heliotis_c4_frame_contract_test heliotis_c4_acquisition_policy_test heliotis_c4_graphics_adapter_test heliotis_c4_graphics_stream_test heliotis_c4_source_control_test heliotis_c4_plugin_session_test)
     if(TARGET ${module_test})
         target_compile_options(${module_test} PRIVATE
             $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
             $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     endif()
 endforeach()
-
-if(TARGET HeliotisC4QtWidget)
-    target_link_libraries(HeliotisC4QtWidget PUBLIC HeliotisC4Presentation)
-endif()
