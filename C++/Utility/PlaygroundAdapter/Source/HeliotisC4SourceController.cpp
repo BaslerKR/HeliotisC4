@@ -739,7 +739,7 @@ ToolDescriptor HeliotisC4SourceController::initToolDescriptor() const
         "Apply the complete C4Utility H8 surface capture profile and run StageInit. "
         "This can move the stage; the call requires an explicit confirm. "
         "It is refused while acquisition is armed, while another operation is active, "
-        "or before a device is connected. The same call path backs the control widget Init button.");
+        "or before a device is connected.");
     descriptor.effect = ToolEffect::Device;
     descriptor.egress = ToolEgress::Metadata;
     descriptor.inputSchema = QJsonObject{

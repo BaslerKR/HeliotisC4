@@ -2,15 +2,21 @@
 
 ## Unreleased
 
-- Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`. The temporary widget library resolves Qt Widgets and Resources itself until U2 removes it.
+- Ship a widget-free package. Delete `QHeliotisC4Widget`, `HeliotisC4ControlUi`, `HeliotisC4FeatureTree`, `HeliotisC4Presentation`, the widget test and the `Utility/Qt` tree. `HeliotisC4Plugin` derives from `QObject` and `IDeviceRuntime` instead of the widget template, and its session creates no dock. The package target links `Playground::DeviceRuntimeContract`, the adapter and Qt Core/Concurrent only; it links no Qt Widgets, Resources widget/dialog library or OpenGL.
 
-- Declare `heliotis-c4.init` as a module action with a semantic presentation, a typed confirm prompt carrying the stage-move warning, one progress step, cooperative cancellation through the device initialization request (including a request accepted before the worker starts), and an explicit refusal while acquisition is armed or no device is connected. The widget Init button and the tool call use the same session path.
+- Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`.
+
+- Drop favourites saved by the retired widget: panel item identity changed from the SDK feature name to `scope/name`, so those entries cannot match. The Host panel applies its package-level default `Plugins/heliotis-c4/Favorites`; there is no migration or legacy-key declaration.
+
+- Keep the widget's non-presentation behavior in the session: acquisition errors always route through the session (including the during-disconnect and after-disconnect cases), a reconnect-required error latches acquisition as unavailable until a new connection, and a session-owned timer keeps sampling runtime diagnostics and logging periodic totals.
+
+- Declare `heliotis-c4.init` as a module action with a semantic presentation, a typed confirm prompt carrying the stage-move warning, one progress step, cooperative cancellation through the device initialization request (including a request accepted before the worker starts), and an explicit refusal while acquisition is armed or no device is connected. The tool call uses the same session path.
 
 - Publish the parameter category tree, visibility and preferred editor in every descriptor, and implement bounded snapshot-plus-delta change subscriptions with an explicit resync snapshot on overflow and a terminal change on disconnect. Post-stop re-observation publishes the device's current writability instead of a cached locked state.
 
 - Issue the device software trigger inside `requestSingle` when the armed route needs one, so the API Single action completes after a delivered frame without a separate trigger call.
 
-- Host the package in Playground's device worker. Discovery, connect, Single/Live arm, stop and disconnect complete without the Qt widget; the control widget mirrors the same session flows when it exists.
+- Host the package in Playground's device worker. Discovery, connect, Single/Live arm, stop and disconnect complete on the session without a Qt widget; the Host device panel presents the same flows.
 
 - Publish the observed inactive acquisition state when an arm is refused, so a worker Host replaces its optimistic `source.start` with the module's observation.
 

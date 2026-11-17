@@ -4,12 +4,12 @@
 #include "DevicePluginSession.h"
 #include "HeliotisC4SourceController.h"
 #include "HeliotisC4System.h"
-#include "Utility/Qt/QHeliotisC4Widget.h"
 
+#include <QElapsedTimer>
 #include <QFutureWatcher>
 #include <QObject>
-#include <QPointer>
 #include <QString>
+#include <QTimer>
 
 #include <functional>
 #include <memory>
@@ -65,11 +65,11 @@ struct HeliotisAcquisitionArmResult {
 };
 
 /**
- * Owns one Heliotis device, controller, and asynchronous control-widget lifecycle.
+ * Owns one Heliotis device, controller, and asynchronous lifecycle authority.
  *
- * @note Device tools and the control widget share these flows. The widget is created only by
- *       `createDockWidgets`; a headless caller (a device worker or an API-only session) drives the
- *       same flows and completes them without one.
+ * @note Device tools, the worker proxy and any consumer view share these flows. The session is
+ *       widget-free: it creates no dock and its SDK admission, error routing, reconnect latch and
+ *       diagnostic sampling stay authoritative without a view.
  */
 class HeliotisC4PluginSession final : public QObject, public IDevicePluginSession,
                                      private HeliotisC4ControlBackend {
@@ -80,10 +80,11 @@ public:
      *
      * @param system Shared discovery/runtime owner for the plugin instance.
      * @param device Device facade whose SDK lifetime is owned by this session.
-     * @param devices Copied discovery snapshot exposed by the control widget.
-     * @param settingsFile Host-owned INI for feature favorites; empty selects standalone storage.
+     * @param devices Copied discovery snapshot exposed through the device tool contract.
+     * @param settingsFile Host-owned INI retained for constructor compatibility; the Host panel
+     *        owns the favourites store and namespace.
      * @param parent Owning Qt object; the session is a QObject so background completions keep a
-     *        connection context without a widget.
+     *        connection context without a view.
      */
     HeliotisC4PluginSession(
         std::shared_ptr<heliotis::HeliotisC4System> system,
@@ -95,6 +96,7 @@ public:
 
     QString title() const override;
     std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override;
+
     AbstractSourceController* sourceController() const override;
     unsigned int capabilities() const noexcept override;
     void setTitleChangedCallback(std::function<void(const QString&)> callback) override;
@@ -103,14 +105,16 @@ private:
     using FeatureOperation = std::function<bool(heliotis::HeliotisC4Device*, std::string*)>;
     using Completion = HeliotisC4ControlBackend::Completion;
 
-    /** Connects the session-owned controller signals once, before any widget exists. */
+    /** Connects the session-owned controller signals once. */
     void connectController();
+    /** Samples runtime diagnostics on the session thread and logs the periodic totals. */
+    void sampleDiagnostics();
     /** Calls one pending tool completion at most once. */
     static void finishCompletion(Completion& completion, const QString& error);
-    /** Reports any GUI- or API-owned SDK operation that excludes another one. */
+    /** Reports any API-owned SDK operation that excludes another one. */
     [[nodiscard]] bool sdkOperationPending() const;
 
-    // HeliotisC4ControlBackend: device tools reuse the same flows as the control widget.
+    // HeliotisC4ControlBackend: device tools reuse the same lifecycle flows.
     bool controlBusy() const override;
     std::vector<heliotis::DeviceDescriptor> targets() const override;
     std::optional<heliotis::DeviceDescriptor> connectedTarget() const override;
@@ -154,12 +158,12 @@ private:
     /**
      * Applies the explicit default H8 surface profile and StageInit.
      *
-     * @param completion Optional caller completion; the widget path passes none.
+     * @param completion Optional caller completion.
      * @param cancelled Optional cancellation predicate checked before the worker
      *        enters the device profile; it must remain valid until completion.
      * @return False when the session did not admit the operation; the completion then runs never.
-     * @note The control widget and `heliotis-c4.init` both enter here, so their
-     *       admission, progress and failure behavior cannot diverge.
+     * @note `heliotis-c4.init` is the sole entry, so its admission, progress and failure
+     *       behavior cannot diverge from the session lifecycle.
      */
     bool initializeH8ReferenceProfile(Completion completion = {}, std::function<bool()> cancelled = {});
     /**
@@ -180,7 +184,6 @@ private:
     std::vector<heliotis::DeviceDescriptor> _devices;
     QString _settingsFile;
     std::unique_ptr<HeliotisC4SourceController> _controller;
-    QPointer<QHeliotisC4Widget> _widget;
     std::optional<heliotis::DeviceDescriptor> _connectedTarget;
     // Pending device-tool completions; each runs once on the session thread.
     Completion _discoveryCompletion;
@@ -188,7 +191,8 @@ private:
     Completion _disconnectCompletion;
     Completion _armCompletion;
     Completion _acquisitionEndCompletion;
-    bool _externalBusyShown = false;
+    // Latched from a reconnect-required acquisition error; cleared only by a new connection.
+    bool _reconnectRequired = false;
     std::unique_ptr<QFutureWatcher<HeliotisDiscoveryResult>> _discoveryWatcher;
     std::unique_ptr<QFutureWatcher<HeliotisConnectionResult>> _connectionWatcher;
     std::unique_ptr<QFutureWatcher<HeliotisDisconnectionResult>> _disconnectionWatcher;
@@ -200,4 +204,12 @@ private:
     bool _disconnectPending = false;
     QString _title = QStringLiteral("Heliotis C4 Session");
     std::function<void(const QString&)> _titleChanged;
+
+    // Session-owned diagnostics sampling, formerly driven by the widget's timer.
+    QTimer _diagnosticsTimer;
+    QElapsedTimer _diagnosticClock;
+    quint64 _diagnosticDelivered = 0;
+    qint64 _diagnosticSampleMs = 0;
+    qint64 _diagnosticLogMs = 0;
+    bool _diagnosticActive = false;
 };

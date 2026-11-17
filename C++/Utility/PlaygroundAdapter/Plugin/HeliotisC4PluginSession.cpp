@@ -2,12 +2,7 @@
 
 #include "HeliotisC4SourceController.h"
 
-#include "Utility/Qt/QHeliotisC4Widget.h"
-
 #include <QDebug>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QLoggingCategory>
 #include <QTimer>
 #include <QtConcurrentRun>
 
@@ -19,8 +14,6 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-
-Q_LOGGING_CATEGORY(heliotisOperationDiagnosticLog, "diagnostics.HeliotisC4.Operations", QtInfoMsg)
 
 HeliotisC4PluginSession::HeliotisC4PluginSession(
     std::shared_ptr<heliotis::HeliotisC4System> system,
@@ -35,18 +28,19 @@ HeliotisC4PluginSession::HeliotisC4PluginSession(
       _settingsFile(std::move(settingsFile)),
       _controller(std::make_unique<HeliotisC4SourceController>(_device.get()))
 {
-    // GUI controls and device tools share this session's SDK admission. The controller signals
-    // are session-owned so a headless session completes Single, Stop and Disconnect without a
-    // widget; the widget only mirrors them when it exists.
+    // Device tools, the worker proxy and the Host panel share this session's SDK admission.
+    // The controller signals are session-owned so Single, Stop and Disconnect complete without a
+    // view; diagnostic sampling stays on the session thread as well.
     _controller->setControlBackend(this);
     connectController();
+    _diagnosticsTimer.setInterval(1000);
+    QObject::connect(&_diagnosticsTimer, &QTimer::timeout, this,
+        &HeliotisC4PluginSession::sampleDiagnostics);
+    _diagnosticsTimer.start();
 }
 
 HeliotisC4PluginSession::~HeliotisC4PluginSession()
 {
-    // The control widget is owned by the consumer window and can outlive this session; drop its
-    // signal handlers first so no queued widget signal reaches a destroyed session.
-    if (_widget) QObject::disconnect(_widget, nullptr, _widget, nullptr);
     // Pending tool calls fail before the watchers they wait on are dropped.
     if (_controller) _controller->setControlBackend(nullptr);
     if (_device) _device->requestCancelInitialization();
@@ -64,57 +58,24 @@ HeliotisC4PluginSession::~HeliotisC4PluginSession()
 void HeliotisC4PluginSession::connectController()
 {
     if (!_controller) return;
-    QObject::connect(_controller.get(), &HeliotisC4SourceController::controlChanged, this, [this]() {
-        // API work holds the same SDK channel as GUI feature edits. Mirror only
-        // its transitions so session-owned pending states remain authoritative.
-        // Tool calls drive the session flows below, which present their own state.
-        // While armed the only admitted call is TriggerSoftware, which is an
-        // acquisition command rather than a feature edit; arming is refused
-        // while parameter work runs, so no shown state can be left behind.
-        const bool busy = _controller && _controller->parameterWorkActive() && !_controller->isGrabbing();
-        if (busy == _externalBusyShown) return;
-        _externalBusyShown = busy;
-        if (_widget && !_featureWatcher && !_featureReadWatcher && !_initializationWatcher) {
-            _widget->setFeatureOperationPending(busy);
-        }
-    });
-    QObject::connect(_controller.get(), &HeliotisC4SourceController::parametersApplied, this, [this]() {
-        // An API write already returns its readback; only the visible tree needs a refresh.
-        if (!_widget) return;
-        refreshFeatureTree();
-    });
     QObject::connect(_controller.get(), &HeliotisC4SourceController::acquisitionStateChanged, this,
-        [this](const bool acquiring, const bool continuous, const bool softwareTriggerAvailable) {
+        [this](const bool acquiring, const bool, const bool) {
             if (!acquiring) finishCompletion(_acquisitionEndCompletion, {});
             if (!acquiring && _disconnectPending) {
                 completeDisconnect();
                 return;
             }
-            if (_widget) {
-                _widget->setAcquisitionState(acquiring, continuous, softwareTriggerAvailable);
-                const auto value = _controller->sourceRuntimeDiagnostics(0);
-                if (value) _widget->setRuntimeDiagnostics({value->grabbing, value->delivered, value->failed});
-            }
             if (!acquiring && _device && _device->isOpened() && !_device->requiresReconnect()
-                && _controller && _controller->parameterWatchesActive()) {
+                && !_reconnectRequired && _controller && _controller->parameterWatchesActive()) {
                 // Descriptor writability is observed from the device, never
                 // cached from the locked state held while acquisition was armed.
                 refreshFeatureTree();
-            } else if (!acquiring && _widget && heliotisOperationDiagnosticLog().isDebugEnabled()
-                && _device && _device->isOpened() && !_device->requiresReconnect()) {
-                refreshFeatureTree();
             }
-        });
-    QObject::connect(_controller.get(), &HeliotisC4SourceController::acquisitionFrameReceived, this,
-        [this]() {
-            if (_widget) _widget->setSoftwareTriggerPending(false);
         });
     QObject::connect(_controller.get(), &HeliotisC4SourceController::acquisitionError, this,
         [this](const QString& message) {
-            if (!_widget) {
-                qWarning().noquote() << "[Heliotis C4] Acquisition error:" << message;
-                return;
-            }
+            // This routing was widget-only; it now always runs on the session so a
+            // worker or API-only consumer keeps the same error lifecycle.
             if (_disconnectPending || _disconnectionWatcher) {
                 qWarning().noquote() << "[Heliotis C4] Acquisition error retained in the log during disconnect:"
                                      << message;
@@ -124,11 +85,39 @@ void HeliotisC4PluginSession::connectController()
                 qWarning().noquote() << "[Heliotis C4] Acquisition error reported after disconnect:" << message;
                 return;
             }
-            if (_device && _device->requiresReconnect()) {
-                _widget->setAcquisitionAvailable(false);
+            if (_device->requiresReconnect()) {
+                // Latch the flag the widget used to clear by disabling its controls;
+                // acquisition stays unavailable until a new connection is opened.
+                _reconnectRequired = true;
             }
-            _widget->setAcquisitionError(message);
+            qWarning().noquote() << "[Heliotis C4] Acquisition error:" << message;
         });
+}
+
+void HeliotisC4PluginSession::sampleDiagnostics()
+{
+    if (!_controller) return;
+    const auto value = _controller->sourceRuntimeDiagnostics(0);
+    if (!value) return;
+    if (!value->grabbing) _diagnosticActive = false;
+    if (!_diagnosticActive) {
+        _diagnosticClock.start();
+        _diagnosticSampleMs = 0;
+        _diagnosticLogMs = 0;
+        _diagnosticDelivered = value->delivered;
+        _diagnosticActive = true;
+    }
+    const qint64 elapsed = _diagnosticClock.elapsed();
+    const qint64 interval = elapsed - _diagnosticSampleMs;
+    const double fps = interval > 0 && value->delivered >= _diagnosticDelivered
+        ? double(value->delivered - _diagnosticDelivered) * 1000.0 / double(interval) : 0.0;
+    _diagnosticDelivered = value->delivered;
+    _diagnosticSampleMs = elapsed;
+    if (elapsed - _diagnosticLogMs >= 5000) {
+        qInfo().noquote() << QStringLiteral("[Heliotis C4] diagnostics: delivered=%1 failed=%2 fps=%3")
+            .arg(qulonglong(value->delivered)).arg(qulonglong(value->failed)).arg(fps, 0, 'f', 1);
+        _diagnosticLogMs = elapsed;
+    }
 }
 
 QString HeliotisC4PluginSession::title() const
@@ -138,80 +127,8 @@ QString HeliotisC4PluginSession::title() const
 
 std::vector<DevicePluginDock> HeliotisC4PluginSession::createDockWidgets(QWidget* parent)
 {
-    if (_widget) {
-        return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
-                 Qt::LeftDockWidgetArea, _widget, true}};
-    }
-
-    _widget = new QHeliotisC4Widget(parent, _settingsFile, _settingsFile.isEmpty()
-        ? QString{} : QStringLiteral("Plugins/HeliotisC4/Favorites/Features"));
-    _widget->setDiscoveredDevices(_devices);
-    auto* diagnosticsTimer = new QTimer(_widget);
-    diagnosticsTimer->setInterval(1000);
-    QObject::connect(diagnosticsTimer, &QTimer::timeout, _widget, [this] {
-        if (!_controller || !_widget) return;
-        const auto value = _controller->sourceRuntimeDiagnostics(0);
-        if (value) _widget->setRuntimeDiagnostics({value->grabbing, value->delivered, value->failed});
-    });
-    diagnosticsTimer->start();
-    QObject::connect(_widget, &QHeliotisC4Widget::refreshRequested, _widget, [this]() {
-        static_cast<void>(refreshDevices());
-    });
-    QObject::connect(_widget, &QHeliotisC4Widget::connectRequested, _widget, [this](const int index) {
-        if (sdkOperationPending()) {
-            qWarning().noquote() << "[Heliotis C4] Connection ignored because another SDK operation is pending.";
-            _widget->setConnectionError(QObject::tr("Wait for the current Heliotis operation before connecting."));
-            return;
-        }
-        static_cast<void>(connectDevice(index));
-    });
-    QObject::connect(_widget, &QHeliotisC4Widget::disconnectRequested, _widget, [this]() {
-        qInfo().noquote() << "[Heliotis C4] Disconnect requested.";
-        if (!requestDisconnect()) {
-            qWarning().noquote() << "[Heliotis C4] Disconnect ignored while another SDK operation is pending.";
-            _widget->setConnectionState(_device && _device->isOpened());
-        }
-    });
-    QObject::connect(_widget, &QHeliotisC4Widget::grabOneRequested, _widget, [this]() {
-        static_cast<void>(requestAcquisitionArm(false));
-    });
-    QObject::connect(_widget, &QHeliotisC4Widget::initializationRequested, _widget, [this]() {
-        initializeH8ReferenceProfile();
-    });
-    QObject::connect(_widget, &QHeliotisC4Widget::stopRequested, _widget, [this]() {
-        requestAcquisitionStop();
-    });
-    QObject::connect(_widget, &QHeliotisC4Widget::liveGrabToggled, _widget, [this](const bool enabled) {
-        if (enabled) static_cast<void>(requestAcquisitionArm(true));
-        else requestAcquisitionStop();
-    });
-    QObject::connect(_widget, &QHeliotisC4Widget::featureWriteRequested, _widget,
-        [this](const QString& name, const QString& value) {
-            runFeatureOperation([name, value](heliotis::HeliotisC4Device* device, std::string* error) {
-                const bool accepted = device->writeFeature(name.toStdString(), value.toStdString(), error);
-                qCDebug(heliotisOperationDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
-                    {"event", "parameter_result"}, {"fields", QJsonObject{{"name", name}, {"requestedValue", value},
-                    {"accepted", accepted}, {"error", error ? QString::fromStdString(*error) : QString{}}}}}).toJson(QJsonDocument::Compact));
-                return accepted;
-            });
-        });
-    QObject::connect(_widget, &QHeliotisC4Widget::featureCommandRequested, _widget,
-        [this](const QString& name) {
-            if (name == QStringLiteral("TriggerSoftware")) {
-                if (_widget) _widget->setSoftwareTriggerPending(true);
-                runFeatureOperation([](heliotis::HeliotisC4Device* device, std::string* error) {
-                    return device->triggerSoftware(error);
-                }, false, [this](const bool succeeded) {
-                    if (_widget && !succeeded) _widget->setSoftwareTriggerPending(false);
-                });
-                return;
-            }
-            runFeatureOperation([name](heliotis::HeliotisC4Device* device, std::string* error) {
-                return device->executeCommand(name.toStdString(), error);
-            });
-        });
-    return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
-             Qt::LeftDockWidgetArea, _widget, true}};
+    Q_UNUSED(parent)
+    return {};
 }
 
 AbstractSourceController* HeliotisC4PluginSession::sourceController() const
@@ -267,7 +184,6 @@ bool HeliotisC4PluginSession::discover(Completion completion)
 bool HeliotisC4PluginSession::connectTarget(const std::size_t index, Completion completion)
 {
     if (index > static_cast<std::size_t>((std::numeric_limits<int>::max)())) return false;
-    if (_widget && !sdkOperationPending()) _widget->setConnectionPending(true);
     return connectDevice(static_cast<int>(index), std::move(completion));
 }
 
@@ -296,7 +212,6 @@ bool HeliotisC4PluginSession::initialize(Completion completion, std::function<bo
 
 void HeliotisC4PluginSession::requestAcquisitionStop()
 {
-    if (_widget) _widget->setAcquisitionStopPending();
     if (_controller) _controller->requestStop();
 }
 
@@ -309,7 +224,6 @@ bool HeliotisC4PluginSession::refreshDevices(Completion completion)
     }
 
     qInfo().noquote() << "[Heliotis C4] Asynchronous device discovery requested.";
-    if (_widget) _widget->setDiscoveryPending(true);
     _discoveryCompletion = std::move(completion);
     _discoveryWatcher = std::make_unique<QFutureWatcher<HeliotisDiscoveryResult>>();
     auto* watcher = _discoveryWatcher.get();
@@ -318,16 +232,13 @@ bool HeliotisC4PluginSession::refreshDevices(Completion completion)
             if (!_discoveryWatcher || _discoveryWatcher.get() != watcher) return;
             const HeliotisDiscoveryResult result = watcher->result();
             _discoveryWatcher.reset();
-            if (_widget) _widget->setDiscoveryPending(false);
             if (!result.error.isEmpty()) {
                 qWarning().noquote() << "[Heliotis C4] Device discovery failed after"
                                      << result.elapsedMs << "ms:" << result.error;
-                if (_widget) _widget->setDiscoveryError(result.error);
                 finishCompletion(_discoveryCompletion, result.error);
                 return;
             }
             _devices = result.devices;
-            if (_widget) _widget->setDiscoveredDevices(_devices);
             qInfo().noquote() << "[Heliotis C4] Device discovery completed with"
                               << _devices.size() << "device(s) in" << result.elapsedMs << "ms.";
             finishCompletion(_discoveryCompletion, {});
@@ -357,19 +268,15 @@ bool HeliotisC4PluginSession::refreshDevices(Completion completion)
 bool HeliotisC4PluginSession::connectDevice(const int index, Completion completion)
 {
     if (sdkOperationPending()) {
-        if (_widget) _widget->setConnectionError(QObject::tr("Wait for the current Heliotis operation before connecting."));
+        qWarning().noquote() << "[Heliotis C4] Connection ignored because another SDK operation is pending.";
         return false;
     }
     if (_device && _device->isOpened()) {
         qWarning().noquote() << "[Heliotis C4] Connection ignored because the session already owns an open device.";
-        if (_widget) {
-            _widget->setConnectionState(true);
-            _widget->setAcquisitionAvailable(!_device->requiresReconnect());
-        }
         return false;
     }
     if (index < 0 || index >= static_cast<int>(_devices.size())) {
-        if (_widget) _widget->setConnectionError(QObject::tr("The selected Heliotis device is no longer available."));
+        qWarning().noquote() << "[Heliotis C4] The selected Heliotis device is no longer available.";
         return false;
     }
 
@@ -384,29 +291,23 @@ bool HeliotisC4PluginSession::connectDevice(const int index, Completion completi
             if (!_connectionWatcher || _connectionWatcher.get() != watcher) return;
             const HeliotisConnectionResult result = watcher->result();
             _connectionWatcher.reset();
-            if (_widget) _widget->setConnectionPending(false);
             qInfo().noquote() << "[Heliotis C4] Asynchronous device connection finished:"
                               << "opened=" << result.opened
                               << "openElapsedMs=" << result.openElapsedMs;
             if (!result.opened) {
                 qWarning().noquote() << "[Heliotis C4] Device connection failed:" << result.openError;
-                if (_widget) _widget->setConnectionError(result.openError);
                 finishCompletion(_connectCompletion, result.openError);
                 return;
             }
             _connectedTarget = descriptor;
+            // A new connection clears the latched reconnect-required error.
+            _reconnectRequired = false;
             const QString deviceName = QString::fromStdString(_device->connectedDeviceName());
             if (!deviceName.isEmpty()) {
                 _title = QStringLiteral("Heliotis C4 - %1").arg(deviceName);
                 if (_titleChanged) _titleChanged(_title);
             }
-            if (_widget) {
-                _widget->setConnectedDeviceName(deviceName);
-                _widget->setConnectionState(true);
-                _widget->setAcquisitionAvailable(true);
-            }
             refreshFeatureTree([this](const bool featuresRefreshed) {
-                if (_widget) _widget->setAcquisitionAvailable(true);
                 qInfo().noquote() << "[Heliotis C4] Device connection completed."
                                   << "The existing device configuration was preserved;"
                                   << "Init remains the explicit default-profile and StageInit action."
@@ -445,7 +346,6 @@ bool HeliotisC4PluginSession::requestDisconnect(Completion completion)
     _disconnectCompletion = std::move(completion);
     if (_controller && _controller->isGrabbing()) {
         _disconnectPending = true;
-        if (_widget) _widget->setDisconnectionPending();
         _controller->requestStop();
         return true;
     }
@@ -457,7 +357,6 @@ void HeliotisC4PluginSession::completeDisconnect()
 {
     if (!_device || _disconnectionWatcher) return;
     _disconnectPending = true;
-    if (_widget) _widget->setDisconnectionPending();
     qInfo().noquote() << "[Heliotis C4] Asynchronous device disconnect started.";
 
     _disconnectionWatcher = std::make_unique<QFutureWatcher<HeliotisDisconnectionResult>>();
@@ -469,10 +368,7 @@ void HeliotisC4PluginSession::completeDisconnect()
             _disconnectionWatcher.reset();
             _disconnectPending = false;
             _connectedTarget.reset();
-            if (_widget) {
-                _widget->setFeatures({});
-                _widget->setConnectionState(false);
-            }
+            _reconnectRequired = false;
             qInfo().noquote() << "[Heliotis C4] Asynchronous device disconnect completed:"
                               << "elapsedMs=" << result.elapsedMs;
             finishCompletion(_disconnectCompletion, {});
@@ -491,7 +387,7 @@ void HeliotisC4PluginSession::completeDisconnect()
 bool HeliotisC4PluginSession::requestAcquisitionArm(const bool continuous, Completion completion)
 {
     if (!_controller || !_device || !_device->isOpened()
-        || _device->requiresReconnect() || _controller->isGrabbing()
+        || _device->requiresReconnect() || _reconnectRequired || _controller->isGrabbing()
         || sdkOperationPending() || _acquisitionEndCompletion) {
         qWarning().noquote() << "[Heliotis C4] Acquisition arm ignored because the device is unavailable, active, or busy.";
         return false;
@@ -500,7 +396,6 @@ bool HeliotisC4PluginSession::requestAcquisitionArm(const bool continuous, Compl
     qInfo().noquote() << "[Heliotis C4] Asynchronous acquisition arm requested:"
                       << (continuous ? "Live" : "Single");
     _armCompletion = std::move(completion);
-    if (_widget) _widget->setAcquisitionArmPending(true, continuous);
     _armWatcher = std::make_unique<QFutureWatcher<HeliotisAcquisitionArmResult>>();
     auto* watcher = _armWatcher.get();
     QObject::connect(watcher, &QFutureWatcher<HeliotisAcquisitionArmResult>::finished, this,
@@ -508,11 +403,9 @@ bool HeliotisC4PluginSession::requestAcquisitionArm(const bool continuous, Compl
             if (!_armWatcher || _armWatcher.get() != watcher) return;
             const HeliotisAcquisitionArmResult result = watcher->result();
             _armWatcher.reset();
-            if (_widget) _widget->setAcquisitionArmPending(false, result.continuous);
             if (!result.taskError.isEmpty()) {
                 qWarning().noquote() << "[Heliotis C4] Acquisition arm task raised an exception:"
                                      << result.taskError;
-                if (_widget) _widget->setAcquisitionError(result.taskError);
             }
             qInfo().noquote() << "[Heliotis C4] Asynchronous acquisition arm finished:"
                               << "mode=" << (result.continuous ? "Live" : "Single")
@@ -560,8 +453,7 @@ bool HeliotisC4PluginSession::requestAcquisitionArm(const bool continuous, Compl
 
 bool HeliotisC4PluginSession::initializeH8ReferenceProfile(Completion completion, std::function<bool()> cancelled)
 {
-    // The control widget and the declared init tool share this admission and
-    // completion path; neither depends on the other existing.
+    // The declared init tool uses this admission and completion path only.
     if (!_device || !_device->isOpened()
         || (_controller && _controller->isGrabbing()) || sdkOperationPending()) {
         qWarning().noquote() << "[Heliotis C4] H8 reference-profile initialization ignored because the device is unavailable, active, or busy.";
@@ -572,7 +464,6 @@ bool HeliotisC4PluginSession::initializeH8ReferenceProfile(Completion completion
                       << "Applying all C4Utility h8SurfSimple component, chunk, trigger, encoder, motion, processing, and illumination defaults."
                       << "StageInit follows the verified encoder and motion defaults and may move the stage."
                       << "Optional geometry or illumination capability failures are warning-only.";
-    if (_widget) _widget->setInitializationPending(true);
     _initializationWatcher = std::make_unique<QFutureWatcher<HeliotisInitializationResult>>();
     auto* watcher = _initializationWatcher.get();
     QObject::connect(watcher, &QFutureWatcher<HeliotisInitializationResult>::finished, this,
@@ -582,14 +473,6 @@ bool HeliotisC4PluginSession::initializeH8ReferenceProfile(Completion completion
             _initializationWatcher.reset();
 
             refreshFeatureTree([this, result, completion = std::move(completion)](const bool featuresRefreshed) mutable {
-                if (_widget) {
-                    if (!result.initialized) {
-                        _widget->setInitializationError(result.error);
-                    } else {
-                        _widget->setInitializationPending(false);
-                        _widget->setAcquisitionAvailable(true);
-                    }
-                }
                 if (!result.initialized) {
                     qWarning().noquote() << "[Heliotis C4] Explicit H8 default-profile initialization failed; connection and capture controls are preserved:"
                                          << result.error << "elapsedMs=" << result.elapsedMs;
@@ -641,7 +524,6 @@ bool HeliotisC4PluginSession::runFeatureOperation(
         return false;
     }
 
-    if (_widget) _widget->setFeatureOperationPending(true);
     _featureWatcher = std::make_unique<QFutureWatcher<HeliotisFeatureOperationResult>>();
     auto* watcher = _featureWatcher.get();
     QObject::connect(watcher, &QFutureWatcher<HeliotisFeatureOperationResult>::finished, this,
@@ -653,22 +535,16 @@ bool HeliotisC4PluginSession::runFeatureOperation(
                               << "succeeded=" << result.succeeded
                               << "elapsedMs=" << result.elapsedMs;
             if (!result.succeeded) {
-                if (_widget) {
-                    _widget->setFeatureOperationPending(false);
-                    _widget->setFeatureError(result.error);
-                }
                 qWarning().noquote() << "[Heliotis C4] Feature operation failed:" << result.error;
                 if (completion) completion(false);
                 return;
             }
             if (refreshFeaturesAfterSuccess) {
-                refreshFeatureTree([this, completion = std::move(completion)](const bool refreshed) mutable {
-                    if (_widget) _widget->setFeatureOperationPending(false);
+                refreshFeatureTree([completion = std::move(completion)](const bool refreshed) mutable {
                     if (completion) completion(refreshed);
                 });
                 return;
             }
-            if (_widget) _widget->setFeatureOperationPending(false);
             if (completion) completion(true);
         });
     watcher->setFuture(QtConcurrent::run([device = _device.get(), operation = std::move(operation)]() mutable {
@@ -721,7 +597,6 @@ void HeliotisC4PluginSession::refreshFeatureTree(std::function<void(bool)> compl
         return;
     }
 
-    if (_widget) _widget->setFeatureRefreshPending(true);
     _featureRefreshCompletion = std::move(completion);
     _featureReadWatcher = std::make_unique<QFutureWatcher<HeliotisFeatureReadResult>>();
     auto* watcher = _featureReadWatcher.get();
@@ -733,16 +608,13 @@ void HeliotisC4PluginSession::refreshFeatureTree(std::function<void(bool)> compl
             auto completion = std::move(_featureRefreshCompletion);
             _featureRefreshCompletion = {};
 
-            if (_widget) _widget->setFeatureRefreshPending(false);
             const bool succeeded = result.error.isEmpty();
             if (!succeeded) {
                 qWarning().noquote() << "[Heliotis C4] Feature read failed after"
                                      << result.elapsedMs << "ms:" << result.error;
-                if (_widget) _widget->setFeatureError(result.error);
             } else {
-                if (_widget) _widget->setFeatures(result.features);
-                // One observation feeds both the widget and API subscriptions;
-                // consumers never depend on a visible widget.
+                // One observation feeds the API subscriptions; consumers never
+                // depend on a visible view.
                 if (_controller) _controller->publishParameterSnapshot(result.features);
                 qInfo().noquote() << "[Heliotis C4] Feature tree refreshed with"
                                   << result.features.size() << "feature(s) in"

@@ -1,5 +1,3 @@
-#include "DevicePluginTemplate.h"
-
 #include "HeliotisC4PluginSession.h"
 #include "HeliotisC4System.h"
 
@@ -304,7 +302,7 @@ std::vector<heliotis::DeviceDescriptor> fromDiscoveryData(const QVariantList& va
 } // namespace
 
 /** Owns Heliotis discovery, sessions, and one coherently selected SDK runtime. */
-class HeliotisC4Plugin final : public DevicePluginTemplate, public IDevicePluginSettings {
+class HeliotisC4Plugin final : public QObject, public IDeviceRuntime, public IDevicePluginSettings {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)
     Q_INTERFACES(IDeviceRuntime IDevicePluginSettings)
