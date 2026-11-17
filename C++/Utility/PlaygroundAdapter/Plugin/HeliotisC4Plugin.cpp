@@ -6,8 +6,6 @@
 #include <QFileInfo>
 #include <QString>
 #include <QStringList>
-#include <QVariantList>
-#include <QVariantMap>
 
 #if defined(Q_OS_WIN)
 #include <qt_windows.h>
@@ -268,37 +266,6 @@ std::unique_ptr<HeliotisRuntimeLibrary> loadSelectedHeliotisRuntimeLibrary(
 }
 #endif
 
-QVariantList toDiscoveryData(const std::vector<heliotis::DeviceDescriptor>& devices)
-{
-    QVariantList result;
-    result.reserve(static_cast<qsizetype>(devices.size()));
-    for (const auto& device : devices) {
-        result.append(QVariantMap{
-            {QStringLiteral("interfaceIndex"), device.interfaceIndex},
-            {QStringLiteral("deviceIndex"), device.deviceIndex},
-            {QStringLiteral("interfaceName"), QString::fromStdString(device.interfaceName)},
-            {QStringLiteral("deviceName"), QString::fromStdString(device.deviceName)},
-        });
-    }
-    return result;
-}
-
-std::vector<heliotis::DeviceDescriptor> fromDiscoveryData(const QVariantList& values)
-{
-    std::vector<heliotis::DeviceDescriptor> devices;
-    devices.reserve(static_cast<std::size_t>(values.size()));
-    for (const QVariant& value : values) {
-        const QVariantMap item = value.toMap();
-        devices.push_back({
-            item.value(QStringLiteral("interfaceIndex")).toLongLong(),
-            item.value(QStringLiteral("deviceIndex")).toLongLong(),
-            item.value(QStringLiteral("interfaceName")).toString().toStdString(),
-            item.value(QStringLiteral("deviceName")).toString().toStdString(),
-        });
-    }
-    return devices;
-}
-
 } // namespace
 
 /** Owns Heliotis discovery, sessions, and one coherently selected SDK runtime. */
@@ -326,7 +293,7 @@ public:
 #endif
     }
 
-    bool discoverDevices(QVariantMap* discoveryData, QString* errorMessage) override
+    bool discoverDevices(QString* errorMessage) override
     {
         try {
             const auto system = c4System();
@@ -336,7 +303,12 @@ public:
                 if (errorMessage) *errorMessage = QString::fromStdString(discoveryError);
                 return false;
             }
-            if (discoveryData) discoveryData->insert(QStringLiteral("devices"), toDiscoveryData(devices));
+            // The package retains its discovery result; the Host receives only the
+            // typed target inventory through the session.
+            {
+                std::lock_guard<std::mutex> lock(_discoveryMutex);
+                _discoveredDevices = devices;
+            }
             return true;
         } catch (const std::exception& error) {
             if (errorMessage) *errorMessage = QString::fromLocal8Bit(error.what());
@@ -345,15 +317,19 @@ public:
     }
 
     std::unique_ptr<IDevicePluginSession> createSession(
-        const QVariantMap& discoveryData, QString* errorMessage) override
+        const QVariantMap& sessionOptions, QString* errorMessage) override
     {
+        Q_UNUSED(sessionOptions)
         try {
             const auto system = c4System();
             auto device = system->createDevice();
+            std::vector<heliotis::DeviceDescriptor> devices;
+            {
+                std::lock_guard<std::mutex> lock(_discoveryMutex);
+                devices = _discoveredDevices;
+            }
             return std::make_unique<HeliotisC4PluginSession>(
-                system, std::move(device),
-                fromDiscoveryData(discoveryData.value(QStringLiteral("devices")).toList()),
-                _settingsFile);
+                system, std::move(device), std::move(devices), _settingsFile);
         } catch (const std::exception& error) {
             if (errorMessage) *errorMessage = QString::fromLocal8Bit(error.what());
             return {};
@@ -404,6 +380,10 @@ private:
     }
 
     std::mutex _systemMutex;
+    // Discovery runs on a host worker thread; session creation runs on the GUI
+    // thread, so the retained snapshot needs its own guard.
+    std::mutex _discoveryMutex;
+    std::vector<heliotis::DeviceDescriptor> _discoveredDevices;
 #if defined(Q_OS_WIN)
     std::unique_ptr<HeliotisRuntimeLibrary> _runtimeLibrary;
 #endif

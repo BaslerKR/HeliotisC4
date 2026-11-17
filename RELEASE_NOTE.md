@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Migrate to the widget-free device runtime ABI: the plugin retains its discovery result and `createSession` no longer takes an opaque `QVariantMap`, and the session drops its `createDockWidgets` override.
+
 - Ship a widget-free package. Delete `QHeliotisC4Widget`, `HeliotisC4ControlUi`, `HeliotisC4FeatureTree`, `HeliotisC4Presentation`, the widget test and the `Utility/Qt` tree. `HeliotisC4Plugin` derives from `QObject` and `IDeviceRuntime` instead of the widget template, and its session creates no dock. The package target links `Playground::DeviceRuntimeContract`, the adapter and Qt Core/Concurrent only; it links no Qt Widgets, Resources widget/dialog library or OpenGL.
 
 - Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`.

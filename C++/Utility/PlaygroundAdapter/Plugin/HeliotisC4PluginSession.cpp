@@ -125,12 +125,6 @@ QString HeliotisC4PluginSession::title() const
     return _title;
 }
 
-std::vector<DevicePluginDock> HeliotisC4PluginSession::createDockWidgets(QWidget* parent)
-{
-    Q_UNUSED(parent)
-    return {};
-}
-
 AbstractSourceController* HeliotisC4PluginSession::sourceController() const
 {
     return _controller.get();

@@ -95,7 +95,6 @@ public:
     ~HeliotisC4PluginSession() override;
 
     QString title() const override;
-    std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override;
 
     AbstractSourceController* sourceController() const override;
     unsigned int capabilities() const noexcept override;
