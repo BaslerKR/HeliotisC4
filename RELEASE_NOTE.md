@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Declare device panel presentation in package session metadata.
+
 - Declare the Init action as omitted from the device panel's action row, since the flow starts from its own confirmation prompt; the tool, its availability and its confirmation are unchanged.
 - Ship the package icon from this repository (`C++/Utility/PlaygroundAdapter/Package/icon.png`) instead of the SDK-installed Resources brand asset. Include `DeviceRuntime/Contract/DevicePluginSession.h` from the contract include root; the SDK no longer installs a `PlaygroundWidget` header path or vendor icons.
 
