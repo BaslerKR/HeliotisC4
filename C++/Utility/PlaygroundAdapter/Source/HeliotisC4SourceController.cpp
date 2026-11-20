@@ -762,6 +762,9 @@ ToolDescriptor HeliotisC4SourceController::initToolDescriptor() const
     };
     descriptor.presentation = {QString::fromLatin1(kInitToolName), QStringLiteral("setting"),
         QStringLiteral("device"), 35};
+    // The top-row button is omitted by owner decision; the flow starts from this explicit
+    // confirmation prompt, so the package declares the omission instead of the Host naming it.
+    descriptor.presentation.panelOmitted = true;
     descriptor.cancellable = true;
     const auto unavailable = initUnavailable();
     descriptor.available = !unavailable.has_value();
