@@ -617,6 +617,16 @@ int main()
             return 1;
         }
 
+        auto shortRange = input;
+        std::get<std::vector<double>>(shortRange.parts.front().samples).pop_back();
+        const auto shortResult = adapter.convertFrameWithRejection(
+            shortRange, {}, rangeRejection, imageRejection);
+        if (!check(shortResult && shortResult->hasImage() && !shortResult->hasRangeFrame()
+                       && rangeRejection.affectedPart == 0U
+                       && rangeRejection.readableBytes == 24U && rangeRejection.requiredBytes == 32U,
+                   "Range evidence must compare byte counts for the same part and sample type."))
+            return 1;
+
         // A malformed optional auxiliary channel rejects the requested range,
         // but the separately converted intensity image is still retained.
         auto auxiliaryFailure = input;
@@ -635,7 +645,8 @@ int main()
             auxiliaryFailure, {}, rangeRejection, imageRejection);
         if (!check(rangeRejection.reason == RangeReason::InvalidLayout,
                    "A shape mismatch in a requested auxiliary channel must report the failed rule.")
-            || !check(rangeRejection.affectedPart == 0U
+            || !check(rangeRejection.affectedPart == 2U
+                          && rangeRejection.readableBytes == 6U && rangeRejection.requiredBytes == 8U
                           && rangeRejection.partCount == 3U && rangeRejection.width == 2U
                           && rangeRejection.height == 2U && rangeRejection.frameSequence == 11U,
                       "Range evidence must carry the fixed part ordinal and frame sequence.")

@@ -115,11 +115,14 @@ void writeConvertedSamples(const heliotis::FramePart& part,
     return static_cast<std::uint64_t>(sampleCount(part)) * sampleSize;
 }
 
-[[nodiscard]] std::uint64_t gridBytes(const int width, const int height) noexcept
+[[nodiscard]] std::uint64_t gridBytes(const heliotis::FramePart& part, const int width, const int height) noexcept
 {
-    return width > 0 && height > 0
-        ? static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * sizeof(std::uint16_t)
-        : 0U;
+    if (width <= 0 || height <= 0) return 0U;
+    const auto samples = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+    const std::uint64_t sampleSize = std::holds_alternative<std::vector<std::uint16_t>>(part.samples)
+        ? sizeof(std::uint16_t) : sizeof(double);
+    return samples <= (std::numeric_limits<std::uint64_t>::max)() / sampleSize
+        ? samples * sampleSize : 0U;
 }
 
 using RangeReason = heliotis::HeliotisRangeRejection::Reason;
@@ -417,34 +420,15 @@ struct SelectedRange
     const bool oneRowPreview = !hasRepresentableDimensions(rangePart);
     rawPartPreview = rawPartPreview || oneRowPreview;
     const std::size_t expected = sampleCount(rangePart);
-    if (expected == 0U || expected > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
-    {
-        return rejectRange(rejection,
-                           expected == 0U ? RangeReason::MissingData : RangeReason::SizeLimitExceeded,
-                           partIndex, partCount, 0, 0, frame.sequence,
-                           sampleBytes(rangePart), 0U);
-    }
     const int width = oneRowPreview ? static_cast<int>(expected) : static_cast<int>(rangePart.width);
     const int height = oneRowPreview ? 1 : static_cast<int>(rangePart.height);
     if (expected != static_cast<std::size_t>(width) * static_cast<std::size_t>(height))
     {
         return rejectRange(rejection, RangeReason::InvalidLayout,
                            partIndex, partCount, width, height, frame.sequence,
-                           sampleBytes(rangePart), gridBytes(width, height));
+                           sampleBytes(rangePart), gridBytes(rangePart, width, height));
     }
     const auto* rangeRawSamples = std::get_if<std::vector<std::uint16_t>>(&rangePart.samples);
-    if (rangeRawSamples != nullptr && !rangeRawSamples->empty()
-        && rangeRawSamples->size() != expected)
-    {
-        return rejectRange(rejection, RangeReason::TruncatedData,
-                           partIndex, partCount, width, height, frame.sequence,
-                           sampleBytes(rangePart), gridBytes(width, height));
-    }
-
-    const auto rawFits = [expected](const FramePart& part) {
-        const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples);
-        return values == nullptr || values->empty() || values->size() == expected;
-    };
     const FramePart* intensityPart = request.includeRangeAuxiliaryChannels
         ? findPart(frame, FramePartKind::Intensity) : nullptr;
     if (intensityPart != nullptr)
@@ -453,11 +437,12 @@ struct SelectedRange
         {
             intensityPart = nullptr;
         }
-        else if (sampleCount(*intensityPart) != expected || !rawFits(*intensityPart))
+        else if (sampleCount(*intensityPart) != expected)
         {
             return rejectRange(rejection, RangeReason::InvalidLayout,
-                               partIndex, partCount, width, height, frame.sequence,
-                               sampleBytes(*intensityPart), gridBytes(width, height));
+                               static_cast<std::uint32_t>(intensityPart - frame.parts.data()),
+                               partCount, width, height, frame.sequence,
+                               sampleBytes(*intensityPart), gridBytes(*intensityPart, width, height));
         }
     }
     const FramePart* confidencePart = request.includeRangeAuxiliaryChannels
@@ -468,11 +453,12 @@ struct SelectedRange
         {
             confidencePart = nullptr;
         }
-        else if (sampleCount(*confidencePart) != expected || !rawFits(*confidencePart))
+        else if (sampleCount(*confidencePart) != expected)
         {
             return rejectRange(rejection, RangeReason::InvalidLayout,
-                               partIndex, partCount, width, height, frame.sequence,
-                               sampleBytes(*confidencePart), gridBytes(width, height));
+                               static_cast<std::uint32_t>(confidencePart - frame.parts.data()),
+                               partCount, width, height, frame.sequence,
+                               sampleBytes(*confidencePart), gridBytes(*confidencePart, width, height));
         }
     }
 
@@ -493,7 +479,7 @@ struct SelectedRange
         && std::get<std::vector<std::uint16_t>>(confidencePart->samples).size() == expected;
 
     const std::uint64_t readableBytes = sampleBytes(rangePart);
-    const std::uint64_t requiredBytes = gridBytes(width, height);
+    const std::uint64_t requiredBytes = gridBytes(rangePart, width, height);
     GraphicsRangeFrameWriter writer(layout, frameStorage);
     if (!writer.isValid())
     {
@@ -518,8 +504,10 @@ struct SelectedRange
                 std::get<std::vector<std::uint16_t>>(intensityPart->samples).data(),
                 GraphicsSampleByteOrder::LittleEndian))
             {
-                return rejectRange(rejection, RangeReason::InvalidLayout, partIndex, partCount,
-                                   width, height, frame.sequence, readableBytes, requiredBytes);
+                return rejectRange(rejection, RangeReason::InvalidLayout,
+                                   static_cast<std::uint32_t>(intensityPart - frame.parts.data()),
+                                   partCount, width, height, frame.sequence,
+                                   sampleBytes(*intensityPart), gridBytes(*intensityPart, width, height));
             }
         }
     }
@@ -532,8 +520,10 @@ struct SelectedRange
                 std::get<std::vector<std::uint16_t>>(confidencePart->samples).data(),
                 GraphicsSampleByteOrder::LittleEndian))
             {
-                return rejectRange(rejection, RangeReason::InvalidLayout, partIndex, partCount,
-                                   width, height, frame.sequence, readableBytes, requiredBytes);
+                return rejectRange(rejection, RangeReason::InvalidLayout,
+                                   static_cast<std::uint32_t>(confidencePart - frame.parts.data()),
+                                   partCount, width, height, frame.sequence,
+                                   sampleBytes(*confidencePart), gridBytes(*confidencePart, width, height));
             }
         }
     }
