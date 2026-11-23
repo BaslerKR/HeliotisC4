@@ -43,7 +43,6 @@ struct HeliotisRangeRejection {
     static constexpr auto noPart = (std::numeric_limits<std::uint32_t>::max)();
 
     Reason reason = Reason::None;
-    std::uint32_t sourceIndex = 0;
     std::uint32_t partCount = 0;
     std::uint32_t affectedPart = noPart;
     std::uint32_t width = 0;
@@ -89,13 +88,11 @@ struct HeliotisImageRejection {
 
     Reason reason = Reason::None;
     Conversion conversion = Conversion::None;
-    std::uint32_t sourceIndex = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint64_t frameSequence = 0;
     /** Producer-defined numeric pixel format is unavailable in this SDK-neutral frame. */
     std::uint64_t pixelFormat = 0;
-    std::uint64_t reportedStride = 0;
     std::uint64_t effectiveStride = 0;
     std::uint64_t minimumRowBytes = 0;
     std::uint64_t readableBytes = 0;

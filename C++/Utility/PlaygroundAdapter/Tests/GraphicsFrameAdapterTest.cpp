@@ -635,7 +635,7 @@ int main()
             auxiliaryFailure, {}, rangeRejection, imageRejection);
         if (!check(rangeRejection.reason == RangeReason::InvalidLayout,
                    "A shape mismatch in a requested auxiliary channel must report the failed rule.")
-            || !check(rangeRejection.sourceIndex == 0U && rangeRejection.affectedPart == 0U
+            || !check(rangeRejection.affectedPart == 0U
                           && rangeRejection.partCount == 3U && rangeRejection.width == 2U
                           && rangeRejection.height == 2U && rangeRejection.frameSequence == 11U,
                       "Range evidence must carry the fixed part ordinal and frame sequence.")
@@ -689,11 +689,11 @@ int main()
             input, {}, rangeRejection, imageRejection);
         if (!check(imageRejection.reason == ImageReason::StorageRefused,
                    "A refused image destination must report StorageRefused.")
-            || !check(imageRejection.sourceIndex == 1U && imageRejection.width == 2U
+            || !check(imageRejection.width == 2U && imageRejection.effectiveStride == 4U
                           && imageRejection.height == 2U && imageRejection.frameSequence == 11U
                           && imageRejection.conversion
                                  == heliotis::HeliotisImageRejection::Conversion::Copy,
-                      "Image evidence must carry the fixed part ordinal, sequence and conversion.")
+                      "Image evidence must carry the effective stride, sequence and conversion.")
             || !check(imageRefused && imageRefused->ranges.size() == 1U,
                       "A refused image must leave the valid range retained.")
             || !check(rangeRejection.reason == RangeReason::None,

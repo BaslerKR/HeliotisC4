@@ -138,7 +138,6 @@ using RangeReason = heliotis::HeliotisRangeRejection::Reason;
 {
     if (rejection && rejection->reason == RangeReason::None) {
         rejection->reason = reason;
-        rejection->sourceIndex = partIndex;
         rejection->partCount = static_cast<std::uint32_t>(partCount);
         rejection->affectedPart = partIndex;
         rejection->width = width > 0 ? static_cast<std::uint32_t>(width) : 0U;
@@ -202,18 +201,15 @@ using ImageReason = heliotis::HeliotisImageRejection::Reason;
 [[nodiscard]] std::nullopt_t rejectImage(
     heliotis::HeliotisImageRejection* rejection,
     const ImageReason reason,
-    const std::size_t partIndex,
     const GraphicsImageWriterSource& source) noexcept
 {
     if (rejection && rejection->reason == ImageReason::None) {
         rejection->reason = reason;
         rejection->conversion = heliotis::HeliotisImageRejection::Conversion::Copy;
-        rejection->sourceIndex = static_cast<std::uint32_t>(partIndex);
         rejection->width = source.width > 0 ? static_cast<std::uint32_t>(source.width) : 0U;
         rejection->height = source.height > 0 ? static_cast<std::uint32_t>(source.height) : 0U;
         rejection->frameSequence = source.frameSequence;
-        rejection->reportedStride = source.stride > 0 ? static_cast<std::uint64_t>(source.stride) : 0U;
-        rejection->effectiveStride = rejection->reportedStride;
+        rejection->effectiveStride = source.stride > 0 ? static_cast<std::uint64_t>(source.stride) : 0U;
         rejection->minimumRowBytes = static_cast<std::uint64_t>(
             GraphicsImageValidation::minimumRowBytes(source.pixelFormat, source.width));
         rejection->readableBytes = static_cast<std::uint64_t>(source.size);
@@ -310,7 +306,6 @@ using ImageReason = heliotis::HeliotisImageRejection::Reason;
 [[nodiscard]] std::optional<GraphicsImage> intensityImage(
     const heliotis::FramePart& part,
     const std::uint64_t sequence,
-    const std::size_t partIndex,
     const GraphicsImageStorage& frameStorage,
     heliotis::HeliotisImageRejection* rejection)
 {
@@ -356,7 +351,7 @@ using ImageReason = heliotis::HeliotisImageRejection::Reason;
         // refused is observable. Floating, empty, oversized and malformed parts
         // above are intentionally skipped without a warning.
         const ImageReason reason = imageRejectionReason(failure);
-        if (reason != ImageReason::None) return rejectImage(rejection, reason, partIndex, source);
+        if (reason != ImageReason::None) return rejectImage(rejection, reason, source);
         return std::nullopt;
     }
     return image;
@@ -675,7 +670,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         {
             const FramePart& part = frame.parts[index];
             if (part.kind != FramePartKind::Intensity) continue;
-            auto image = intensityImage(part, frame.sequence, index, frameStorage, imageRejection);
+            auto image = intensityImage(part, frame.sequence, frameStorage, imageRejection);
             if (!image) continue;
             result.addImage(resourceId("image", index), std::move(*image),
                             part.name.empty() ? std::string("Intensity") : part.name, kResourceGroup);
@@ -693,13 +688,13 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
 
     // Retention is observed from the assembled result, never inferred from the
     // failure: a rejected range can leave a valid intensity image and vice versa.
-    if (rangeRejection) {
-        rangeRejection->rangeRetained = !result.ranges.empty();
-        rangeRejection->imageRetained = !result.images.empty();
-    }
     if (!result.isValid())
     {
         return std::nullopt;
+    }
+    if (rangeRejection) {
+        rangeRejection->rangeRetained = !result.ranges.empty();
+        rangeRejection->imageRetained = !result.images.empty();
     }
     result.metadata.sourceName = "Heliotis C4";
     result.metadata.frameId = frame.frameId;

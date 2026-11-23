@@ -342,7 +342,6 @@ void HeliotisC4SourceController::reportRangeRejection(
     }
     DeviceRangeRejectionObservation observation;
     observation.reason = reason;
-    observation.sourceIndex = rejection.sourceIndex;
     observation.partCount = rejection.partCount;
     observation.affectedPart = rejection.affectedPart;
     observation.width = rejection.width;
@@ -372,13 +371,11 @@ void HeliotisC4SourceController::reportImageRejection(
     DeviceImageRejectionObservation observation;
     observation.reason = reason;
     observation.conversion = deviceImageConversion(rejection.conversion);
-    observation.sourceIndex = rejection.sourceIndex;
     observation.width = rejection.width;
     observation.height = rejection.height;
     observation.directInput = rejection.directInput;
     observation.frameSequence = rejection.frameSequence;
     observation.pixelFormat = rejection.pixelFormat;
-    observation.reportedStride = rejection.reportedStride;
     observation.effectiveStride = rejection.effectiveStride;
     observation.minimumRowBytes = rejection.minimumRowBytes;
     observation.readableBytes = rejection.readableBytes;
