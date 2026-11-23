@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeviceRuntime/Contract/DeviceRuntime.h"
+#include "DeviceRuntime/Contract/DeviceImageDiagnostics.h"
 #include "DeviceRuntime/Contract/DevicePluginSession.h"
 #include "HeliotisC4SourceController.h"
 #include "HeliotisC4System.h"
@@ -83,6 +84,8 @@ public:
      * @param devices Copied discovery snapshot exposed through the device tool contract.
      * @param settingsFile Host-owned INI retained for constructor compatibility; the Host panel
      *        owns the favourites store and namespace.
+     * @param rangeRejectionSink Borrowed optional range rejection sink.
+     * @param imageRejectionSink Borrowed optional image rejection sink.
      * @param parent Owning Qt object; the session is a QObject so background completions keep a
      *        connection context without a view.
      */
@@ -91,6 +94,8 @@ public:
         std::unique_ptr<heliotis::HeliotisC4Device> device,
         std::vector<heliotis::DeviceDescriptor> devices,
         QString settingsFile,
+        DeviceRangeRejectionSink rangeRejectionSink = nullptr,
+        DeviceImageRejectionSink imageRejectionSink = nullptr,
         QObject* parent = nullptr);
     ~HeliotisC4PluginSession() override;
 

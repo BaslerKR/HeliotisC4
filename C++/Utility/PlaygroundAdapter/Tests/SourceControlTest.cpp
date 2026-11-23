@@ -110,6 +110,13 @@ bool HeliotisC4Device::deregisterStatusCallback(CallbackId)
 
 namespace {
 
+std::vector<DeviceRangeRejectionObservation> observedRanges;
+
+void rememberRange(const DeviceRangeRejectionObservation& observation) noexcept
+{
+    observedRanges.push_back(observation);
+}
+
 int failures = 0;
 
 void require(const bool condition, const char* message)
@@ -607,6 +614,57 @@ int main(int argc, char** argv)
         require(callable.sourceRuntimeDiagnostics(0)->delivered == 0 && callable.sourceRuntimeDiagnostics(0)->failed == 0,
                 "A new run resets diagnostics.");
         require(!callable.sourceRuntimeDiagnostics(9), "Unknown source indices are unsupported.");
+        fake::acquiring = false;
+        fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
+    }
+    {
+        // The owner sink is detail-independent: Single reports every observed
+        // failure, while Live keeps the first and every 100th per acquisition.
+        heliotis::HeliotisC4Device device(nullptr);
+        observedRanges.clear();
+        HeliotisC4SourceController controller(&device, nullptr, rememberRange, nullptr);
+        controller.start();
+        heliotis::Frame rejected;
+        rejected.sequence = 1;
+        rejected.parts = {{heliotis::FramePartKind::Range, "Range", "Mono16", 2, 2, 16,
+                           std::vector<std::uint16_t>{}}};
+        fake::frame(heliotis::Frame(rejected));
+        require(observedRanges.size() == 1U
+                    && observedRanges.front().reason == DeviceRangeRejection::MissingRange
+                    && observedRanges.front().frameSequence == 1U
+                    && !observedRanges.front().rangeRetained
+                    && !observedRanges.front().imageRetained,
+                "A Live run must report the first range rejection with fixed evidence.");
+        for (unsigned frame = 2; frame < 100; ++frame) {
+            rejected.sequence = frame;
+            fake::frame(heliotis::Frame(rejected));
+        }
+        require(observedRanges.size() == 1U,
+                "A Live run must coalesce intermediate failures of the same reason.");
+        rejected.sequence = 100;
+        fake::frame(heliotis::Frame(rejected));
+        require(observedRanges.size() == 2U && observedRanges.back().frameSequence == 100U,
+                "A Live run must report every 100th failure of a reason.");
+        fake::acquiring = false;
+        fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
+
+        // A new acquisition resets the per-reason counts.
+        controller.start();
+        rejected.sequence = 101;
+        fake::frame(heliotis::Frame(rejected));
+        require(observedRanges.size() == 3U && observedRanges.back().frameSequence == 101U,
+                "A new Live acquisition must report its first failure again.");
+        fake::acquiring = false;
+        fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
+
+        // Single reports every failure without coalescing.
+        require(controller.grabOne(), "A Single run must be admitted.");
+        for (unsigned frame = 102; frame < 105; ++frame) {
+            rejected.sequence = frame;
+            fake::frame(heliotis::Frame(rejected));
+        }
+        require(observedRanges.size() == 6U && observedRanges.back().frameSequence == 104U,
+                "A Single run must report every observed failure.");
         fake::acquiring = false;
         fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
     }

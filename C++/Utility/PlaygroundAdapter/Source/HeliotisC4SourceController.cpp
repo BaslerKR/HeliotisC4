@@ -2,6 +2,7 @@
 #include "engine/GraphicsFrame.h"
 
 #include "Utility/PlaygroundAdapter/HeliotisGraphicsFrameStream.h"
+#include "Utility/PlaygroundAdapter/HeliotisC4GraphicsFrameAdapter.h"
 #include "DeviceRuntime/Contract/SessionFrame.h"
 
 #include <QByteArray>
@@ -24,6 +25,68 @@
 #include <tuple>
 #include <utility>
 #include <algorithm>
+
+namespace {
+
+/** Maps the Qt-free adapter reason to the exact host range rejection enum. */
+DeviceRangeRejection deviceRangeRejection(const heliotis::HeliotisRangeRejection::Reason reason) noexcept
+{
+    using Reason = heliotis::HeliotisRangeRejection::Reason;
+    switch (reason) {
+    case Reason::MissingRange: return DeviceRangeRejection::MissingRange;
+    case Reason::MissingData: return DeviceRangeRejection::MissingData;
+    case Reason::InvalidDimensions: return DeviceRangeRejection::InvalidDimensions;
+    case Reason::UnsupportedFormat: return DeviceRangeRejection::UnsupportedFormat;
+    case Reason::InvalidLayout: return DeviceRangeRejection::InvalidLayout;
+    case Reason::StrideBelowMinimum: return DeviceRangeRejection::StrideBelowMinimum;
+    case Reason::TruncatedData: return DeviceRangeRejection::TruncatedData;
+    case Reason::MissingCalibration: return DeviceRangeRejection::MissingCalibration;
+    case Reason::InvalidCalibration: return DeviceRangeRejection::InvalidCalibration;
+    case Reason::UnsupportedGeometry: return DeviceRangeRejection::UnsupportedGeometry;
+    case Reason::UnsupportedUnit: return DeviceRangeRejection::UnsupportedUnit;
+    case Reason::SizeLimitExceeded: return DeviceRangeRejection::SizeLimitExceeded;
+    case Reason::StorageRefused: return DeviceRangeRejection::StorageRefused;
+    case Reason::StorageMisaligned: return DeviceRangeRejection::StorageMisaligned;
+    case Reason::None: break;
+    }
+    return DeviceRangeRejection::MissingRange;
+}
+
+/** Maps the Qt-free adapter image reason to the exact host enum; None is filtered by the caller. */
+DeviceImageRejection deviceImageRejection(const heliotis::HeliotisImageRejection::Reason reason) noexcept
+{
+    using Reason = heliotis::HeliotisImageRejection::Reason;
+    switch (reason) {
+    case Reason::MissingBytes: return DeviceImageRejection::MissingBytes;
+    case Reason::InvalidDimensions: return DeviceImageRejection::InvalidDimensions;
+    case Reason::UnsupportedFormat: return DeviceImageRejection::UnsupportedFormat;
+    case Reason::InvalidStride: return DeviceImageRejection::InvalidStride;
+    case Reason::StrideBelowMinimum: return DeviceImageRejection::StrideBelowMinimum;
+    case Reason::ExtentOverflow: return DeviceImageRejection::ExtentOverflow;
+    case Reason::TruncatedBytes: return DeviceImageRejection::TruncatedBytes;
+    case Reason::OddWidth: return DeviceImageRejection::OddWidth;
+    case Reason::UnsupportedConversion: return DeviceImageRejection::UnsupportedConversion;
+    case Reason::StorageRefused: return DeviceImageRejection::StorageRefused;
+    case Reason::None: break;
+    }
+    return DeviceImageRejection::NoImage;
+}
+
+/** Maps the Qt-free adapter conversion path to the exact host enum. */
+DeviceImageConversion deviceImageConversion(const heliotis::HeliotisImageRejection::Conversion conversion) noexcept
+{
+    using Conversion = heliotis::HeliotisImageRejection::Conversion;
+    switch (conversion) {
+    case Conversion::Borrow: return DeviceImageConversion::Borrow;
+    case Conversion::Copy: return DeviceImageConversion::Copy;
+    case Conversion::SwapByteOrder: return DeviceImageConversion::SwapByteOrder;
+    case Conversion::JpegCopy: return DeviceImageConversion::JpegCopy;
+    case Conversion::None: break;
+    }
+    return DeviceImageConversion::None;
+}
+
+} // namespace
 
 /** One accepted `heliotis-c4.init` call; delivery happens exactly once. */
 struct HeliotisC4SourceController::InitToolCall {
@@ -66,9 +129,12 @@ struct HeliotisC4SourceController::ParameterWatch {
     }
 };
 
-HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Device* device, QObject* parent)
+HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Device* device, QObject* parent,
+    DeviceRangeRejectionSink rangeRejectionSink, DeviceImageRejectionSink imageRejectionSink)
     : AbstractSourceController(parent),
-      _device(device)
+      _device(device),
+      _rangeRejectionSink(rangeRejectionSink),
+      _imageRejectionSink(imageRejectionSink)
 {
     if (!_device) return;
     _statusCallbackId = _device->registerStatusCallback([this](const heliotis::HeliotisC4Device::Status status,
@@ -120,6 +186,18 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
             if (!active && !error.isEmpty()) emit acquisitionError(error);
         }, Qt::QueuedConnection);
     });
+    heliotis::HeliotisGraphicsFrameStream::RejectedRange rejectedRange;
+    if (_rangeRejectionSink) {
+        rejectedRange = [this](const heliotis::HeliotisRangeRejection& rejection) {
+            reportRangeRejection(rejection);
+        };
+    }
+    heliotis::HeliotisGraphicsFrameStream::RejectedImage rejectedImage;
+    if (_imageRejectionSink) {
+        rejectedImage = [this](const heliotis::HeliotisImageRejection& rejection) {
+            reportImageRejection(rejection);
+        };
+    }
     _graphicsStream = std::make_unique<heliotis::HeliotisGraphicsFrameStream>(
         _device,
         [this](GraphicsFrame&& frame, const unsigned int sourceIndex) {
@@ -130,7 +208,7 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
             if (_softwareTriggerActive.load() && _isContinuous.load()) {
                 emit acquisitionFrameReceived();
             }
-        });
+        }, std::move(rejectedRange), std::move(rejectedImage));
 }
 
 void HeliotisC4SourceController::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
@@ -217,6 +295,7 @@ bool HeliotisC4SourceController::startAcquisition(const heliotis::HeliotisC4Devi
     const bool continuous = mode == heliotis::HeliotisC4Device::AcquisitionMode::Continuous;
     _isContinuous.store(continuous);
     _framesInCurrentAcquisition.store(0);
+    resetRejectionCounters(!continuous);
     std::string error;
     const bool started = _graphicsStream && _graphicsStream->start(mode, &error);
     if (!started) {
@@ -241,6 +320,70 @@ bool HeliotisC4SourceController::startAcquisition(const heliotis::HeliotisC4Devi
                               : "Frames are automatic or externally triggered; the host arm action issues no trigger.");
     }
     return started;
+}
+
+void HeliotisC4SourceController::resetRejectionCounters(const bool single) noexcept
+{
+    _singleInFlight.store(single, std::memory_order_relaxed);
+    for (auto& counter : _rangeRejections) counter.store(0, std::memory_order_relaxed);
+    for (auto& counter : _imageRejections) counter.store(0, std::memory_order_relaxed);
+}
+
+void HeliotisC4SourceController::reportRangeRejection(
+    const heliotis::HeliotisRangeRejection& rejection) noexcept
+{
+    if (!_rangeRejectionSink
+        || rejection.reason == heliotis::HeliotisRangeRejection::Reason::None) return;
+    const auto reason = deviceRangeRejection(rejection.reason);
+    if (!_singleInFlight.load(std::memory_order_relaxed)) {
+        auto& counter = _rangeRejections[static_cast<std::size_t>(reason)];
+        const auto count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count != 1 && count % 100 != 0) return;
+    }
+    DeviceRangeRejectionObservation observation;
+    observation.reason = reason;
+    observation.sourceIndex = rejection.sourceIndex;
+    observation.partCount = rejection.partCount;
+    observation.affectedPart = rejection.affectedPart;
+    observation.width = rejection.width;
+    observation.height = rejection.height;
+    observation.frameRetained = rejection.rangeRetained || rejection.imageRetained;
+    observation.imageRetained = rejection.imageRetained;
+    observation.rangeRetained = rejection.rangeRetained;
+    observation.frameSequence = rejection.frameSequence;
+    observation.readableBytes = rejection.readableBytes;
+    observation.requiredBytes = rejection.requiredBytes;
+    observation.requestedStorageBytes = rejection.requestedStorageBytes;
+    _rangeRejectionSink(observation);
+}
+
+void HeliotisC4SourceController::reportImageRejection(
+    const heliotis::HeliotisImageRejection& rejection) noexcept
+{
+    if (!_imageRejectionSink
+        || rejection.reason == heliotis::HeliotisImageRejection::Reason::None) return;
+    const auto reason = deviceImageRejection(rejection.reason);
+    if (reason == DeviceImageRejection::NoImage) return;
+    if (!_singleInFlight.load(std::memory_order_relaxed)) {
+        auto& counter = _imageRejections[static_cast<std::size_t>(reason)];
+        const auto count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count != 1 && count % 100 != 0) return;
+    }
+    DeviceImageRejectionObservation observation;
+    observation.reason = reason;
+    observation.conversion = deviceImageConversion(rejection.conversion);
+    observation.sourceIndex = rejection.sourceIndex;
+    observation.width = rejection.width;
+    observation.height = rejection.height;
+    observation.directInput = rejection.directInput;
+    observation.frameSequence = rejection.frameSequence;
+    observation.pixelFormat = rejection.pixelFormat;
+    observation.reportedStride = rejection.reportedStride;
+    observation.effectiveStride = rejection.effectiveStride;
+    observation.minimumRowBytes = rejection.minimumRowBytes;
+    observation.readableBytes = rejection.readableBytes;
+    observation.requiredBytes = rejection.requiredBytes;
+    _imageRejectionSink(observation);
 }
 
 void HeliotisC4SourceController::handleFrame(GraphicsFrame&& payload, const unsigned int sourceIndex)

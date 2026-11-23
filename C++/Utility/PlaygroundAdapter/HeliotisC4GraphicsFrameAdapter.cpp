@@ -107,6 +107,121 @@ void writeConvertedSamples(const heliotis::FramePart& part,
         && part.height <= static_cast<std::uint32_t>((std::numeric_limits<int>::max)());
 }
 
+/** Bytes carried by a part's own sample vector, independent of its declared shape. */
+[[nodiscard]] std::uint64_t sampleBytes(const heliotis::FramePart& part) noexcept
+{
+    const std::uint64_t sampleSize = std::holds_alternative<std::vector<std::uint16_t>>(part.samples)
+        ? sizeof(std::uint16_t) : sizeof(double);
+    return static_cast<std::uint64_t>(sampleCount(part)) * sampleSize;
+}
+
+[[nodiscard]] std::uint64_t gridBytes(const int width, const int height) noexcept
+{
+    return width > 0 && height > 0
+        ? static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * sizeof(std::uint16_t)
+        : 0U;
+}
+
+using RangeReason = heliotis::HeliotisRangeRejection::Reason;
+
+/** Records only the first failed rule; later failures on the same frame are ignored. */
+[[nodiscard]] std::nullopt_t rejectRange(
+    heliotis::HeliotisRangeRejection* rejection,
+    const RangeReason reason,
+    const std::uint32_t partIndex,
+    const std::size_t partCount,
+    const int width,
+    const int height,
+    const std::uint64_t sequence,
+    const std::uint64_t readableBytes,
+    const std::uint64_t requiredBytes) noexcept
+{
+    if (rejection && rejection->reason == RangeReason::None) {
+        rejection->reason = reason;
+        rejection->sourceIndex = partIndex;
+        rejection->partCount = static_cast<std::uint32_t>(partCount);
+        rejection->affectedPart = partIndex;
+        rejection->width = width > 0 ? static_cast<std::uint32_t>(width) : 0U;
+        rejection->height = height > 0 ? static_cast<std::uint32_t>(height) : 0U;
+        rejection->frameSequence = sequence;
+        rejection->readableBytes = readableBytes;
+        rejection->requiredBytes = requiredBytes;
+    }
+    return std::nullopt;
+}
+
+/** Maps the real range writer failure and always retains its calculated block bytes. */
+[[nodiscard]] std::nullopt_t rejectRangeWriter(
+    heliotis::HeliotisRangeRejection* rejection,
+    const GraphicsRangeFrameWriter& writer,
+    const std::uint32_t partIndex,
+    const std::size_t partCount,
+    const int width,
+    const int height,
+    const std::uint64_t sequence,
+    const std::uint64_t readableBytes,
+    const std::uint64_t requiredBytes) noexcept
+{
+    if (!rejection) return std::nullopt;
+    rejection->requestedStorageBytes = static_cast<std::uint64_t>(writer.blockBytes());
+    RangeReason reason = RangeReason::InvalidLayout;
+    switch (writer.failure()) {
+    case GraphicsRangeFrameWriterFailure::InvalidDimensions: reason = RangeReason::InvalidDimensions; break;
+    case GraphicsRangeFrameWriterFailure::SizeLimitExceeded: reason = RangeReason::SizeLimitExceeded; break;
+    case GraphicsRangeFrameWriterFailure::StorageRefused: reason = RangeReason::StorageRefused; break;
+    case GraphicsRangeFrameWriterFailure::MisalignedStorage: reason = RangeReason::StorageMisaligned; break;
+    case GraphicsRangeFrameWriterFailure::None: break;
+    }
+    return rejectRange(rejection, reason, partIndex, partCount, width, height,
+                       sequence, readableBytes, requiredBytes);
+}
+
+using ImageReason = heliotis::HeliotisImageRejection::Reason;
+
+/** Maps the real GraphicsImageWriter failure; rules with no host equivalent stay unreported. */
+[[nodiscard]] ImageReason imageRejectionReason(const GraphicsImageFailure failure) noexcept
+{
+    switch (failure) {
+    case GraphicsImageFailure::MissingBytes: return ImageReason::MissingBytes;
+    case GraphicsImageFailure::InvalidDimensions: return ImageReason::InvalidDimensions;
+    case GraphicsImageFailure::UnsupportedFormat: return ImageReason::UnsupportedFormat;
+    case GraphicsImageFailure::InvalidStride: return ImageReason::InvalidStride;
+    case GraphicsImageFailure::StrideBelowMinimum: return ImageReason::StrideBelowMinimum;
+    case GraphicsImageFailure::ExtentOverflow: return ImageReason::ExtentOverflow;
+    case GraphicsImageFailure::TruncatedBytes: return ImageReason::TruncatedBytes;
+    case GraphicsImageFailure::OddWidth: return ImageReason::OddWidth;
+    case GraphicsImageFailure::UnsupportedConversion: return ImageReason::UnsupportedConversion;
+    case GraphicsImageFailure::StorageRefused: return ImageReason::StorageRefused;
+    case GraphicsImageFailure::None:
+    case GraphicsImageFailure::ExcessBytes: return ImageReason::None;
+    }
+    return ImageReason::None;
+}
+
+/** Records the first failed image writer rule with the source layout actually attempted. */
+[[nodiscard]] std::nullopt_t rejectImage(
+    heliotis::HeliotisImageRejection* rejection,
+    const ImageReason reason,
+    const std::size_t partIndex,
+    const GraphicsImageWriterSource& source) noexcept
+{
+    if (rejection && rejection->reason == ImageReason::None) {
+        rejection->reason = reason;
+        rejection->conversion = heliotis::HeliotisImageRejection::Conversion::Copy;
+        rejection->sourceIndex = static_cast<std::uint32_t>(partIndex);
+        rejection->width = source.width > 0 ? static_cast<std::uint32_t>(source.width) : 0U;
+        rejection->height = source.height > 0 ? static_cast<std::uint32_t>(source.height) : 0U;
+        rejection->frameSequence = source.frameSequence;
+        rejection->reportedStride = source.stride > 0 ? static_cast<std::uint64_t>(source.stride) : 0U;
+        rejection->effectiveStride = rejection->reportedStride;
+        rejection->minimumRowBytes = static_cast<std::uint64_t>(
+            GraphicsImageValidation::minimumRowBytes(source.pixelFormat, source.width));
+        rejection->readableBytes = static_cast<std::uint64_t>(source.size);
+        rejection->requiredBytes = rejection->effectiveStride * rejection->height;
+        rejection->directInput = false;
+    }
+    return std::nullopt;
+}
 
 [[nodiscard]] std::uint8_t graphicsBitDepth(const heliotis::FramePart& part) noexcept
 {
@@ -195,7 +310,9 @@ void writeConvertedSamples(const heliotis::FramePart& part,
 [[nodiscard]] std::optional<GraphicsImage> intensityImage(
     const heliotis::FramePart& part,
     const std::uint64_t sequence,
-    const GraphicsImageStorage& frameStorage)
+    const std::size_t partIndex,
+    const GraphicsImageStorage& frameStorage,
+    heliotis::HeliotisImageRejection* rejection)
 {
     if (!hasRepresentableSamples(part) || !hasRepresentableDimensions(part)) return std::nullopt;
     const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples);
@@ -232,8 +349,16 @@ void writeConvertedSamples(const heliotis::FramePart& part,
         : GraphicsImageBitAlignment::Packed;
     source.frameSequence = sequence;
 
-    GraphicsImage image = writeGraphicsImage(source, frameStorage);
-    if (!image.isValid()) return std::nullopt;
+    GraphicsImageFailure failure = GraphicsImageFailure::None;
+    GraphicsImage image = writeGraphicsImageWithFailure(source, frameStorage, &failure);
+    if (!image.isValid()) {
+        // Only an otherwise usable integer intensity part that the real writer
+        // refused is observable. Floating, empty, oversized and malformed parts
+        // above are intentionally skipped without a warning.
+        const ImageReason reason = imageRejectionReason(failure);
+        if (reason != ImageReason::None) return rejectImage(rejection, reason, partIndex, source);
+        return std::nullopt;
+    }
     return image;
 }
 
@@ -256,7 +381,8 @@ struct SelectedRange
 [[nodiscard]] std::optional<SelectedRange> selectRange(
     const heliotis::Frame& frame,
     const GraphicsFrameRequest& request,
-    const GraphicsImageStorage& frameStorage)
+    const GraphicsImageStorage& frameStorage,
+    heliotis::HeliotisRangeRejection* rejection)
 {
     using heliotis::FramePart;
     using heliotis::FramePartKind;
@@ -284,29 +410,40 @@ struct SelectedRange
     }
     if (!rangeIndex)
     {
-        return std::nullopt;
+        return rejectRange(rejection, RangeReason::MissingRange,
+                           heliotis::HeliotisRangeRejection::noPart, frame.parts.size(),
+                           0, 0, frame.sequence, 0U, 0U);
     }
     if (rangeIndex != typedRangeIndex) rawPartPreview = true;
     const FramePart& rangePart = frame.parts[*rangeIndex];
+    const auto partIndex = static_cast<std::uint32_t>(*rangeIndex);
+    const std::size_t partCount = frame.parts.size();
 
     const bool oneRowPreview = !hasRepresentableDimensions(rangePart);
     rawPartPreview = rawPartPreview || oneRowPreview;
     const std::size_t expected = sampleCount(rangePart);
     if (expected == 0U || expected > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
     {
-        return std::nullopt;
+        return rejectRange(rejection,
+                           expected == 0U ? RangeReason::MissingData : RangeReason::SizeLimitExceeded,
+                           partIndex, partCount, 0, 0, frame.sequence,
+                           sampleBytes(rangePart), 0U);
     }
     const int width = oneRowPreview ? static_cast<int>(expected) : static_cast<int>(rangePart.width);
     const int height = oneRowPreview ? 1 : static_cast<int>(rangePart.height);
     if (expected != static_cast<std::size_t>(width) * static_cast<std::size_t>(height))
     {
-        return std::nullopt;
+        return rejectRange(rejection, RangeReason::InvalidLayout,
+                           partIndex, partCount, width, height, frame.sequence,
+                           sampleBytes(rangePart), gridBytes(width, height));
     }
     const auto* rangeRawSamples = std::get_if<std::vector<std::uint16_t>>(&rangePart.samples);
     if (rangeRawSamples != nullptr && !rangeRawSamples->empty()
         && rangeRawSamples->size() != expected)
     {
-        return std::nullopt;
+        return rejectRange(rejection, RangeReason::TruncatedData,
+                           partIndex, partCount, width, height, frame.sequence,
+                           sampleBytes(rangePart), gridBytes(width, height));
     }
 
     const auto rawFits = [expected](const FramePart& part) {
@@ -323,7 +460,9 @@ struct SelectedRange
         }
         else if (sampleCount(*intensityPart) != expected || !rawFits(*intensityPart))
         {
-            return std::nullopt;
+            return rejectRange(rejection, RangeReason::InvalidLayout,
+                               partIndex, partCount, width, height, frame.sequence,
+                               sampleBytes(*intensityPart), gridBytes(width, height));
         }
     }
     const FramePart* confidencePart = request.includeRangeAuxiliaryChannels
@@ -336,7 +475,9 @@ struct SelectedRange
         }
         else if (sampleCount(*confidencePart) != expected || !rawFits(*confidencePart))
         {
-            return std::nullopt;
+            return rejectRange(rejection, RangeReason::InvalidLayout,
+                               partIndex, partCount, width, height, frame.sequence,
+                               sampleBytes(*confidencePart), gridBytes(width, height));
         }
     }
 
@@ -356,15 +497,22 @@ struct SelectedRange
         && std::get_if<std::vector<std::uint16_t>>(&confidencePart->samples) != nullptr
         && std::get<std::vector<std::uint16_t>>(confidencePart->samples).size() == expected;
 
+    const std::uint64_t readableBytes = sampleBytes(rangePart);
+    const std::uint64_t requiredBytes = gridBytes(width, height);
     GraphicsRangeFrameWriter writer(layout, frameStorage);
     if (!writer.isValid())
     {
-        return std::nullopt;
+        return rejectRangeWriter(rejection, writer, partIndex, partCount, width, height,
+                                 frame.sequence, readableBytes, requiredBytes);
     }
     writeConvertedSamples(rangePart, writer.zData(), writer.validMaskData());
     if (layout.channels.rangeRaw)
     {
-        if (!writer.writeRangeRaw(rangeRawSamples->data(), GraphicsSampleByteOrder::LittleEndian)) return std::nullopt;
+        if (!writer.writeRangeRaw(rangeRawSamples->data(), GraphicsSampleByteOrder::LittleEndian))
+        {
+            return rejectRange(rejection, RangeReason::InvalidLayout, partIndex, partCount,
+                               width, height, frame.sequence, readableBytes, requiredBytes);
+        }
     }
     if (intensityPart != nullptr)
     {
@@ -375,7 +523,8 @@ struct SelectedRange
                 std::get<std::vector<std::uint16_t>>(intensityPart->samples).data(),
                 GraphicsSampleByteOrder::LittleEndian))
             {
-                return std::nullopt;
+                return rejectRange(rejection, RangeReason::InvalidLayout, partIndex, partCount,
+                                   width, height, frame.sequence, readableBytes, requiredBytes);
             }
         }
     }
@@ -388,7 +537,8 @@ struct SelectedRange
                 std::get<std::vector<std::uint16_t>>(confidencePart->samples).data(),
                 GraphicsSampleByteOrder::LittleEndian))
             {
-                return std::nullopt;
+                return rejectRange(rejection, RangeReason::InvalidLayout, partIndex, partCount,
+                                   width, height, frame.sequence, readableBytes, requiredBytes);
             }
         }
     }
@@ -459,7 +609,8 @@ struct SelectedRange
     }
     if (!range.isValid())
     {
-        return std::nullopt;
+        return rejectRange(rejection, RangeReason::InvalidDimensions, partIndex, partCount,
+                           width, height, frame.sequence, readableBytes, requiredBytes);
     }
     return SelectedRange{std::move(range), *rangeIndex};
 }
@@ -474,9 +625,20 @@ void HeliotisC4GraphicsFrameAdapter::setFrameStorage(GraphicsImageStorage storag
     _storage = std::move(storage);
 }
 
+std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertFrameWithRejection(
+    const Frame& frame,
+    const GraphicsFrameRequest& request,
+    HeliotisRangeRejection& rangeRejection,
+    HeliotisImageRejection& imageRejection) const
+{
+    return convertGraphicsFrame(frame, request, &rangeRejection, &imageRejection);
+}
+
 std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFrame(
     const Frame& frame,
-    const GraphicsFrameRequest& request) const
+    const GraphicsFrameRequest& request,
+    HeliotisRangeRejection* rangeRejection,
+    HeliotisImageRejection* imageRejection) const
 {
     GraphicsImageStorage frameStorage;
     {
@@ -497,7 +659,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     GraphicsFrame result;
     if (rangeRequested)
     {
-        if (auto selected = selectRange(frame, request, frameStorage))
+        if (auto selected = selectRange(frame, request, frameStorage, rangeRejection))
         {
             result.addRange(resourceId("range", selected->partIndex), std::move(selected->range),
                             "Range", kResourceGroup);
@@ -513,7 +675,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         {
             const FramePart& part = frame.parts[index];
             if (part.kind != FramePartKind::Intensity) continue;
-            auto image = intensityImage(part, frame.sequence, frameStorage);
+            auto image = intensityImage(part, frame.sequence, index, frameStorage, imageRejection);
             if (!image) continue;
             result.addImage(resourceId("image", index), std::move(*image),
                             part.name.empty() ? std::string("Intensity") : part.name, kResourceGroup);
@@ -529,6 +691,12 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         }
     }
 
+    // Retention is observed from the assembled result, never inferred from the
+    // failure: a rejected range can leave a valid intensity image and vice versa.
+    if (rangeRejection) {
+        rangeRejection->rangeRetained = !result.ranges.empty();
+        rangeRejection->imageRetained = !result.images.empty();
+    }
     if (!result.isValid())
     {
         return std::nullopt;

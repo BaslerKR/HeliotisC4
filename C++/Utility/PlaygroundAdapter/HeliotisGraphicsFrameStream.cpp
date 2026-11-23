@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <atomic>
+#include <optional>
 #include <utility>
 
 namespace {
@@ -29,7 +30,9 @@ public:
     Impl(
         HeliotisC4Device* device,
         GraphicsFrameCallback callback,
-        FrameReceiptCallback receiptCallback);
+        FrameReceiptCallback receiptCallback,
+        RejectedRange rejectedRange,
+        RejectedImage rejectedImage);
     ~Impl();
 
     Impl(const Impl&) = delete;
@@ -49,6 +52,8 @@ private:
     HeliotisC4Device* _device = nullptr;
     GraphicsFrameCallback _callback;
     FrameReceiptCallback _receiptCallback;
+    RejectedRange _rejectedRange;
+    RejectedImage _rejectedImage;
     HeliotisC4GraphicsFrameAdapter _adapter;
     GraphicsFrameCallbackGate _callbackGate;
 };
@@ -56,8 +61,11 @@ private:
 HeliotisGraphicsFrameStream::Impl::Impl(
     HeliotisC4Device* device,
     GraphicsFrameCallback callback,
-    FrameReceiptCallback receiptCallback)
-    : _device(device), _callback(std::move(callback)), _receiptCallback(std::move(receiptCallback))
+    FrameReceiptCallback receiptCallback,
+    RejectedRange rejectedRange,
+    RejectedImage rejectedImage)
+    : _device(device), _callback(std::move(callback)), _receiptCallback(std::move(receiptCallback)),
+      _rejectedRange(std::move(rejectedRange)), _rejectedImage(std::move(rejectedImage))
 {
 }
 
@@ -109,7 +117,23 @@ bool HeliotisGraphicsFrameStream::Impl::start(
             }
             try
             {
-                auto frame = _adapter.convertFrame(sourceFrame, heliotisGraphicsFrameRequest());
+                std::optional<GraphicsFrame> frame;
+                if (_rejectedRange || _rejectedImage) {
+                    HeliotisRangeRejection rangeRejection;
+                    HeliotisImageRejection imageRejection;
+                    frame = _adapter.convertFrameWithRejection(
+                        sourceFrame, heliotisGraphicsFrameRequest(), rangeRejection, imageRejection);
+                    if (_rejectedRange
+                        && rangeRejection.reason != HeliotisRangeRejection::Reason::None) {
+                        _rejectedRange(rangeRejection);
+                    }
+                    if (_rejectedImage
+                        && imageRejection.reason != HeliotisImageRejection::Reason::None) {
+                        _rejectedImage(imageRejection);
+                    }
+                } else {
+                    frame = _adapter.convertFrame(sourceFrame, heliotisGraphicsFrameRequest());
+                }
                 if (frame.has_value()) {
                     _callback(std::move(*frame), 0U);
                     delivered.fetch_add(1, std::memory_order_relaxed);
@@ -146,7 +170,18 @@ HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
     HeliotisC4Device* device,
     GraphicsFrameCallback callback,
     FrameReceiptCallback receiptCallback)
-    : _impl(std::make_unique<Impl>(device, std::move(callback), std::move(receiptCallback)))
+    : HeliotisGraphicsFrameStream(device, std::move(callback), std::move(receiptCallback), {}, {})
+{
+}
+
+HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
+    HeliotisC4Device* device,
+    GraphicsFrameCallback callback,
+    FrameReceiptCallback receiptCallback,
+    RejectedRange rejectedRange,
+    RejectedImage rejectedImage)
+    : _impl(std::make_unique<Impl>(device, std::move(callback), std::move(receiptCallback),
+                                   std::move(rejectedRange), std::move(rejectedImage)))
 {
 }
 

@@ -568,5 +568,223 @@ int main()
         adapter.setFrameStorage({});
     }
 
+    // A requested range can fail while a valid intensity image from the same
+    // multipart input survives, and vice versa. Only the first real failed rule
+    // is recorded; omissions, raw previews and unrequested parts are silent.
+    {
+        const auto check = [](const bool condition, const char* message) {
+            if (!condition) std::cerr << message << '\n';
+            return condition;
+        };
+        using RangeReason = heliotis::HeliotisRangeRejection::Reason;
+        using ImageReason = heliotis::HeliotisImageRejection::Reason;
+
+        heliotis::Frame input;
+        input.sequence = 11;
+        input.frameId = "h8-11";
+        input.parts = {
+            {
+                heliotis::FramePartKind::Range,
+                "Range",
+                "Coord3D_ABC32f",
+                2,
+                2,
+                64,
+                std::vector<double>{1.5, 2.5, 3.5, 4.5}
+            },
+            {
+                heliotis::FramePartKind::Intensity,
+                "Intensity",
+                "Mono16",
+                2,
+                2,
+                16,
+                std::vector<std::uint16_t>{10U, 20U, 30U, 40U}
+            }
+        };
+        input.scan3dGeometry = heliotis::Scan3dGeometry{
+            "RectifiedC", "um", 2.0, 3.0, 0.5, 100.0, 200.0, -10.0};
+
+        heliotis::HeliotisRangeRejection rangeRejection;
+        heliotis::HeliotisImageRejection imageRejection;
+        const auto valid = adapter.convertFrameWithRejection(input, {}, rangeRejection, imageRejection);
+        if (!check(valid && valid->ranges.size() == 1U && valid->images.size() == 1U,
+                   "A valid frame must still publish a range and an intensity image.")
+            || !check(rangeRejection.reason == RangeReason::None
+                          && imageRejection.reason == ImageReason::None,
+                      "A valid frame must produce no rejection evidence."))
+        {
+            return 1;
+        }
+
+        // A malformed optional auxiliary channel rejects the requested range,
+        // but the separately converted intensity image is still retained.
+        auto auxiliaryFailure = input;
+        auxiliaryFailure.parts.push_back({
+            heliotis::FramePartKind::Confidence,
+            "Confidence",
+            "Mono16",
+            2,
+            2,
+            16,
+            std::vector<std::uint16_t>{1U, 2U, 3U}
+        });
+        rangeRejection = {};
+        imageRejection = {};
+        const auto retained = adapter.convertFrameWithRejection(
+            auxiliaryFailure, {}, rangeRejection, imageRejection);
+        if (!check(rangeRejection.reason == RangeReason::InvalidLayout,
+                   "A shape mismatch in a requested auxiliary channel must report the failed rule.")
+            || !check(rangeRejection.sourceIndex == 0U && rangeRejection.affectedPart == 0U
+                          && rangeRejection.partCount == 3U && rangeRejection.width == 2U
+                          && rangeRejection.height == 2U && rangeRejection.frameSequence == 11U,
+                      "Range evidence must carry the fixed part ordinal and frame sequence.")
+            || !check(retained && retained->ranges.empty() && retained->images.size() == 1U,
+                      "A rejected range must not hide a valid intensity image.")
+            || !check(rangeRejection.rangeRetained == retained->hasRangeFrame()
+                          && rangeRejection.imageRetained == retained->hasImage(),
+                      "Retention flags must match the assembled result.")
+            || !check(imageRejection.reason == ImageReason::None,
+                      "A valid intensity image must not be reported as rejected."))
+        {
+            return 1;
+        }
+
+        // A refused first destination (the range writer) reports the real
+        // GraphicsRangeFrameWriter failure with its calculated block bytes.
+        int storageCalls = 0;
+        adapter.setFrameStorage([&storageCalls](const std::size_t bytes) {
+            ++storageCalls;
+            if (storageCalls == 1) return std::shared_ptr<std::uint8_t>{};
+            return std::shared_ptr<std::uint8_t>(
+                new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>());
+        });
+        rangeRejection = {};
+        imageRejection = {};
+        const auto rangeRefused = adapter.convertFrameWithRejection(
+            input, {}, rangeRejection, imageRejection);
+        if (!check(rangeRejection.reason == RangeReason::StorageRefused,
+                   "A refused range destination must report StorageRefused.")
+            || !check(rangeRejection.requestedStorageBytes > 0U,
+                      "A refused range writer must retain its calculated block bytes.")
+            || !check(rangeRefused && rangeRefused->images.size() == 1U
+                          && rangeRejection.imageRetained && !rangeRejection.rangeRetained,
+                      "A refused range must leave the intensity image retained."))
+        {
+            return 1;
+        }
+
+        // A refused second destination (the image writer) reports the real
+        // GraphicsImageWriter failure while a valid range is retained.
+        storageCalls = 0;
+        adapter.setFrameStorage([&storageCalls](const std::size_t bytes) {
+            ++storageCalls;
+            if (storageCalls == 2) return std::shared_ptr<std::uint8_t>{};
+            return std::shared_ptr<std::uint8_t>(
+                new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>());
+        });
+        rangeRejection = {};
+        imageRejection = {};
+        const auto imageRefused = adapter.convertFrameWithRejection(
+            input, {}, rangeRejection, imageRejection);
+        if (!check(imageRejection.reason == ImageReason::StorageRefused,
+                   "A refused image destination must report StorageRefused.")
+            || !check(imageRejection.sourceIndex == 1U && imageRejection.width == 2U
+                          && imageRejection.height == 2U && imageRejection.frameSequence == 11U
+                          && imageRejection.conversion
+                                 == heliotis::HeliotisImageRejection::Conversion::Copy,
+                      "Image evidence must carry the fixed part ordinal, sequence and conversion.")
+            || !check(imageRefused && imageRefused->ranges.size() == 1U,
+                      "A refused image must leave the valid range retained.")
+            || !check(rangeRejection.reason == RangeReason::None,
+                      "A successful range must not be reported as rejected."))
+        {
+            return 1;
+        }
+        adapter.setFrameStorage({});
+
+        auto optional = input;
+        optional.parts.pop_back();
+        rangeRejection = {};
+        imageRejection = {};
+        const auto optionalResult = adapter.convertFrameWithRejection(
+            optional, {}, rangeRejection, imageRejection);
+        if (!check(optionalResult && rangeRejection.reason == RangeReason::None
+                       && imageRejection.reason == ImageReason::None,
+                   "An omitted optional intensity part must stay silent."))
+        {
+            return 1;
+        }
+
+        auto rawPreview = input;
+        rawPreview.scan3dGeometry.reset();
+        rangeRejection = {};
+        imageRejection = {};
+        const auto rawResult = adapter.convertFrameWithRejection(
+            rawPreview, {}, rangeRejection, imageRejection);
+        if (!check(rawResult && rangeRejection.reason == RangeReason::None
+                       && imageRejection.reason == ImageReason::None,
+                   "A raw preview without calibration must stay silent."))
+        {
+            return 1;
+        }
+
+        auto floating = input;
+        floating.parts.at(1).samples = std::vector<double>{1.0, 2.0, 3.0, 4.0};
+        rangeRejection = {};
+        imageRejection = {};
+        const auto floatingResult = adapter.convertFrameWithRejection(
+            floating, {}, rangeRejection, imageRejection);
+        if (!check(floatingResult && floatingResult->images.empty()
+                       && rangeRejection.reason == RangeReason::None
+                       && imageRejection.reason == ImageReason::None,
+                   "An intentionally skipped floating intensity part must stay silent."))
+        {
+            return 1;
+        }
+
+        auto unrequested = input;
+        unrequested.parts.at(0).samples = std::vector<double>{1.0, 2.0, 3.0};
+        GraphicsFrameRequest imageOnly;
+        imageOnly.components = GraphicsFrameComponent::Image;
+        rangeRejection = {};
+        imageRejection = {};
+        const auto unrequestedResult = adapter.convertFrameWithRejection(
+            unrequested, imageOnly, rangeRejection, imageRejection);
+        if (!check(unrequestedResult && rangeRejection.reason == RangeReason::None
+                       && imageRejection.reason == ImageReason::None,
+                   "An unrequested broken range must stay silent."))
+        {
+            return 1;
+        }
+
+        heliotis::Frame missing;
+        missing.sequence = 12;
+        missing.parts = {
+            {heliotis::FramePartKind::Range, "Range", "Mono16", 2, 2, 16,
+             std::vector<std::uint16_t>{}}
+        };
+        rangeRejection = {};
+        imageRejection = {};
+        static_cast<void>(adapter.convertFrameWithRejection(
+            missing, {}, rangeRejection, imageRejection));
+        if (!check(rangeRejection.reason == RangeReason::MissingRange
+                       && rangeRejection.affectedPart == heliotis::HeliotisRangeRejection::noPart
+                       && rangeRejection.partCount == 1U,
+                   "A required range with no usable part must report MissingRange."))
+        {
+            return 1;
+        }
+        rangeRejection = {};
+        imageRejection = {};
+        static_cast<void>(adapter.convertFrameWithRejection(
+            missing, imageOnly, rangeRejection, imageRejection));
+        if (!check(rangeRejection.reason == RangeReason::None,
+                   "An unrequested missing range must stay silent."))
+        {
+            return 1;
+        }
+    }
+
     return 0;
 }

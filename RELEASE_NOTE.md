@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Publish the first observed range and integer intensity assembly rejection through the optional `IDeviceRangeDiagnostics/1.0` and `IDeviceImageDiagnostics/1.0` sinks with fixed numeric fields and part/sequence identity. A rejected range keeps a valid intensity image and a rejected image keeps a valid range; optional omissions, raw previews, floating intensity and unrequested components stay silent. Single reports every failure and Live the first plus every 100th per reason per acquisition, independent of device details.
+
 - Declare device panel presentation in package session metadata.
 
 - Declare the Init action as omitted from the device panel's action row, since the flow starts from its own confirmation prompt; the tool, its availability and its confirmation are unchanged.

@@ -2,6 +2,7 @@
 
 #include "DeviceRuntime/Contract/AbstractSourceController.h"
 #include "DeviceRuntime/Contract/DeviceConnectionControl.h"
+#include "DeviceRuntime/Contract/DeviceImageDiagnostics.h"
 #include "DeviceRuntime/Contract/DeviceParameterControl.h"
 #include "DeviceRuntime/Contract/FrameStorage.h"
 #include "HeliotisC4System.h"
@@ -10,6 +11,7 @@
 #include <QFuture>
 #include <QString>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -22,6 +24,8 @@
 
 namespace heliotis {
 class HeliotisGraphicsFrameStream;
+struct HeliotisRangeRejection;
+struct HeliotisImageRejection;
 }
 
 /**
@@ -81,7 +85,14 @@ class HeliotisC4SourceController final
 public:
     void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
     using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
-    explicit HeliotisC4SourceController(heliotis::HeliotisC4Device* device, QObject* parent = nullptr);
+    /**
+     * @brief Creates the controller with the runtime owner's optional rejection sinks.
+     * @note The sinks are borrowed for the controller lifetime and must outlive it;
+     *       the worker clears them before runtime shutdown.
+     */
+    explicit HeliotisC4SourceController(heliotis::HeliotisC4Device* device, QObject* parent = nullptr,
+        DeviceRangeRejectionSink rangeRejectionSink = nullptr,
+        DeviceImageRejectionSink imageRejectionSink = nullptr);
     ~HeliotisC4SourceController() override;
 
     /** @brief Copies per-run counters shared with the control panel. */
@@ -190,6 +201,12 @@ private:
     [[nodiscard]] bool startAcquisition(heliotis::HeliotisC4Device::AcquisitionMode mode);
     /** Forwards one module-owned GraphicsFrame to the session consumer. */
     void handleFrame(GraphicsFrame&& frame, unsigned int sourceIndex);
+    /** Publishes one observed range rejection with the fixed host enum and numeric fields. */
+    void reportRangeRejection(const heliotis::HeliotisRangeRejection& rejection) noexcept;
+    /** Publishes one observed integer image rejection with the fixed host enum and numeric fields. */
+    void reportImageRejection(const heliotis::HeliotisImageRejection& rejection) noexcept;
+    /** Clears per-acquisition counts and arms unthrottled Single reporting. */
+    void resetRejectionCounters(bool single) noexcept;
     enum class Lifecycle { Targets, Connection, Discover, Connect, Disconnect, Single, LiveStart, LiveStop };
     /** Copies the connection and acquisition state on the controller thread. */
     [[nodiscard]] DeviceConnectionState connectionState() const;
@@ -235,6 +252,15 @@ private:
     std::atomic<std::uint64_t> _deliveredFrames{0};
     heliotis::HeliotisC4Device::CallbackId _statusCallbackId = 0;
     std::unique_ptr<heliotis::HeliotisGraphicsFrameStream> _graphicsStream;
+    /** Borrowed runtime-owner sinks; null when the Host does not expose the capability. */
+    const DeviceRangeRejectionSink _rangeRejectionSink;
+    const DeviceImageRejectionSink _imageRejectionSink;
+    std::array<std::atomic<std::uint64_t>,
+        static_cast<std::size_t>(DeviceRangeRejection::StorageMisaligned) + 1> _rangeRejections{};
+    std::array<std::atomic<std::uint64_t>,
+        static_cast<std::size_t>(DeviceImageRejection::NoImage) + 1> _imageRejections{};
+    /** Single reports every failure; Live reports the first and every 100th per reason. */
+    std::atomic<bool> _singleInFlight{false};
 
     HeliotisC4ControlBackend* _backend = nullptr;
     std::shared_ptr<ToolCall> _toolCall;

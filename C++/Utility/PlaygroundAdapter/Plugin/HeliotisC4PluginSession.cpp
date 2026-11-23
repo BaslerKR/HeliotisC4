@@ -20,13 +20,16 @@ HeliotisC4PluginSession::HeliotisC4PluginSession(
     std::unique_ptr<heliotis::HeliotisC4Device> device,
     std::vector<heliotis::DeviceDescriptor> devices,
     QString settingsFile,
+    DeviceRangeRejectionSink rangeRejectionSink,
+    DeviceImageRejectionSink imageRejectionSink,
     QObject* parent)
     : QObject(parent),
       _system(std::move(system)),
       _device(std::move(device)),
       _devices(std::move(devices)),
       _settingsFile(std::move(settingsFile)),
-      _controller(std::make_unique<HeliotisC4SourceController>(_device.get()))
+      _controller(std::make_unique<HeliotisC4SourceController>(
+          _device.get(), nullptr, rangeRejectionSink, imageRejectionSink))
 {
     // Device tools, the worker proxy and the Host panel share this session's SDK admission.
     // The controller signals are session-owned so Single, Stop and Disconnect complete without a

@@ -16,6 +16,8 @@
 namespace heliotis {
 
 class HeliotisC4Device;
+struct HeliotisRangeRejection;
+struct HeliotisImageRejection;
 
 /** Owns Heliotis SDK frame callback conversion and emits only owned GraphicsFrame values. */
 class HeliotisGraphicsFrameStream final
@@ -23,6 +25,10 @@ class HeliotisGraphicsFrameStream final
 public:
     /** Receives one acquisition-worker notification before any frame conversion. */
     using FrameReceiptCallback = std::function<void()>;
+    /** Receives the first failed range rule of a frame whose range was requested. */
+    using RejectedRange = std::function<void(const HeliotisRangeRejection&)>;
+    /** Receives the first failed integer image writer rule of a requested image. */
+    using RejectedImage = std::function<void(const HeliotisImageRejection&)>;
 
     HeliotisGraphicsFrameStream(HeliotisC4Device* device, GraphicsFrameCallback callback);
     /** Notifies receipt even when conversion fails; neither callback may destroy the stream. */
@@ -30,6 +36,13 @@ public:
         HeliotisC4Device* device,
         GraphicsFrameCallback callback,
         FrameReceiptCallback receiptCallback);
+    /** Carries neutral assembly evidence to the runtime owner; callbacks may be empty. */
+    HeliotisGraphicsFrameStream(
+        HeliotisC4Device* device,
+        GraphicsFrameCallback callback,
+        FrameReceiptCallback receiptCallback,
+        RejectedRange rejectedRange,
+        RejectedImage rejectedImage);
     ~HeliotisGraphicsFrameStream();
 
     /** Forwards the storage intensity images are written into; callable while acquiring. */

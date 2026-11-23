@@ -1,5 +1,6 @@
 #include "HeliotisC4PluginSession.h"
 #include "HeliotisC4System.h"
+#include "DeviceRuntime/Contract/DeviceImageDiagnostics.h"
 
 #include <QDebug>
 #include <QDir>
@@ -11,6 +12,7 @@
 #include <qt_windows.h>
 #endif
 
+#include <atomic>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -269,14 +271,27 @@ std::unique_ptr<HeliotisRuntimeLibrary> loadSelectedHeliotisRuntimeLibrary(
 } // namespace
 
 /** Owns Heliotis discovery, sessions, and one coherently selected SDK runtime. */
-class HeliotisC4Plugin final : public QObject, public IDeviceRuntime, public IDevicePluginSettings {
+class HeliotisC4Plugin final : public QObject, public IDeviceRuntime, public IDevicePluginSettings,
+                               public IDeviceRangeDiagnostics, public IDeviceImageDiagnostics {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)
-    Q_INTERFACES(IDeviceRuntime IDevicePluginSettings)
+    Q_INTERFACES(IDeviceRuntime IDevicePluginSettings IDeviceRangeDiagnostics IDeviceImageDiagnostics)
 
 public:
     /** Selects the host-owned INI used for feature favorites; other keys are preserved. */
     void setSettingsFile(const QString& fileName) override { _settingsFile = fileName; }
+
+    /** Installs or clears the best-effort range rejection sink on the runtime owner thread. */
+    void setRangeRejectionSink(DeviceRangeRejectionSink sink) noexcept override
+    {
+        _rangeRejectionSink.store(sink, std::memory_order_release);
+    }
+
+    /** Installs or clears the best-effort image rejection sink on the runtime owner thread. */
+    void setImageRejectionSink(DeviceImageRejectionSink sink) noexcept override
+    {
+        _imageRejectionSink.store(sink, std::memory_order_release);
+    }
 
     DevicePluginDescriptor descriptor() const override
     {
@@ -329,7 +344,9 @@ public:
                 devices = _discoveredDevices;
             }
             return std::make_unique<HeliotisC4PluginSession>(
-                system, std::move(device), std::move(devices), _settingsFile);
+                system, std::move(device), std::move(devices), _settingsFile,
+                _rangeRejectionSink.load(std::memory_order_acquire),
+                _imageRejectionSink.load(std::memory_order_acquire));
         } catch (const std::exception& error) {
             if (errorMessage) *errorMessage = QString::fromLocal8Bit(error.what());
             return {};
@@ -389,6 +406,8 @@ private:
 #endif
     std::shared_ptr<heliotis::HeliotisC4System> _system;
     QString _settingsFile;
+    std::atomic<DeviceRangeRejectionSink> _rangeRejectionSink{nullptr};
+    std::atomic<DeviceImageRejectionSink> _imageRejectionSink{nullptr};
 };
 
 #include "HeliotisC4Plugin.moc"
