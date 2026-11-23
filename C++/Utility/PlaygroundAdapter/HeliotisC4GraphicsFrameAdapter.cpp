@@ -627,6 +627,8 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertFrameWithRej
     HeliotisRangeRejection& rangeRejection,
     HeliotisImageRejection& imageRejection) const
 {
+    rangeRejection = {};
+    imageRejection = {};
     return convertGraphicsFrame(frame, request, &rangeRejection, &imageRejection);
 }
 

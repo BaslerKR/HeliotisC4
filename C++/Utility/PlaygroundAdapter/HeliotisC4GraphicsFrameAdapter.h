@@ -111,6 +111,7 @@ public:
 
     /**
      * Converts one frame and records the first failed rule of each requested component.
+     * Both rejection outputs are reset for each input.
      *
      * @note Rejections are recorded only for components the request actually asked
      *       for and only when a real failure rule was observed. An omitted optional

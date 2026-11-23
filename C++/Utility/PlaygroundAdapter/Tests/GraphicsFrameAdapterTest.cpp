@@ -710,8 +710,6 @@ int main()
             return std::shared_ptr<std::uint8_t>(
                 new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>());
         });
-        rangeRejection = {};
-        imageRejection = {};
         const auto imageRefused = adapter.convertFrameWithRejection(
             input, {}, rangeRejection, imageRejection);
         if (!check(imageRejection.reason == ImageReason::StorageRefused,
@@ -723,8 +721,10 @@ int main()
                       "Image evidence must carry the effective stride, sequence and conversion.")
             || !check(imageRefused && imageRefused->ranges.size() == 1U,
                       "A refused image must leave the valid range retained.")
-            || !check(rangeRejection.reason == RangeReason::None,
-                      "A successful range must not be reported as rejected."))
+            || !check(rangeRejection.reason == RangeReason::None
+                          && rangeRejection.affectedPart == heliotis::HeliotisRangeRejection::noPart
+                          && rangeRejection.requestedStorageBytes == 0U,
+                      "A successful range must clear the preceding range rejection."))
         {
             return 1;
         }
@@ -732,13 +732,11 @@ int main()
 
         auto optional = input;
         optional.parts.pop_back();
-        rangeRejection = {};
-        imageRejection = {};
         const auto optionalResult = adapter.convertFrameWithRejection(
             optional, {}, rangeRejection, imageRejection);
         if (!check(optionalResult && rangeRejection.reason == RangeReason::None
-                       && imageRejection.reason == ImageReason::None,
-                   "An omitted optional intensity part must stay silent."))
+                       && imageRejection.reason == ImageReason::None && imageRejection.frameSequence == 0U,
+                   "An omitted optional intensity part must clear the preceding image rejection."))
         {
             return 1;
         }
