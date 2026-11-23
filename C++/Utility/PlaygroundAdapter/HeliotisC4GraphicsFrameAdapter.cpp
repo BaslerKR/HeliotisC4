@@ -404,7 +404,7 @@ struct SelectedRange
             const auto height = static_cast<int>(part.height);
             const auto readableBytes = sampleBytes(part);
             const auto requiredBytes = gridBytes(part, width, height);
-            if (requiredBytes != 0U && readableBytes != requiredBytes)
+            if (readableBytes != 0U && requiredBytes != 0U && readableBytes != requiredBytes)
             {
                 static_cast<void>(rejectRange(rejection, RangeReason::InvalidLayout,
                     static_cast<std::uint32_t>(*typedRangeIndex), frame.parts.size(),
