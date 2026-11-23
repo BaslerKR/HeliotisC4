@@ -621,7 +621,11 @@ int main()
         std::get<std::vector<double>>(shortRange.parts.front().samples).pop_back();
         const auto shortResult = adapter.convertFrameWithRejection(
             shortRange, {}, rangeRejection, imageRejection);
-        if (!check(shortResult && shortResult->hasImage() && !shortResult->hasRangeFrame()
+        if (!check(shortResult && shortResult->hasImage() && shortResult->hasRangeFrame()
+                       && shortResult->ranges.front().descriptor.id == "range.0:0.1"
+                       && rangeRejection.rangeRetained && rangeRejection.imageRetained,
+                   "A malformed typed range must leave the raw preview and intensity image available.")
+            || !check(rangeRejection.reason == RangeReason::InvalidLayout
                        && rangeRejection.affectedPart == 0U
                        && rangeRejection.readableBytes == 24U && rangeRejection.requiredBytes == 32U,
                    "Range evidence must compare byte counts for the same part and sample type."))
@@ -670,6 +674,18 @@ int main()
             return std::shared_ptr<std::uint8_t>(
                 new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>());
         });
+        rangeRejection = {};
+        imageRejection = {};
+        const auto refusedPreview = adapter.convertFrameWithRejection(
+            shortRange, {}, rangeRejection, imageRejection);
+        if (!check(refusedPreview && refusedPreview->hasImage() && !refusedPreview->hasRangeFrame()
+                       && rangeRejection.reason == RangeReason::InvalidLayout
+                       && rangeRejection.affectedPart == 0U && rangeRejection.requestedStorageBytes == 0U
+                       && rangeRejection.imageRetained && !rangeRejection.rangeRetained,
+                   "A refused preview must keep the original range rejection evidence."))
+            return 1;
+
+        storageCalls = 0;
         rangeRejection = {};
         imageRejection = {};
         const auto rangeRefused = adapter.convertFrameWithRejection(

@@ -164,7 +164,7 @@ using RangeReason = heliotis::HeliotisRangeRejection::Reason;
     const std::uint64_t readableBytes,
     const std::uint64_t requiredBytes) noexcept
 {
-    if (!rejection) return std::nullopt;
+    if (!rejection || rejection->reason != RangeReason::None) return std::nullopt;
     rejection->requestedStorageBytes = static_cast<std::uint64_t>(writer.blockBytes());
     RangeReason reason = RangeReason::InvalidLayout;
     switch (writer.failure()) {
@@ -395,6 +395,23 @@ struct SelectedRange
         rawPartPreview = frame.scan3dGeometry.has_value()
             && !hasUsableScan3dGeometry(*frame.scan3dGeometry);
     }
+    else if (typedRangeIndex && rejection)
+    {
+        const FramePart& part = frame.parts[*typedRangeIndex];
+        if (hasRepresentableDimensions(part))
+        {
+            const auto width = static_cast<int>(part.width);
+            const auto height = static_cast<int>(part.height);
+            const auto readableBytes = sampleBytes(part);
+            const auto requiredBytes = gridBytes(part, width, height);
+            if (requiredBytes != 0U && readableBytes != requiredBytes)
+            {
+                static_cast<void>(rejectRange(rejection, RangeReason::InvalidLayout,
+                    static_cast<std::uint32_t>(*typedRangeIndex), frame.parts.size(),
+                    width, height, frame.sequence, readableBytes, requiredBytes));
+            }
+        }
+    }
     if (!rangeIndex)
     {
         for (std::size_t index = 0; index < frame.parts.size(); ++index)
@@ -422,12 +439,6 @@ struct SelectedRange
     const std::size_t expected = sampleCount(rangePart);
     const int width = oneRowPreview ? static_cast<int>(expected) : static_cast<int>(rangePart.width);
     const int height = oneRowPreview ? 1 : static_cast<int>(rangePart.height);
-    if (expected != static_cast<std::size_t>(width) * static_cast<std::size_t>(height))
-    {
-        return rejectRange(rejection, RangeReason::InvalidLayout,
-                           partIndex, partCount, width, height, frame.sequence,
-                           sampleBytes(rangePart), gridBytes(rangePart, width, height));
-    }
     const auto* rangeRawSamples = std::get_if<std::vector<std::uint16_t>>(&rangePart.samples);
     const FramePart* intensityPart = request.includeRangeAuxiliaryChannels
         ? findPart(frame, FramePartKind::Intensity) : nullptr;
