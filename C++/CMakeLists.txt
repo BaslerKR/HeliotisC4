@@ -60,6 +60,13 @@ if(HELIOTISC4_BUILD_PLAYGROUND_ADAPTER)
         )
     endif()
 
+    if(NOT TARGET Playground::DeviceRuntimeContract)
+        message(FATAL_ERROR
+            "[HeliotisC4] HELIOTISC4_BUILD_PLAYGROUND_ADAPTER=ON requires "
+            "Playground::DeviceRuntimeContract for the frame storage plan."
+        )
+    endif()
+
     add_library(HeliotisC4PlaygroundAdapter STATIC
         Utility/PlaygroundAdapter/HeliotisC4GraphicsFrameAdapter.h
         Utility/PlaygroundAdapter/HeliotisC4GraphicsFrameAdapter.cpp
@@ -77,6 +84,7 @@ if(HELIOTISC4_BUILD_PLAYGROUND_ADAPTER)
         PUBLIC
             HeliotisC4::Core
             GraphicsEngine::Contracts
+            Playground::DeviceRuntimeContract
     )
     message(STATUS "[HeliotisC4] HeliotisC4::PlaygroundAdapter enabled.")
 endif()
