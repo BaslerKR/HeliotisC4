@@ -44,7 +44,10 @@ public:
     void requestStop() noexcept;
     void stop();
     bool acquiring() const { return _device && _device->isAcquiring(); }
-    void setFrameStorage(GraphicsImageStorage storage) { _adapter.setFrameStorage(std::move(storage)); }
+    void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
+    {
+        _adapter.setFrameStorageProvider(std::move(provider));
+    }
     std::atomic<std::uint64_t> delivered{0};
     std::atomic<std::uint64_t> failed{0};
 
@@ -187,9 +190,9 @@ HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
 
 HeliotisGraphicsFrameStream::~HeliotisGraphicsFrameStream() = default;
 
-void HeliotisGraphicsFrameStream::setFrameStorage(GraphicsImageStorage storage)
+void HeliotisGraphicsFrameStream::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
 {
-    if (_impl) _impl->setFrameStorage(std::move(storage));
+    if (_impl) _impl->setFrameStorageProvider(std::move(provider));
 }
 
 bool HeliotisGraphicsFrameStream::start(

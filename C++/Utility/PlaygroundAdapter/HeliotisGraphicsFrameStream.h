@@ -13,6 +13,8 @@
 #include <memory>
 #include <string>
 
+class IFrameStorageProvider;
+
 namespace heliotis {
 
 class HeliotisC4Device;
@@ -46,7 +48,7 @@ public:
     ~HeliotisGraphicsFrameStream();
 
     /** Forwards the storage intensity images are written into; callable while acquiring. */
-    void setFrameStorage(GraphicsImageStorage storage);
+    void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider);
 
     HeliotisGraphicsFrameStream(const HeliotisGraphicsFrameStream&) = delete;
     HeliotisGraphicsFrameStream& operator=(const HeliotisGraphicsFrameStream&) = delete;

@@ -1,5 +1,8 @@
 #include "HeliotisC4GraphicsFrameAdapter.h"
 
+#include "DeviceRuntime/Contract/FrameStorage.h"
+#include "graphics/data/GraphicsRangeFrameWriter.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -23,34 +26,67 @@ namespace {
     return resource ? &resource->payload : nullptr;
 }
 
-struct RecordingStorage
+/** Plans one lease the way the worker does for the adapter: blocks laid out back to back. */
+class RecordingProvider final : public IFrameStorageProvider
 {
+public:
     std::size_t calls = 0U;
-    std::vector<std::shared_ptr<std::uint8_t>> blocks;
-    std::vector<std::size_t> sizes;
+    std::size_t singleCalls = 0U;
+    std::size_t size = 0U;
+    bool refuse = false;
+    std::shared_ptr<std::uint8_t> block;
+    FrameStorageShape shape;
+    FrameStoragePlan plan;
 
-    GraphicsImageStorage function()
+    std::shared_ptr<std::uint8_t> acquire(std::size_t) override
     {
-        return [this](const std::size_t bytes)
+        ++singleCalls;
+        return {};
+    }
+
+    FrameStoragePlan acquireFrame(const FrameStorageShape& requested) override
+    {
+        ++calls;
+        shape = requested;
+        FrameStoragePlan result;
+        std::size_t end = 0U;
+        for (const auto& image : requested.images)
         {
-            ++calls;
-            blocks.emplace_back(new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>());
-            sizes.push_back(bytes);
-            return blocks.back();
-        };
+            end = (end + 63U) / 64U * 64U;
+            result.images.push_back({end, image.size});
+            end += image.size;
+        }
+        for (const auto& range : requested.ranges)
+        {
+            end = (end + 63U) / 64U * 64U;
+            const GraphicsRangeFrameWriter measure(
+                range.layout, [](std::size_t) { return std::shared_ptr<std::uint8_t>(); });
+            result.ranges.push_back({end, measure.blockBytes()});
+            end += measure.blockBytes();
+        }
+        result.totalBytes = end;
+        size = end;
+        if (refuse)
+        {
+            result.refusal = FrameStorageRefusal::NoStorage;
+            plan = result;
+            return result;
+        }
+        block = std::shared_ptr<std::uint8_t>(new std::uint8_t[end], std::default_delete<std::uint8_t[]>());
+        result.storage = block;
+        plan = result;
+        return result;
     }
 
     [[nodiscard]] bool contains(const void* pointer) const
     {
         const auto* bytes = static_cast<const std::uint8_t*>(pointer);
-        for (std::size_t index = 0; index < blocks.size(); ++index)
-        {
-            if (bytes >= blocks[index].get() && bytes < blocks[index].get() + sizes[index])
-            {
-                return true;
-            }
-        }
-        return false;
+        return block && bytes >= block.get() && bytes < block.get() + size;
+    }
+
+    [[nodiscard]] const std::uint8_t* imageAt(std::size_t index) const
+    {
+        return block.get() + plan.images.at(index).offset;
     }
 };
 
@@ -196,15 +232,17 @@ int main()
     // bytes; every range array is borrowed from the block the writer acquired.
     // Each converted payload takes exactly one acquire: one range block and one
     // intensity image block for this frame.
-    RecordingStorage providedStorage;
-    adapter.setFrameStorage(providedStorage.function());
+    auto providedHolder = std::make_shared<RecordingProvider>();
+    auto& providedStorage = *providedHolder;
+    adapter.setFrameStorageProvider(providedHolder);
     const auto providedScene = adapter.convertFrame(frame, {});
     const RangeFrame* providedRange = rangeOf(providedScene);
     const std::array<float, 4> expectedZ{1.5F, 2.5F, 3.5F, 4.5F};
     const std::array<float, 4> expectedIntensity{5.0F, 10.0F, 15.0F, 20.0F};
     const std::array<std::uint16_t, 4> expectedRaw{10U, 20U, 30U, 40U};
     if (!providedScene || !providedRange || providedScene->images.size() != 1U
-        || providedStorage.calls != 2U
+        || providedStorage.calls != 1U || providedStorage.singleCalls != 0U
+        || providedStorage.shape.images.size() != 1U || providedStorage.shape.ranges.size() != 1U
         || !providedRange->zValues.isBorrowed()
         || !providedRange->intensity.isBorrowed()
         || !providedRange->intensityRaw.isBorrowed()
@@ -216,20 +254,87 @@ int main()
         || !std::equal(expectedIntensity.begin(), expectedIntensity.end(),
                providedRange->intensity.cbegin())
         || !std::equal(expectedRaw.begin(), expectedRaw.end(), providedRange->intensityRaw.cbegin())
-        || providedScene->images.front().payload.data() != providedStorage.blocks.back().get()
-        || std::memcmp(providedStorage.blocks.back().get(), mono16Bytes.data(),
-               mono16Bytes.size()) != 0)
+        || providedScene->images.front().payload.data() != providedStorage.imageAt(0)
+        || reinterpret_cast<const std::uint8_t*>(providedRange->zValues.data())
+               != providedStorage.block.get() + providedStorage.plan.ranges[0].offset
+        || std::memcmp(providedStorage.imageAt(0), mono16Bytes.data(), mono16Bytes.size()) != 0)
     {
-        std::cerr << "Provided storage must receive the borrowed range channels and image bytes.\n";
+        std::cerr << "One provided lease must carry the borrowed range channels and the image bytes.\n";
         return 1;
     }
-    adapter.setFrameStorage([](const std::size_t) { return std::shared_ptr<std::uint8_t>{}; });
-    if (adapter.convertFrame(frame, {}).has_value())
     {
-        std::cerr << "An empty storage result must drop the range and image resources.\n";
-        return 1;
+        // The shape carries exactly the fields of the frame that is then published.
+        const auto& rangeShape = providedStorage.shape.ranges.front();
+        const auto& imageShape = providedStorage.shape.images.front();
+        const auto& published = providedScene->ranges.front();
+        const auto& publishedImage = providedScene->images.front();
+        if (rangeShape.descriptor.id != published.descriptor.id
+            || rangeShape.descriptor.displayName != published.descriptor.displayName
+            || rangeShape.descriptor.groupId != published.descriptor.groupId
+            || rangeShape.layout.width != providedRange->width || rangeShape.layout.height != providedRange->height
+            || rangeShape.lengthUnit != providedRange->lengthUnit
+            || rangeShape.xyCoordinateMode != providedRange->xyCoordinateMode
+            || rangeShape.sensorType != providedRange->sensorType || rangeShape.frameId != providedRange->frameId
+            || rangeShape.rangeBits != providedRange->rangeBits
+            || rangeShape.intensityBits != providedRange->intensityBits
+            || rangeShape.rangeField.id != providedRange->rangeField.id
+            || rangeShape.intensityField.id != providedRange->intensityField.id
+            || imageShape.descriptor.id != publishedImage.descriptor.id
+            || imageShape.descriptor.displayName != publishedImage.descriptor.displayName
+            || imageShape.width != publishedImage.payload.width || imageShape.height != publishedImage.payload.height
+            || imageShape.stride != publishedImage.payload.stride || imageShape.size != publishedImage.payload.size
+            || imageShape.pixelFormat != publishedImage.payload.pixelFormat
+            || imageShape.sourceFormat != publishedImage.payload.sourceFormat
+            || providedStorage.shape.metadata.frameId != providedScene->metadata.frameId
+            || providedStorage.shape.metadata.frameIndex != providedScene->metadata.frameIndex)
+        {
+            std::cerr << "The planned shape must equal the published frame.\n";
+            return 1;
+        }
     }
-    adapter.setFrameStorage({});
+    {
+        auto refusing = std::make_shared<RecordingProvider>();
+        refusing->refuse = true;
+        adapter.setFrameStorageProvider(refusing);
+        if (adapter.convertFrame(frame, {}).has_value() || refusing->calls != 1U || refusing->singleCalls != 0U)
+        {
+            std::cerr << "A refused frame plan must drop the range and image with one provider call.\n";
+            return 1;
+        }
+    }
+    adapter.setFrameStorageProvider({});
+
+    {
+        // A range with two intensity images shares one lease and one admission.
+        auto multi = frame;
+        multi.parts.push_back({
+            heliotis::FramePartKind::Intensity,
+            "Intensity",
+            "Mono16",
+            2,
+            2,
+            16,
+            std::vector<std::uint16_t>{50U, 60U, 70U, 80U}
+        });
+        auto holder = std::make_shared<RecordingProvider>();
+        adapter.setFrameStorageProvider(holder);
+        const auto converted = adapter.convertFrame(multi, {});
+        if (!converted || converted->ranges.size() != 1U || converted->images.size() != 2U
+            || holder->calls != 1U || holder->singleCalls != 0U
+            || holder->shape.images.size() != 2U || holder->shape.ranges.size() != 1U
+            || holder->plan.images.size() != 2U
+            || converted->images.front().payload.data() != holder->imageAt(0)
+            || converted->images.back().payload.data() != holder->imageAt(1)
+            || converted->images.front().descriptor.displayName == converted->images.back().descriptor.displayName
+            || holder->shape.images[0].descriptor.displayName != converted->images[0].descriptor.displayName
+            || holder->shape.images[1].descriptor.displayName != converted->images[1].descriptor.displayName
+            || !holder->contains(converted->ranges.front().payload.zValues.data()))
+        {
+            std::cerr << "A range with several intensity images must share one planned lease.\n";
+            return 1;
+        }
+        adapter.setFrameStorageProvider({});
+    }
 
     GraphicsFrameRequest imageOnlyRequest;
     imageOnlyRequest.components = GraphicsFrameComponent::Image;
@@ -403,8 +508,9 @@ int main()
         full.scan3dGeometry = heliotis::Scan3dGeometry{
             "RectifiedC", "um", 2.0, 3.0, 0.5, 100.0, 200.0, -10.0};
 
-        RecordingStorage storage;
-        adapter.setFrameStorage(storage.function());
+        auto storageHolder = std::make_shared<RecordingProvider>();
+        auto& storage = *storageHolder;
+        adapter.setFrameStorageProvider(storageHolder);
         const auto converted = adapter.convertFrame(full, {});
         const RangeFrame* range = rangeOf(converted);
         if (!converted || !range || converted->ranges.size() != 1U || !converted->images.empty()
@@ -471,7 +577,7 @@ int main()
             std::cerr << "Every converted range, intensity and confidence field must survive.\n";
             return 1;
         }
-        adapter.setFrameStorage({});
+        adapter.setFrameStorageProvider({});
     }
 
     // Integer range + intensity + confidence samples keep every raw channel and
@@ -513,8 +619,9 @@ int main()
         raw.parts.at(0).sampleScale = 0.5;
         raw.parts.at(1).sampleScale = 0.5;
 
-        RecordingStorage storage;
-        adapter.setFrameStorage(storage.function());
+        auto storageHolder = std::make_shared<RecordingProvider>();
+        auto& storage = *storageHolder;
+        adapter.setFrameStorageProvider(storageHolder);
         const auto converted = adapter.convertFrame(raw, {});
         const RangeFrame* range = rangeOf(converted);
         const std::array<std::uint16_t, 4> expectedRange{2U, 4U, 6U, 8U};
@@ -555,17 +662,16 @@ int main()
             std::cerr << "Integer raw channels must preserve their sensor codes.\n";
             return 1;
         }
-        if (storage.calls != 2U || storage.blocks.size() != 2U
-            || storage.blocks[0] == storage.blocks[1]
+        if (storage.calls != 1U || storage.singleCalls != 0U
             || !storage.contains(range->rangeRaw.data())
             || !storage.contains(range->intensityRaw.data())
             || !storage.contains(range->confidenceRaw.data())
-            || converted->images.front().payload.data() != storage.blocks.back().get())
+            || converted->images.front().payload.data() != storage.imageAt(0))
         {
-            std::cerr << "One range block and one intensity image block must carry the frame.\n";
+            std::cerr << "One lease must carry the range block and the intensity image block.\n";
             return 1;
         }
-        adapter.setFrameStorage({});
+        adapter.setFrameStorageProvider({});
     }
 
     // A requested range can fail while a valid intensity image from the same
@@ -665,70 +771,47 @@ int main()
             return 1;
         }
 
-        // A refused first destination (the range writer) reports the real
-        // GraphicsRangeFrameWriter failure with its calculated block bytes.
-        int storageCalls = 0;
-        adapter.setFrameStorage([&storageCalls](const std::size_t bytes) {
-            ++storageCalls;
-            if (storageCalls == 1) return std::shared_ptr<std::uint8_t>{};
-            return std::shared_ptr<std::uint8_t>(
-                new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>());
-        });
+        // A refused frame plan drops the whole frame after one provider call: the range keeps the
+        // evidence of its own plan or reports the refusal with the planned block bytes, and the
+        // image reports StorageRefused. Nothing is retried component by component.
+        auto refusing = std::make_shared<RecordingProvider>();
+        refusing->refuse = true;
+        adapter.setFrameStorageProvider(refusing);
         rangeRejection = {};
         imageRejection = {};
         const auto refusedPreview = adapter.convertFrameWithRejection(
             shortRange, {}, rangeRejection, imageRejection);
-        if (!check(refusedPreview && refusedPreview->hasImage() && !refusedPreview->hasRangeFrame()
+        if (!check(!refusedPreview && refusing->calls == 1U && refusing->singleCalls == 0U
                        && rangeRejection.reason == RangeReason::InvalidLayout
                        && rangeRejection.affectedPart == 0U && rangeRejection.requestedStorageBytes == 0U
-                       && rangeRejection.imageRetained && !rangeRejection.rangeRetained,
-                   "A refused preview must keep the original range rejection evidence."))
+                       && imageRejection.reason == ImageReason::StorageRefused
+                       && !rangeRejection.imageRetained && !rangeRejection.rangeRetained,
+                   "A refused preview plan must keep the original range rejection evidence."))
             return 1;
 
-        storageCalls = 0;
+        refusing->calls = 0U;
         rangeRejection = {};
         imageRejection = {};
-        const auto rangeRefused = adapter.convertFrameWithRejection(
+        const auto refused = adapter.convertFrameWithRejection(
             input, {}, rangeRejection, imageRejection);
-        if (!check(rangeRejection.reason == RangeReason::StorageRefused,
-                   "A refused range destination must report StorageRefused.")
+        if (!check(!refused && refusing->calls == 1U && refusing->singleCalls == 0U,
+                   "A refused plan must drop the frame with exactly one provider call.")
+            || !check(rangeRejection.reason == RangeReason::StorageRefused,
+                      "A refused range destination must report StorageRefused.")
             || !check(rangeRejection.requestedStorageBytes > 0U,
-                      "A refused range writer must retain its calculated block bytes.")
-            || !check(rangeRefused && rangeRefused->images.size() == 1U
-                          && rangeRejection.imageRetained && !rangeRejection.rangeRetained,
-                      "A refused range must leave the intensity image retained."))
-        {
-            return 1;
-        }
-
-        // A refused second destination (the image writer) reports the real
-        // GraphicsImageWriter failure while a valid range is retained.
-        storageCalls = 0;
-        adapter.setFrameStorage([&storageCalls](const std::size_t bytes) {
-            ++storageCalls;
-            if (storageCalls == 2) return std::shared_ptr<std::uint8_t>{};
-            return std::shared_ptr<std::uint8_t>(
-                new std::uint8_t[bytes], std::default_delete<std::uint8_t[]>());
-        });
-        const auto imageRefused = adapter.convertFrameWithRejection(
-            input, {}, rangeRejection, imageRejection);
-        if (!check(imageRejection.reason == ImageReason::StorageRefused,
-                   "A refused image destination must report StorageRefused.")
-            || !check(imageRejection.width == 2U && imageRejection.effectiveStride == 4U
+                      "A refused range plan must retain its calculated block bytes.")
+            || !check(imageRejection.reason == ImageReason::StorageRefused
+                          && imageRejection.width == 2U && imageRejection.effectiveStride == 4U
                           && imageRejection.height == 2U && imageRejection.frameSequence == 11U
                           && imageRejection.conversion
                                  == heliotis::HeliotisImageRejection::Conversion::Copy,
                       "Image evidence must carry the effective stride, sequence and conversion.")
-            || !check(imageRefused && imageRefused->ranges.size() == 1U,
-                      "A refused image must leave the valid range retained.")
-            || !check(rangeRejection.reason == RangeReason::None
-                          && rangeRejection.affectedPart == heliotis::HeliotisRangeRejection::noPart
-                          && rangeRejection.requestedStorageBytes == 0U,
-                      "A successful range must clear the preceding range rejection."))
+            || !check(!rangeRejection.rangeRetained && !rangeRejection.imageRetained,
+                      "A refused plan retains no resource."))
         {
             return 1;
         }
-        adapter.setFrameStorage({});
+        adapter.setFrameStorageProvider({});
 
         auto optional = input;
         optional.parts.pop_back();

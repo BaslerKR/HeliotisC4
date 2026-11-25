@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Plan the H8 range and every integer intensity image of a frame as one frame-storage request through the Playground `IFrameStorageProvider::acquireFrame()` contract, so the whole frame is written once into one worker slot, published in place, and admitted once. A refused storage plan drops the whole frame once instead of retrying the range and each image separately. Requires the Playground frame-storage interface version 2.0.
+
 - Reset range and intensity rejection outputs for each conversion so reused outputs cannot carry a previous frame's evidence.
 
 - Publish the first observed range and integer intensity assembly rejection through the optional `IDeviceRangeDiagnostics/1.0` and `IDeviceImageDiagnostics/1.0` sinks with fixed numeric fields and part/sequence identity. A non-empty typed range reports a sample-count mismatch while keeping any usable raw preview or intensity image. Optional omissions, missing calibration alone, floating intensity and unrequested components stay silent. Single reports every failure and Live the first plus every 100th per reason per acquisition, independent of device details.
