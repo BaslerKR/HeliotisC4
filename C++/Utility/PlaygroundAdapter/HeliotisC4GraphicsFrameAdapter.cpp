@@ -8,39 +8,10 @@
 #include <cmath>
 #include <functional>
 #include <limits>
-#include <new>
 #include <string>
 #include <utility>
 
 namespace {
-
-// Dispatch each writer allocation to its planned lease block in writer order.
-class PlannedBlockAllocator final : public GraphicsFrameAllocator
-{
-public:
-    explicit PlannedBlockAllocator(const FrameStoragePlan& plan) : plan(plan) {}
-    GraphicsResult<GraphicsAllocationRef> allocate(std::size_t bytes, std::size_t alignment) noexcept override
-    {
-        const FrameStorageBlock* block = nullptr;
-        if (next < plan.images.size()) block = &plan.images[next];
-        else if (next - plan.images.size() < plan.ranges.size())
-            block = &plan.ranges[next - plan.images.size()];
-        ++next;
-        if (!block) return GraphicsFrameError::Allocation;
-        try
-        {
-            auto context = frameStorageBlockContext(plan, *block);
-            return context.allocate(bytes, alignment);
-        }
-        catch (const std::bad_alloc&)
-        {
-            return GraphicsFrameError::Allocation;
-        }
-    }
-private:
-    const FrameStoragePlan& plan;
-    std::size_t next = 0;
-};
 
 // C4Utility delivers one source and one region, so every resource of a
 // frame forms one cohort. The id scheme matches the GenTL adapters:
@@ -780,44 +751,40 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
 
     // Descriptors, display names (with duplicate suffixes) and metadata are final before planning,
     // so the frame serializes exactly as the plan assumed.
-    FrameStoragePlan storagePlan;
-    PlannedBlockAllocator allocator(storagePlan);
-    GraphicsFrameContext plannedContext(std::shared_ptr<GraphicsFrameAllocator>(
-        std::shared_ptr<GraphicsFrameAllocator>{}, &allocator));
-    GraphicsFrameBuilder frameBuilder(provider ? plannedContext : GraphicsFrameContext::local());
-    auto& result = frameBuilder.content();
+    GraphicsFrameContent staged;
     if (rangePlan)
     {
-        result.addRange(resourceId("range", rangePlan->partIndex), RangeFrame{}, "Range", kResourceGroup);
+        staged.addRange(resourceId("range", rangePlan->partIndex), RangeFrame{}, "Range", kResourceGroup);
     }
     for (const auto& image : imagePlans)
     {
         const FramePart& part = frame.parts[image.partIndex];
-        result.addImage(resourceId("image", image.partIndex), GraphicsImage{},
+        staged.addImage(resourceId("image", image.partIndex), GraphicsImage{},
                         part.name.empty() ? std::string("Intensity") : part.name, kResourceGroup);
     }
     std::vector<std::string> names;
-    for (const auto& image : result.images) names.push_back(image.descriptor.displayName);
-    for (std::size_t index = 0; index < result.images.size(); ++index)
+    for (const auto& image : staged.images) names.push_back(image.descriptor.displayName);
+    for (std::size_t index = 0; index < staged.images.size(); ++index)
     {
         if (std::count(names.cbegin(), names.cend(), names[index]) > 1)
         {
-            result.images[index].descriptor.displayName += " " + std::to_string(index + 1);
+            staged.images[index].descriptor.displayName += " " + std::to_string(index + 1);
         }
     }
-    result.metadata.sourceName = "Heliotis C4";
-    result.metadata.frameId = frame.frameId;
-    result.metadata.frameIndex = frame.sequence;
+    staged.metadata.sourceName = "Heliotis C4";
+    staged.metadata.frameId = frame.frameId;
+    staged.metadata.frameIndex = frame.sequence;
 
+    FrameStoragePlan storagePlan;
     if (provider)
     {
         FrameStorageShape shape;
-        shape.metadata = result.metadata;
+        shape.metadata = staged.metadata;
         bool shaped = true;
         for (std::size_t index = 0; index < imagePlans.size(); ++index)
         {
-            auto imageShape = frameStorageImageShape(result.images[index].descriptor,
-                result.images[index].initialView, imagePlans[index].source);
+            auto imageShape = frameStorageImageShape(staged.images[index].descriptor,
+                staged.images[index].initialView, imagePlans[index].source);
             if (!imageShape)
             {
                 shaped = false;
@@ -827,8 +794,8 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         }
         if (rangePlan)
         {
-            shape.ranges.push_back(frameStorageRangeShape(result.ranges.front().descriptor,
-                result.ranges.front().initialView, rangePlan->layout, rangePlan->fields));
+            shape.ranges.push_back(frameStorageRangeShape(staged.ranges.front().descriptor,
+                staged.ranges.front().initialView, rangePlan->layout, rangePlan->fields));
         }
         if (shaped) storagePlan = provider->acquireFrame(shape);
         if (!storagePlan.succeeded())
@@ -855,6 +822,12 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         }
     }
 
+    GraphicsFrameContext plannedContext =
+        provider ? frameStoragePlanContext(storagePlan) : GraphicsFrameContext::local();
+    GraphicsFrameBuilder frameBuilder(plannedContext);
+    frameBuilder.content() = std::move(staged);
+    auto& result = frameBuilder.content();
+
     for (std::size_t index = 0; index < imagePlans.size(); ++index)
     {
         GraphicsImageFailure failure = GraphicsImageFailure::None;
@@ -872,7 +845,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     }
     if (rangePlan)
     {
-        auto range = writeRange(std::move(*rangePlan), frameBuilder, rangeRejection);
+        auto range = writeRange(*rangePlan, frameBuilder, rangeRejection);
         if (!range)
         {
             return std::nullopt;
@@ -880,13 +853,28 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         result.ranges.front().payload = std::move(*range);
     }
 
-    // Retention is observed from the assembled result, never inferred from the failure.
-    if (!result.isValid())
+    auto published = std::move(frameBuilder).publish();
+    if (!published)
     {
+        if (rangePlan && rangeRejection)
+        {
+            const RangeReason reason = published.error() == GraphicsFrameError::InvalidInput
+                ? RangeReason::InvalidLayout
+                : RangeReason::StorageRefused;
+            static_cast<void>(rejectRange(rangeRejection, reason,
+                static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
+                rangePlan->width, rangePlan->height, rangePlan->sequence,
+                rangePlan->readableBytes, rangePlan->requiredBytes));
+        }
+        if (!imagePlans.empty())
+        {
+            const ImageReason reason = published.error() == GraphicsFrameError::InvalidInput
+                ? ImageReason::InvalidDimensions
+                : ImageReason::StorageRefused;
+            static_cast<void>(rejectImage(imageRejection, reason, imagePlans.front().source));
+        }
         return std::nullopt;
     }
-    auto published = std::move(frameBuilder).publish();
-    if (!published) return std::nullopt;
     if (rangeRejection) {
         rangeRejection->rangeRetained = !published.value().ranges().empty();
         rangeRejection->imageRetained = !published.value().images().empty();
