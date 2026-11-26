@@ -390,14 +390,14 @@ void HeliotisC4SourceController::handleFrame(GraphicsFrame&& payload, const unsi
         || armFrameCount <= 3 || armFrameCount % 100 == 0;
     if (sampledDiagnostics) {
         qInfo().noquote() << "[Heliotis C4] Delivering GraphicsFrame"
-                          << payload.metadata.frameIndex
+                          << payload.metadata().frameIndex
                           << "armFrameCount=" << armFrameCount
                           << "range=" << payload.hasRangeFrame();
     }
     if (!_frameConsumer) return;
     SessionFrame frame;
     frame.payload = std::move(payload);
-    frame.frameSeq = frame.payload.metadata.frameIndex;
+    frame.frameSeq = frame.payload.metadata().frameIndex;
     _frameConsumer(std::move(frame), sourceIndex);
     _deliveredFrames.fetch_add(1);
     _diagnosticDelivered.fetch_add(1);

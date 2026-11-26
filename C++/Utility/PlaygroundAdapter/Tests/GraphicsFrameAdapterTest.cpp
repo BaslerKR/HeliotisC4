@@ -13,6 +13,10 @@
 #include <memory>
 #include <optional>
 #include <vector>
+#include <type_traits>
+#include <utility>
+
+static_assert(std::is_const_v<std::remove_reference_t<decltype((std::declval<const GraphicsFrame&>().images().front().payload))>>);
 
 namespace {
 
@@ -59,8 +63,9 @@ public:
         for (const auto& range : requested.ranges)
         {
             end = (end + 63U) / 64U * 64U;
-            const GraphicsRangeFrameWriter measure(
-                range.layout, [](std::size_t) { return std::shared_ptr<std::uint8_t>(); });
+            GraphicsFrameContext refusingContext(nullptr);
+            GraphicsFrameBuilder measureBuilder(refusingContext);
+            const GraphicsRangeFrameWriter measure(measureBuilder, range.layout);
             result.ranges.push_back({end, measure.blockBytes()});
             end += measure.blockBytes();
         }
@@ -156,7 +161,7 @@ int main()
         || std::fabs(range.physicalXAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.102F) > 0.0000001F
         || std::fabs(range.physicalYAt(3, 1, GraphicsLengthUnit::Millimeter) - 0.203F) > 0.0000001F
         || std::fabs(range.physicalZAt(3, GraphicsLengthUnit::Millimeter) + 0.00775F) > 0.0000001F
-        || scene->metadata.frameIndex != 7U)
+        || scene->metadata().frameIndex != 7U)
     {
         std::cerr << "The GraphicsEngine scene must preserve H8 frame geometry, values, and metadata.\n";
         return 1;
@@ -164,26 +169,26 @@ int main()
 
     // Composition mirrors the GenTL adapter: one "0:0" cohort with a range and
     // an intensity image, so get().image() resolves the range by group.
-    if (scene->ranges.size() != 1U || scene->images.size() != 1U
-        || scene->ranges.front().descriptor.id != "range.0:0.0"
-        || scene->ranges.front().descriptor.groupId != "0:0"
-        || scene->images.front().descriptor.id != "image.0:0.1"
-        || scene->images.front().descriptor.groupId != "0:0"
-        || scene->images.front().descriptor.displayName != "Intensity"
-        || scene->images.front().descriptor.registration != GraphicsImageRegistration::Unspecified
+    if (scene->ranges().size() != 1U || scene->images().size() != 1U
+        || scene->ranges().front().descriptor.id != "range.0:0.0"
+        || scene->ranges().front().descriptor.groupId != "0:0"
+        || scene->images().front().descriptor.id != "image.0:0.1"
+        || scene->images().front().descriptor.groupId != "0:0"
+        || scene->images().front().descriptor.displayName != "Intensity"
+        || scene->images().front().descriptor.registration != GraphicsImageRegistration::Unspecified
         || !range.canDerivePointCloud())
     {
         std::cerr << "An H8 frame must publish one grouped range and intensity image.\n";
         return 1;
     }
-    const GraphicsImage& intensity = scene->images.front().payload;
+    const GraphicsImage& intensity = scene->images().front().payload;
     std::uint16_t secondSample = 0;
     std::memcpy(&secondSample, intensity.data() + 2, sizeof(secondSample));
     const std::array<std::uint8_t, 8> mono16Bytes{
         10U, 0U, 20U, 0U, 30U, 0U, 40U, 0U};
     if (intensity.pixelFormat != GraphicsImagePixelFormat::Mono16
         || intensity.width != 2 || intensity.height != 2 || intensity.stride != 4
-        || intensity.size != mono16Bytes.size()
+        || intensity.pixels.size() != mono16Bytes.size()
         || intensity.declaredMonoSourceBits != 0
         || intensity.bitAlignment != GraphicsImageBitAlignment::Packed
         || intensity.frameSequence != 7U || secondSample != 20U
@@ -195,9 +200,9 @@ int main()
 
     frame.parts.at(1).bitsPerSample = 12;
     const auto twelveBit = adapter.convertFrame(frame, {});
-    if (!twelveBit || twelveBit->images.size() != 1U
-        || twelveBit->images.front().payload.declaredMonoSourceBits != 12U
-        || twelveBit->images.front().payload.bitAlignment != GraphicsImageBitAlignment::LeastSignificant)
+    if (!twelveBit || twelveBit->images().size() != 1U
+        || twelveBit->images().front().payload.declaredMonoSourceBits != 12U
+        || twelveBit->images().front().payload.bitAlignment != GraphicsImageBitAlignment::LeastSignificant)
     {
         std::cerr << "A 12-bit intensity part must declare LSB-aligned Mono16 samples.\n";
         return 1;
@@ -206,11 +211,11 @@ int main()
     frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 300U, 30U, 40U};
     const std::array<std::uint8_t, 4> mono8Bytes{10U, 255U, 30U, 40U};
     const auto eightBit = adapter.convertFrame(frame, {});
-    if (!eightBit || eightBit->images.size() != 1U
-        || eightBit->images.front().payload.pixelFormat != GraphicsImagePixelFormat::Mono8
-        || eightBit->images.front().payload.stride != 2
-        || eightBit->images.front().payload.size != mono8Bytes.size()
-        || std::memcmp(eightBit->images.front().payload.data(), mono8Bytes.data(),
+    if (!eightBit || eightBit->images().size() != 1U
+        || eightBit->images().front().payload.pixelFormat != GraphicsImagePixelFormat::Mono8
+        || eightBit->images().front().payload.stride != 2
+        || eightBit->images().front().payload.pixels.size() != mono8Bytes.size()
+        || std::memcmp(eightBit->images().front().payload.data(), mono8Bytes.data(),
                mono8Bytes.size()) != 0)
     {
         std::cerr << "An 8-bit intensity part must become a saturated Mono8 image.\n";
@@ -220,7 +225,7 @@ int main()
     GraphicsFrameRequest shortPartRequest;
     shortPartRequest.includeRangeAuxiliaryChannels = false;
     const auto shortPart = adapter.convertFrame(frame, shortPartRequest);
-    if (!shortPart || shortPart->ranges.size() != 1U || !shortPart->images.empty())
+    if (!shortPart || shortPart->ranges().size() != 1U || !shortPart->images().empty())
     {
         std::cerr << "A part whose sample count does not match its dimensions must stay image-free.\n";
         return 1;
@@ -229,7 +234,7 @@ int main()
     frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 20U, 30U, 40U};
 
     // A provided storage function receives the range channels and the image
-    // bytes; every range array is borrowed from the block the writer acquired.
+    // bytes; every range span shares the block the writer acquired.
     // Each converted payload takes exactly one acquire: one range block and one
     // intensity image block for this frame.
     auto providedHolder = std::make_shared<RecordingProvider>();
@@ -240,12 +245,9 @@ int main()
     const std::array<float, 4> expectedZ{1.5F, 2.5F, 3.5F, 4.5F};
     const std::array<float, 4> expectedIntensity{5.0F, 10.0F, 15.0F, 20.0F};
     const std::array<std::uint16_t, 4> expectedRaw{10U, 20U, 30U, 40U};
-    if (!providedScene || !providedRange || providedScene->images.size() != 1U
+    if (!providedScene || !providedRange || providedScene->images().size() != 1U
         || providedStorage.calls != 1U || providedStorage.singleCalls != 0U
         || providedStorage.shape.images.size() != 1U || providedStorage.shape.ranges.size() != 1U
-        || !providedRange->zValues.isBorrowed()
-        || !providedRange->intensity.isBorrowed()
-        || !providedRange->intensityRaw.isBorrowed()
         || !providedStorage.contains(providedRange->zValues.data())
         || !providedStorage.contains(providedRange->intensity.data())
         || providedRange->validMask.size() != 0U
@@ -254,20 +256,20 @@ int main()
         || !std::equal(expectedIntensity.begin(), expectedIntensity.end(),
                providedRange->intensity.cbegin())
         || !std::equal(expectedRaw.begin(), expectedRaw.end(), providedRange->intensityRaw.cbegin())
-        || providedScene->images.front().payload.data() != providedStorage.imageAt(0)
+        || providedScene->images().front().payload.data() != providedStorage.imageAt(0)
         || reinterpret_cast<const std::uint8_t*>(providedRange->zValues.data())
                != providedStorage.block.get() + providedStorage.plan.ranges[0].offset
         || std::memcmp(providedStorage.imageAt(0), mono16Bytes.data(), mono16Bytes.size()) != 0)
     {
-        std::cerr << "One provided lease must carry the borrowed range channels and the image bytes.\n";
+        std::cerr << "One provided lease must carry the range spans and the image bytes.\n";
         return 1;
     }
     {
         // The shape carries exactly the fields of the frame that is then published.
         const auto& rangeShape = providedStorage.shape.ranges.front();
         const auto& imageShape = providedStorage.shape.images.front();
-        const auto& published = providedScene->ranges.front();
-        const auto& publishedImage = providedScene->images.front();
+        const auto& published = providedScene->ranges().front();
+        const auto& publishedImage = providedScene->images().front();
         if (rangeShape.descriptor.id != published.descriptor.id
             || rangeShape.descriptor.displayName != published.descriptor.displayName
             || rangeShape.descriptor.groupId != published.descriptor.groupId
@@ -282,11 +284,11 @@ int main()
             || imageShape.descriptor.id != publishedImage.descriptor.id
             || imageShape.descriptor.displayName != publishedImage.descriptor.displayName
             || imageShape.width != publishedImage.payload.width || imageShape.height != publishedImage.payload.height
-            || imageShape.stride != publishedImage.payload.stride || imageShape.size != publishedImage.payload.size
+            || imageShape.stride != publishedImage.payload.stride || imageShape.size != publishedImage.payload.pixels.size()
             || imageShape.pixelFormat != publishedImage.payload.pixelFormat
             || imageShape.sourceFormat != publishedImage.payload.sourceFormat
-            || providedStorage.shape.metadata.frameId != providedScene->metadata.frameId
-            || providedStorage.shape.metadata.frameIndex != providedScene->metadata.frameIndex)
+            || providedStorage.shape.metadata.frameId != providedScene->metadata().frameId
+            || providedStorage.shape.metadata.frameIndex != providedScene->metadata().frameIndex)
         {
             std::cerr << "The planned shape must equal the published frame.\n";
             return 1;
@@ -319,16 +321,16 @@ int main()
         auto holder = std::make_shared<RecordingProvider>();
         adapter.setFrameStorageProvider(holder);
         const auto converted = adapter.convertFrame(multi, {});
-        if (!converted || converted->ranges.size() != 1U || converted->images.size() != 2U
+        if (!converted || converted->ranges().size() != 1U || converted->images().size() != 2U
             || holder->calls != 1U || holder->singleCalls != 0U
             || holder->shape.images.size() != 2U || holder->shape.ranges.size() != 1U
             || holder->plan.images.size() != 2U
-            || converted->images.front().payload.data() != holder->imageAt(0)
-            || converted->images.back().payload.data() != holder->imageAt(1)
-            || converted->images.front().descriptor.displayName == converted->images.back().descriptor.displayName
-            || holder->shape.images[0].descriptor.displayName != converted->images[0].descriptor.displayName
-            || holder->shape.images[1].descriptor.displayName != converted->images[1].descriptor.displayName
-            || !holder->contains(converted->ranges.front().payload.zValues.data()))
+            || converted->images().front().payload.data() != holder->imageAt(0)
+            || converted->images().back().payload.data() != holder->imageAt(1)
+            || converted->images().front().descriptor.displayName == converted->images().back().descriptor.displayName
+            || holder->shape.images[0].descriptor.displayName != converted->images()[0].descriptor.displayName
+            || holder->shape.images[1].descriptor.displayName != converted->images()[1].descriptor.displayName
+            || !holder->contains(converted->ranges().front().payload.zValues.data()))
         {
             std::cerr << "A range with several intensity images must share one planned lease.\n";
             return 1;
@@ -339,7 +341,7 @@ int main()
     GraphicsFrameRequest imageOnlyRequest;
     imageOnlyRequest.components = GraphicsFrameComponent::Image;
     const auto imageOnly = adapter.convertFrame(frame, imageOnlyRequest);
-    if (!imageOnly || !imageOnly->ranges.empty() || imageOnly->images.size() != 1U)
+    if (!imageOnly || !imageOnly->ranges().empty() || imageOnly->images().size() != 1U)
     {
         std::cerr << "Image-only requests must omit the range resource.\n";
         return 1;
@@ -348,8 +350,8 @@ int main()
     auto floatingIntensity = frame;
     floatingIntensity.parts.at(1).samples = std::vector<double>{1.0, 2.0, 3.0, 4.0};
     const auto floatingScene = adapter.convertFrame(floatingIntensity, {});
-    if (!floatingScene || !floatingScene->images.empty()
-        || floatingScene->ranges.front().payload.intensity.size() != 4U)
+    if (!floatingScene || !floatingScene->images().empty()
+        || floatingScene->ranges().front().payload.intensity.size() != 4U)
     {
         std::cerr << "Floating intensity remains a range channel without an image.\n";
         return 1;
@@ -358,10 +360,10 @@ int main()
     auto twoImages = frame;
     twoImages.parts.push_back(twoImages.parts.at(1));
     const auto pairedImages = adapter.convertFrame(twoImages, {});
-    if (!pairedImages || pairedImages->images.size() != 2U
-        || pairedImages->images[0].descriptor.displayName != "Intensity 1"
-        || pairedImages->images[1].descriptor.displayName != "Intensity 2"
-        || pairedImages->images[1].descriptor.id != "image.0:0.2")
+    if (!pairedImages || pairedImages->images().size() != 2U
+        || pairedImages->images()[0].descriptor.displayName != "Intensity 1"
+        || pairedImages->images()[1].descriptor.displayName != "Intensity 2"
+        || pairedImages->images()[1].descriptor.id != "image.0:0.2")
     {
         std::cerr << "Repeated intensity names must stay distinguishable.\n";
         return 1;
@@ -513,14 +515,14 @@ int main()
         adapter.setFrameStorageProvider(storageHolder);
         const auto converted = adapter.convertFrame(full, {});
         const RangeFrame* range = rangeOf(converted);
-        if (!converted || !range || converted->ranges.size() != 1U || !converted->images.empty()
-            || converted->ranges.front().descriptor.id != "range.0:0.0"
-            || converted->ranges.front().descriptor.displayName != "Range"
-            || converted->ranges.front().descriptor.groupId != "0:0"
-            || converted->metadata.sourceName != "Heliotis C4"
-            || converted->metadata.frameId != "h8-9"
-            || converted->metadata.frameIndex != 9U
-            || !converted->metadata.cohortId.empty()
+        if (!converted || !range || converted->ranges().size() != 1U || !converted->images().empty()
+            || converted->ranges().front().descriptor.id != "range.0:0.0"
+            || converted->ranges().front().descriptor.displayName != "Range"
+            || converted->ranges().front().descriptor.groupId != "0:0"
+            || converted->metadata().sourceName != "Heliotis C4"
+            || converted->metadata().frameId != "h8-9"
+            || converted->metadata().frameIndex != 9U
+            || !converted->metadata().cohortId.empty()
             || range->width != 2 || range->height != 2
             || range->lengthUnit != GraphicsLengthUnit::Micrometer
             || range->xyCoordinateMode != RangeFrameXYCoordinateMode::UniformPhysical
@@ -569,8 +571,6 @@ int main()
             || std::fabs(range->confidence.at(3) - 4.0F) > 0.0001F
             || range->confidenceRaw.at(2) != 3U
             || storage.calls != 1U
-            || !range->zValues.isBorrowed() || !range->intensity.isBorrowed()
-            || !range->confidenceRaw.isBorrowed()
             || !storage.contains(range->zValues.data())
             || !storage.contains(range->confidenceRaw.data()))
         {
@@ -627,8 +627,8 @@ int main()
         const std::array<std::uint16_t, 4> expectedRange{2U, 4U, 6U, 8U};
         const std::array<std::uint16_t, 4> expectedIntensity{10U, 20U, 30U, 40U};
         const std::array<std::uint16_t, 4> expectedConfidence{1U, 2U, 3U, 4U};
-        if (!converted || !range || converted->ranges.size() != 1U
-            || converted->images.size() != 1U)
+        if (!converted || !range || converted->ranges().size() != 1U
+            || converted->images().size() != 1U)
         {
             std::cerr << "Integer range, intensity and confidence parts must convert.\n";
             return 1;
@@ -639,12 +639,10 @@ int main()
             std::cerr << "An integer range without Scan3d geometry must stay a PixelGrid height map.\n";
             return 1;
         }
-        if (!range->rangeRaw.isBorrowed() || !range->intensityRaw.isBorrowed()
-            || !range->confidenceRaw.isBorrowed()
-            || range->rangeRaw.size() != 4U || range->intensityRaw.size() != 4U
+        if (range->rangeRaw.size() != 4U || range->intensityRaw.size() != 4U
             || range->confidenceRaw.size() != 4U)
         {
-            std::cerr << "Every integer raw channel must be a borrowed four-sample array.\n";
+            std::cerr << "Every integer raw channel must be a four-sample span.\n";
             return 1;
         }
         if (!range->validMask.empty() || !range->intensityValidMask.empty()
@@ -666,7 +664,7 @@ int main()
             || !storage.contains(range->rangeRaw.data())
             || !storage.contains(range->intensityRaw.data())
             || !storage.contains(range->confidenceRaw.data())
-            || converted->images.front().payload.data() != storage.imageAt(0))
+            || converted->images().front().payload.data() != storage.imageAt(0))
         {
             std::cerr << "One lease must carry the range block and the intensity image block.\n";
             return 1;
@@ -714,7 +712,7 @@ int main()
         heliotis::HeliotisRangeRejection rangeRejection;
         heliotis::HeliotisImageRejection imageRejection;
         const auto valid = adapter.convertFrameWithRejection(input, {}, rangeRejection, imageRejection);
-        if (!check(valid && valid->ranges.size() == 1U && valid->images.size() == 1U,
+        if (!check(valid && valid->ranges().size() == 1U && valid->images().size() == 1U,
                    "A valid frame must still publish a range and an intensity image.")
             || !check(rangeRejection.reason == RangeReason::None
                           && imageRejection.reason == ImageReason::None,
@@ -728,7 +726,7 @@ int main()
         const auto shortResult = adapter.convertFrameWithRejection(
             shortRange, {}, rangeRejection, imageRejection);
         if (!check(shortResult && shortResult->hasImage() && shortResult->hasRangeFrame()
-                       && shortResult->ranges.front().descriptor.id == "range.0:0.1"
+                       && shortResult->ranges().front().descriptor.id == "range.0:0.1"
                        && rangeRejection.rangeRetained && rangeRejection.imageRetained,
                    "A malformed typed range must leave the raw preview and intensity image available.")
             || !check(rangeRejection.reason == RangeReason::InvalidLayout
@@ -760,7 +758,7 @@ int main()
                           && rangeRejection.partCount == 3U && rangeRejection.width == 2U
                           && rangeRejection.height == 2U && rangeRejection.frameSequence == 11U,
                       "Range evidence must carry the fixed part ordinal and frame sequence.")
-            || !check(retained && retained->ranges.empty() && retained->images.size() == 1U,
+            || !check(retained && retained->ranges().empty() && retained->images().size() == 1U,
                       "A rejected range must not hide a valid intensity image.")
             || !check(rangeRejection.rangeRetained == retained->hasRangeFrame()
                           && rangeRejection.imageRetained == retained->hasImage(),
@@ -843,7 +841,7 @@ int main()
         imageRejection = {};
         const auto floatingResult = adapter.convertFrameWithRejection(
             floating, {}, rangeRejection, imageRejection);
-        if (!check(floatingResult && floatingResult->images.empty()
+        if (!check(floatingResult && floatingResult->images().empty()
                        && rangeRejection.reason == RangeReason::None
                        && imageRejection.reason == ImageReason::None,
                    "An intentionally skipped floating intensity part must stay silent."))

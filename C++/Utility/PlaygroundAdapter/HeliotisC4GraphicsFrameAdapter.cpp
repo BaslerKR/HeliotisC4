@@ -8,10 +8,39 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <new>
 #include <string>
 #include <utility>
 
 namespace {
+
+// Dispatch each writer allocation to its planned lease block in writer order.
+class PlannedBlockAllocator final : public GraphicsFrameAllocator
+{
+public:
+    explicit PlannedBlockAllocator(const FrameStoragePlan& plan) : plan(plan) {}
+    GraphicsResult<GraphicsAllocationRef> allocate(std::size_t bytes, std::size_t alignment) noexcept override
+    {
+        const FrameStorageBlock* block = nullptr;
+        if (next < plan.images.size()) block = &plan.images[next];
+        else if (next - plan.images.size() < plan.ranges.size())
+            block = &plan.ranges[next - plan.images.size()];
+        ++next;
+        if (!block) return GraphicsFrameError::Allocation;
+        try
+        {
+            auto context = frameStorageBlockContext(plan, *block);
+            return context.allocate(bytes, alignment);
+        }
+        catch (const std::bad_alloc&)
+        {
+            return GraphicsFrameError::Allocation;
+        }
+    }
+private:
+    const FrameStoragePlan& plan;
+    std::size_t next = 0;
+};
 
 // C4Utility delivers one source and one region, so every resource of a
 // frame forms one cohort. The id scheme matches the GenTL adapters:
@@ -352,8 +381,9 @@ using ImageReason = heliotis::HeliotisImageRejection::Reason;
     // A storage that always refuses validates the layout without copying a byte: any failure other
     // than its own refusal is a layout rule of the real writer.
     GraphicsImageFailure failure = GraphicsImageFailure::None;
-    const auto probe = writeGraphicsImageWithFailure(
-        source, [](std::size_t) { return std::shared_ptr<std::uint8_t>(); }, &failure);
+    GraphicsFrameContext refusingContext(nullptr);
+    GraphicsFrameBuilder probeBuilder(refusingContext);
+    const auto probe = writeGraphicsImageWithFailure(probeBuilder, source, &failure);
     if (failure != GraphicsImageFailure::StorageRefused || probe.isValid()) {
         // Only an otherwise usable integer intensity part that the real writer
         // refused is observable. Floating, empty, oversized and malformed parts
@@ -506,8 +536,9 @@ struct PlannedRange
     {
         // A storage that always refuses validates the layout and reports the block size; any
         // failure other than its own refusal is a real writer rule.
-        const GraphicsRangeFrameWriter probe(
-            layout, [](std::size_t) { return std::shared_ptr<std::uint8_t>(); });
+        GraphicsFrameContext refusingContext(nullptr);
+        GraphicsFrameBuilder probeBuilder(refusingContext);
+        const GraphicsRangeFrameWriter probe(probeBuilder, layout);
         if (probe.failure() != GraphicsRangeFrameWriterFailure::StorageRefused)
         {
             return rejectRangeWriter(rejection, probe, partIndex, partCount, width, height,
@@ -628,13 +659,13 @@ struct PlannedRange
     return planned;
 }
 
-/** Writes a planned range's samples into @p storage and returns the complete range frame. */
+/** Writes a planned range through the builder and returns the complete range frame. */
 [[nodiscard]] std::optional<RangeFrame> writeRange(
     PlannedRange planned,
-    const GraphicsImageStorage& storage,
+    GraphicsFrameBuilder& builder,
     heliotis::HeliotisRangeRejection* rejection)
 {
-    GraphicsRangeFrameWriter writer(planned.layout, storage);
+    GraphicsRangeFrameWriter writer(builder, planned.layout);
     const auto partIndex = static_cast<std::uint32_t>(planned.partIndex);
     if (!writer.isValid())
     {
@@ -749,7 +780,12 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
 
     // Descriptors, display names (with duplicate suffixes) and metadata are final before planning,
     // so the frame serializes exactly as the plan assumed.
-    GraphicsFrame result;
+    FrameStoragePlan storagePlan;
+    PlannedBlockAllocator allocator(storagePlan);
+    GraphicsFrameContext plannedContext(std::shared_ptr<GraphicsFrameAllocator>(
+        std::shared_ptr<GraphicsFrameAllocator>{}, &allocator));
+    GraphicsFrameBuilder frameBuilder(provider ? plannedContext : GraphicsFrameContext::local());
+    auto& result = frameBuilder.content();
     if (rangePlan)
     {
         result.addRange(resourceId("range", rangePlan->partIndex), RangeFrame{}, "Range", kResourceGroup);
@@ -773,7 +809,6 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     result.metadata.frameId = frame.frameId;
     result.metadata.frameIndex = frame.sequence;
 
-    FrameStoragePlan storagePlan;
     if (provider)
     {
         FrameStorageShape shape;
@@ -822,11 +857,8 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
 
     for (std::size_t index = 0; index < imagePlans.size(); ++index)
     {
-        const GraphicsImageStorage storage = provider
-            ? frameStorageBlockFunction(storagePlan, storagePlan.images[index])
-            : GraphicsImageStorage{};
         GraphicsImageFailure failure = GraphicsImageFailure::None;
-        auto image = writeGraphicsImageWithFailure(imagePlans[index].source, storage, &failure);
+        auto image = writeGraphicsImageWithFailure(frameBuilder, imagePlans[index].source, &failure);
         if (!image.isValid())
         {
             const ImageReason reason = imageRejectionReason(failure);
@@ -840,10 +872,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     }
     if (rangePlan)
     {
-        const GraphicsImageStorage storage = provider
-            ? frameStorageBlockFunction(storagePlan, storagePlan.ranges.front())
-            : GraphicsImageStorage{};
-        auto range = writeRange(std::move(*rangePlan), storage, rangeRejection);
+        auto range = writeRange(std::move(*rangePlan), frameBuilder, rangeRejection);
         if (!range)
         {
             return std::nullopt;
@@ -856,11 +885,13 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     {
         return std::nullopt;
     }
+    auto published = std::move(frameBuilder).publish();
+    if (!published) return std::nullopt;
     if (rangeRejection) {
-        rangeRejection->rangeRetained = !result.ranges.empty();
-        rangeRejection->imageRetained = !result.images.empty();
+        rangeRejection->rangeRetained = !published.value().ranges().empty();
+        rangeRejection->imageRetained = !published.value().images().empty();
     }
-    return result;
+    return std::move(published).value();
 }
 
 } // namespace heliotis

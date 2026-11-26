@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Publish immutable GraphicsFrame handles and write image and range spans directly into planned host storage with the P1 frame builder.
+
 - Plan the H8 range and every integer intensity image of a frame as one frame-storage request through the Playground `IFrameStorageProvider::acquireFrame()` contract, so the whole frame is written once into one worker slot, published in place, and admitted once. A refused storage plan drops the whole frame once instead of retrying the range and each image separately. Requires the Playground frame-storage interface version 2.0.
 
 - Reset range and intensity rejection outputs for each conversion so reused outputs cannot carry a previous frame's evidence.
