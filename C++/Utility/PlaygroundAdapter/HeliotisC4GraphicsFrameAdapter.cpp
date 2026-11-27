@@ -173,7 +173,6 @@ using RangeReason = heliotis::HeliotisRangeRejection::Reason;
     case GraphicsRangeFrameWriterFailure::InvalidDimensions: reason = RangeReason::InvalidDimensions; break;
     case GraphicsRangeFrameWriterFailure::SizeLimitExceeded: reason = RangeReason::SizeLimitExceeded; break;
     case GraphicsRangeFrameWriterFailure::StorageRefused: reason = RangeReason::StorageRefused; break;
-    case GraphicsRangeFrameWriterFailure::MisalignedStorage: reason = RangeReason::StorageMisaligned; break;
     case GraphicsRangeFrameWriterFailure::None: break;
     }
     return rejectRange(rejection, reason, partIndex, partCount, width, height,

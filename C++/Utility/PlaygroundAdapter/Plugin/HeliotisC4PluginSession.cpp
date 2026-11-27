@@ -135,7 +135,7 @@ AbstractSourceController* HeliotisC4PluginSession::sourceController() const
 
 unsigned int HeliotisC4PluginSession::capabilities() const noexcept
 {
-    return DevicePluginSessionCapability::GraphicsEngine
+    return DevicePluginSessionCapability::GraphicsViewer
         | DevicePluginSessionCapability::ScriptEditor;
 }
 
