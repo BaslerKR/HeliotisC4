@@ -46,7 +46,6 @@ DeviceRangeRejection deviceRangeRejection(const heliotis::HeliotisRangeRejection
     case Reason::UnsupportedUnit: return DeviceRangeRejection::UnsupportedUnit;
     case Reason::SizeLimitExceeded: return DeviceRangeRejection::SizeLimitExceeded;
     case Reason::StorageRefused: return DeviceRangeRejection::StorageRefused;
-    case Reason::StorageMisaligned: return DeviceRangeRejection::StorageMisaligned;
     case Reason::None: break;
     }
     return DeviceRangeRejection::MissingRange;

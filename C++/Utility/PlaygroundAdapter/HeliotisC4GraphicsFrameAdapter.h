@@ -38,8 +38,7 @@ struct HeliotisRangeRejection {
         UnsupportedGeometry,
         UnsupportedUnit,
         SizeLimitExceeded,
-        StorageRefused,
-        StorageMisaligned
+        StorageRefused
     };
 
     static constexpr auto noPart = (std::numeric_limits<std::uint32_t>::max)();
