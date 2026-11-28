@@ -747,7 +747,8 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         if (context.error() == GraphicsFrameError::Disconnected ||
             context.error() == GraphicsFrameError::NoReadyCredit) return std::nullopt;
         if (rangePlan && rangeRejection) {
-            rangeRejection->requestedStorageBytes = sampleBytes;
+            if (rangeRejection->reason == RangeReason::None)
+                rangeRejection->requestedStorageBytes = sampleBytes;
             static_cast<void>(rejectRange(rangeRejection, RangeReason::StorageRefused,
                 static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
                 rangePlan->width, rangePlan->height, rangePlan->sequence,
