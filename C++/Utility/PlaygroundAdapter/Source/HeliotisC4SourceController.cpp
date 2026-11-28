@@ -501,9 +501,9 @@ QString targetId(const heliotis::DeviceDescriptor& device)
         .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
 }
 
-DeviceConnectionResult refused(DeviceConnectionError error, const char* message)
+DeviceConnectionResult refused(DeviceConnectionError error, std::string message)
 {
-    return {error, message};
+    return {error, std::move(message)};
 }
 
 DeviceParameterResult parameterFailure(const ParameterError error, std::string message)
