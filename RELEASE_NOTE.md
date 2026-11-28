@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Admit each Heliotis frame through an injected whole-frame context, with acquisition fencing and explicit credit drop and refusal handling.
+
 - Drop the removed `GraphicsRangeFrameWriterFailure::MisalignedStorage` case and the unreachable `StorageMisaligned` range rejection in `HeliotisC4GraphicsFrameAdapter` and adopt `DevicePluginSessionCapability::GraphicsViewer`.
 
 - Publish immutable GraphicsFrame handles and write image and range spans directly into planned host storage with `frameStoragePlanContext` and the P1 frame builder.
