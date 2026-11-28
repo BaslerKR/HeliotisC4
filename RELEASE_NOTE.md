@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fit frame data into the GraphicsEngine format instead of rejecting it: a short part keeps its declared shape with a zero-filled tail, extra samples are ignored, mismatching or unnamed-format parts publish as their own image or raw Mono8 bytes, and one bad part no longer removes another. Every deviation is counted in a fixed-capacity per-frame record forwarded through `IDeviceRangeDiagnostics/1.0`, and a Single whose frame the host source dropped completes at once with a failure naming the storage reason.
 - Drop a frame refused by the frame context (ClassRefused or Capacity) without latching a refusal so the run continues and the next frame asks again, and skip only the image or range whose size overflows the frame total while recording it.
 - Admit each Heliotis frame through an injected whole-frame context, with acquisition fencing and explicit credit drop and refusal handling.
 
