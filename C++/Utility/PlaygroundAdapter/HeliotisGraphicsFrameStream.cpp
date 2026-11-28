@@ -6,6 +6,7 @@
 #include <memory>
 #include <atomic>
 #include <optional>
+#include <mutex>
 #include <utility>
 
 namespace {
@@ -44,13 +45,39 @@ public:
     void requestStop() noexcept;
     void stop();
     bool acquiring() const { return _device && _device->isAcquiring(); }
+    struct AcquisitionRun {
+        std::shared_ptr<GraphicsFrameContextSource> source;
+        std::atomic<bool> cancelled{false};
+        std::recursive_mutex deliveryMutex;
+    };
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
     {
-        _adapter.setFrameContextSource(std::move(source));
+        cancelRun();
+        std::lock_guard<std::mutex> lock(_runMutex);
+        if (_source != source) _stickyRefusal.store(false, std::memory_order_release);
+        _source = std::move(source);
     }
-
+    void setStorageFailureHandler(StorageFailure handler) { _storageFailure = std::move(handler); }
+    bool canStart(std::string* error) const {
+        std::lock_guard<std::mutex> lock(_runMutex);
+        if (!_source || _stickyRefusal.load(std::memory_order_acquire)) {
+            if (error) *error = !_source ? "Frame context source is not configured."
+                                       : "Frame storage admission failed: class refused by host.";
+            return false;
+        }
+        return true;
+    }
+    void cancelRun() noexcept {
+        std::shared_ptr<AcquisitionRun> run;
+        { std::lock_guard<std::mutex> lock(_runMutex); run = _run; }
+        if (run) {
+            run->cancelled.store(true, std::memory_order_release);
+            std::lock_guard<std::recursive_mutex> lock(run->deliveryMutex);
+        }
+    }
     std::atomic<std::uint64_t> delivered{0};
     std::atomic<std::uint64_t> failed{0};
+    std::atomic<std::uint64_t> dropped{0};
 
 private:
     HeliotisC4Device* _device = nullptr;
@@ -59,6 +86,11 @@ private:
     RejectedRange _rejectedRange;
     RejectedImage _rejectedImage;
     HeliotisC4GraphicsFrameAdapter _adapter;
+    mutable std::mutex _runMutex;
+    std::shared_ptr<GraphicsFrameContextSource> _source;
+    std::shared_ptr<AcquisitionRun> _run;
+    std::atomic<bool> _stickyRefusal{false};
+    StorageFailure _storageFailure;
     GraphicsFrameCallbackGate _callbackGate;
 };
 
@@ -75,6 +107,7 @@ HeliotisGraphicsFrameStream::Impl::Impl(
 
 HeliotisGraphicsFrameStream::Impl::~Impl()
 {
+    cancelRun();
     _callbackGate.beginShutdown();
     if (_device)
     {
@@ -102,64 +135,84 @@ bool HeliotisGraphicsFrameStream::Impl::start(
         return false;
     }
 
+    if (!canStart(errorMessage)) return false;
+    if (_device->isAcquiring()) {
+        if (errorMessage) *errorMessage = "Heliotis acquisition is already active.";
+        return false;
+    }
+    cancelRun();
+    auto run = std::make_shared<AcquisitionRun>();
+    {
+        std::lock_guard<std::mutex> lock(_runMutex);
+        if (!_source || _stickyRefusal.load(std::memory_order_acquire)) {
+            if (errorMessage) *errorMessage = !_source ? "Frame context source is not configured."
+                : "Frame storage admission failed: class refused by host.";
+            return false;
+        }
+        if (_run) _run->cancelled.store(true, std::memory_order_release);
+        run->source = _source;
+        _run = run;
+    }
     delivered.store(0);
     failed.store(0);
+    dropped.store(0);
     const auto callbackToken = _callbackGate.token();
-    return _device->startAcquisition(mode,
-        [this, callbackToken](Frame&& sourceFrame) {
+    const bool started = _device->startAcquisition(mode,
+        [this, callbackToken, run](Frame&& sourceFrame) {
             GraphicsFrameCallbackGate::Lease lease(callbackToken);
-            if (!lease) return;
-            if (_receiptCallback) {
-                try
-                {
-                    _receiptCallback();
-                }
-                catch (...)
-                {
-                    // Receipt notification must not affect frame conversion.
+            if (!lease || run->cancelled.load(std::memory_order_acquire)) return;
+            {
+                std::lock_guard<std::recursive_mutex> delivery(run->deliveryMutex);
+                if (run->cancelled.load(std::memory_order_acquire)) return;
+                if (_receiptCallback) {
+                    try { _receiptCallback(); } catch (...) {}
                 }
             }
-            try
-            {
-                std::optional<GraphicsFrame> frame;
-                if (_rejectedRange || _rejectedImage) {
-                    HeliotisRangeRejection rangeRejection;
-                    HeliotisImageRejection imageRejection;
-                    frame = _adapter.convertFrameWithRejection(
-                        sourceFrame, heliotisGraphicsFrameRequest(), rangeRejection, imageRejection);
-                    if (_rejectedRange
-                        && rangeRejection.reason != HeliotisRangeRejection::Reason::None) {
-                        _rejectedRange(rangeRejection);
-                    }
-                    if (_rejectedImage
-                        && imageRejection.reason != HeliotisImageRejection::Reason::None) {
-                        _rejectedImage(imageRejection);
-                    }
-                } else {
-                    frame = _adapter.convertFrame(sourceFrame, heliotisGraphicsFrameRequest());
+            try {
+                HeliotisRangeRejection rangeRejection;
+                HeliotisImageRejection imageRejection;
+                GraphicsFrameError error = GraphicsFrameError::None;
+                auto frame = _adapter.convertForRun(sourceFrame, heliotisGraphicsFrameRequest(),
+                    *run->source, run->cancelled, error, rangeRejection, imageRejection);
+                std::lock_guard<std::recursive_mutex> delivery(run->deliveryMutex);
+                if (run->cancelled.load(std::memory_order_acquire)) return;
+                if (error == GraphicsFrameError::Disconnected) return;
+                if (error == GraphicsFrameError::NoReadyCredit) {
+                    dropped.fetch_add(1, std::memory_order_relaxed);
+                    return;
                 }
-                if (frame.has_value()) {
+                if (error == GraphicsFrameError::ClassRefused) {
+                    if (!_stickyRefusal.exchange(true, std::memory_order_acq_rel) && _storageFailure)
+                        _storageFailure();
+                }
+                if (_rejectedRange && rangeRejection.reason != HeliotisRangeRejection::Reason::None)
+                    _rejectedRange(rangeRejection);
+                if (_rejectedImage && imageRejection.reason != HeliotisImageRejection::Reason::None)
+                    _rejectedImage(imageRejection);
+                if (frame) {
                     _callback(std::move(*frame), 0U);
                     delivered.fetch_add(1, std::memory_order_relaxed);
                 } else {
                     failed.fetch_add(1, std::memory_order_relaxed);
                 }
-            }
-            catch (...)
-            {
-                failed.fetch_add(1, std::memory_order_relaxed);
-                // Do not let host conversion or consumer exceptions cross the SDK callback.
+            } catch (...) {
+                if (!run->cancelled.load(std::memory_order_acquire))
+                    failed.fetch_add(1, std::memory_order_relaxed);
             }
         }, errorMessage);
+    if (!started) run->cancelled.store(true, std::memory_order_release);
+    return started;
 }
 
 void HeliotisGraphicsFrameStream::Impl::requestStop() noexcept
 {
+    cancelRun();
     if (_device) _device->requestStopAcquisition();
 }
 
 void HeliotisGraphicsFrameStream::Impl::stop()
 {
+    cancelRun();
     if (_device) _device->stopAcquisition();
 }
 
@@ -194,6 +247,21 @@ HeliotisGraphicsFrameStream::~HeliotisGraphicsFrameStream() = default;
 void HeliotisGraphicsFrameStream::setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
 {
     if (_impl) _impl->setFrameContextSource(std::move(source));
+}
+
+void HeliotisGraphicsFrameStream::setStorageFailureHandler(StorageFailure handler)
+{
+    _impl->setStorageFailureHandler(std::move(handler));
+}
+
+bool HeliotisGraphicsFrameStream::canStart(std::string* errorMessage) const
+{
+    return _impl->canStart(errorMessage);
+}
+
+std::uint64_t HeliotisGraphicsFrameStream::droppedFrames() const noexcept
+{
+    return _impl->dropped.load(std::memory_order_relaxed);
 }
 
 bool HeliotisGraphicsFrameStream::start(

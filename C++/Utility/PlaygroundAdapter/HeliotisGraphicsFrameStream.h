@@ -31,6 +31,7 @@ public:
     using RejectedRange = std::function<void(const HeliotisRangeRejection&)>;
     /** Receives the first failed integer image writer rule of a requested image. */
     using RejectedImage = std::function<void(const HeliotisImageRejection&)>;
+    using StorageFailure = std::function<void()>;
 
     HeliotisGraphicsFrameStream(HeliotisC4Device* device, GraphicsFrameCallback callback);
     /** Notifies receipt even when conversion fails; neither callback may destroy the stream. */
@@ -49,6 +50,9 @@ public:
 
     /** Forwards the storage intensity images are written into; callable while acquiring. */
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source);
+    void setStorageFailureHandler(StorageFailure handler);
+    [[nodiscard]] bool canStart(std::string* errorMessage = nullptr) const;
+    [[nodiscard]] std::uint64_t droppedFrames() const noexcept;
 
     HeliotisGraphicsFrameStream(const HeliotisGraphicsFrameStream&) = delete;
     HeliotisGraphicsFrameStream& operator=(const HeliotisGraphicsFrameStream&) = delete;

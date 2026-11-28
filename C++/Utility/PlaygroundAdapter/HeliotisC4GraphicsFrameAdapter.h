@@ -4,6 +4,7 @@
 #include "engine/GraphicsFrameAdapter.h"
 #include "engine/GraphicsImageWriter.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -125,6 +126,13 @@ public:
         HeliotisRangeRejection& rangeRejection,
         HeliotisImageRejection& imageRejection) const;
 
+    /** Converts using the source and cancellation fence bound to one acquisition. */
+    [[nodiscard]] std::optional<GraphicsFrame> convertForRun(
+        const Frame& frame, const GraphicsFrameRequest& request,
+        GraphicsFrameContextSource& source, const std::atomic<bool>& cancelled,
+        GraphicsFrameError& storageError, HeliotisRangeRejection& rangeRejection,
+        HeliotisImageRejection& imageRejection) const;
+
     /** Installs the source that admits one complete frame transaction. */
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source);
 
@@ -135,7 +143,10 @@ private:
         const Frame& frame,
         const GraphicsFrameRequest& request,
         HeliotisRangeRejection* rangeRejection = nullptr,
-        HeliotisImageRejection* imageRejection = nullptr) const;
+        HeliotisImageRejection* imageRejection = nullptr,
+        GraphicsFrameContextSource* runSource = nullptr,
+        const std::atomic<bool>* cancelled = nullptr,
+        GraphicsFrameError* storageError = nullptr) const;
 
     mutable std::mutex _storageMutex;
     std::shared_ptr<GraphicsFrameContextSource> _contextSource;

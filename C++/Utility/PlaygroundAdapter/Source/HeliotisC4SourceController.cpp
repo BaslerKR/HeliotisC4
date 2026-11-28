@@ -208,6 +208,11 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
                 emit acquisitionFrameReceived();
             }
         }, std::move(rejectedRange), std::move(rejectedImage));
+    _graphicsStream->setStorageFailureHandler([this]() {
+        QMetaObject::invokeMethod(this, [this]() {
+            emit acquisitionError(QStringLiteral("Frame storage admission failed: class refused by host."));
+        }, Qt::QueuedConnection);
+    });
 }
 
 void HeliotisC4SourceController::setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
@@ -271,6 +276,11 @@ bool HeliotisC4SourceController::grabOne()
 {
     qInfo().noquote() << "[Heliotis C4] Single acquisition requested.";
     return startAcquisition(heliotis::HeliotisC4Device::AcquisitionMode::SingleFrame);
+}
+
+std::uint64_t HeliotisC4SourceController::droppedFrames() const noexcept
+{
+    return _graphicsStream ? _graphicsStream->droppedFrames() : 0;
 }
 
 void HeliotisC4SourceController::setFrameConsumer(FrameConsumer consumer)
@@ -761,6 +771,12 @@ DeviceConnectionResult HeliotisC4SourceController::admitLifecycle(const Lifecycl
         if (state.connectionId != argument) {
             return refused(DeviceConnectionError::Conflict, "The connection changed; observe it again.");
         }
+        if (operation == Lifecycle::Single || operation == Lifecycle::LiveStart) {
+            std::string error;
+            if (!_graphicsStream || !_graphicsStream->canStart(&error))
+                return refused(DeviceConnectionError::Unavailable, error.empty()
+                    ? "Frame context source is not configured." : error);
+        }
         if ((operation == Lifecycle::Single || operation == Lifecycle::LiveStart) && _isGrabbing.load()) {
             return refused(DeviceConnectionError::Busy, "Stop the active acquisition explicitly first.");
         }
@@ -841,7 +857,10 @@ void HeliotisC4SourceController::finishTool(const std::shared_ptr<ToolCall>& cal
                   operation == Lifecycle::Discover ? DeviceConnectionEffect::None : DeviceConnectionEffect::Unknown,
                   connectionState()};
     } else if (operation == Lifecycle::Single && _deliveredFrames.load() == framesBefore) {
-        result = {DeviceConnectionError::BackendFailure, "Single acquisition stopped without a converted frame.",
+        std::string storageError;
+        if (!_graphicsStream || _graphicsStream->canStart(&storageError))
+            storageError = "Single acquisition stopped without a converted frame.";
+        result = {DeviceConnectionError::BackendFailure, std::move(storageError),
                   DeviceConnectionEffect::Applied, connectionState()};
     }
     emit controlChanged();

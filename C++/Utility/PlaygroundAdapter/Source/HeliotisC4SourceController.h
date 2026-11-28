@@ -107,6 +107,7 @@ public:
     void stop() override;
     [[nodiscard]] bool isGrabbing() const override;
     [[nodiscard]] bool grabOne();
+    [[nodiscard]] std::uint64_t droppedFrames() const noexcept;
     void setFrameConsumer(FrameConsumer consumer) override;
     [[nodiscard]] bool supports3D() const override;
 
