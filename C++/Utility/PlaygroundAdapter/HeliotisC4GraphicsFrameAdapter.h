@@ -16,48 +16,7 @@ class GraphicsFrameContextSource;
 
 namespace heliotis {
 
-/**
- * @brief First failed rule observed while assembling a requested range.
- *
- * The reason set mirrors `DeviceRangeRejection` from the host contract so the
- * runtime owner can publish the exact enum without this adapter including Qt.
- * Only fixed numeric evidence crosses this boundary; no SDK data or strings
- * are retained.
- */
-struct HeliotisRangeRejection {
-    enum class Reason : std::uint32_t {
-        None,
-        MissingRange,
-        MissingData,
-        InvalidDimensions,
-        UnsupportedFormat,
-        InvalidLayout,
-        StrideBelowMinimum,
-        TruncatedData,
-        MissingCalibration,
-        InvalidCalibration,
-        UnsupportedGeometry,
-        UnsupportedUnit,
-        SizeLimitExceeded,
-        StorageRefused
-    };
-
-    static constexpr auto noPart = (std::numeric_limits<std::uint32_t>::max)();
-
-    Reason reason = Reason::None;
-    std::uint32_t partCount = 0;
-    std::uint32_t affectedPart = noPart;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    std::uint64_t frameSequence = 0;
-    std::uint64_t readableBytes = 0;
-    std::uint64_t requiredBytes = 0;
-    /** Destination bytes calculated by GraphicsRangeFrameWriter, even on refusal. */
-    std::uint64_t requestedStorageBytes = 0;
-    /** Resources assembled from the same input, independent of the rejected range. */
-    bool imageRetained = false;
-    bool rangeRetained = false;
-};
+// HeliotisRangeRejection and HeliotisFrameAnomalies live in HeliotisFrameAnomalies.h.
 
 /**
  * @brief First failed rule observed while writing a requested integer intensity image.
@@ -113,25 +72,33 @@ public:
 
     /**
      * Converts one frame and records the first failed rule of each requested component.
-     * Both rejection outputs are reset for each input.
+     * Both rejection outputs and @p anomalies are reset for each input.
      *
-     * @note Rejections are recorded only for components the request actually asked
-     *       for and only when a real failure rule was observed. An omitted optional
-     *       part, a raw preview without calibration, a floating intensity part and
-     *       unrequested components leave both reasons at None.
+     * A part is never rejected because its data looks wrong: a short payload is
+     * zero-filled to its declared shape, extra samples are ignored, a part whose shape
+     * does not match the range grid or whose format has no GraphicsEngine equivalent is
+     * published as its own image (raw Mono8 when no format fits). Each such deviation is
+     * counted in @p anomalies, and every other part still publishes.
+     *
+     * @note The rejection outputs describe only a requested component that could not be
+     *       produced at all: nothing to publish, a size limit or a storage refusal. An
+     *       omitted optional part, a raw preview without calibration, a floating intensity
+     *       part and unrequested components leave both reasons at None.
      */
     [[nodiscard]] std::optional<GraphicsFrame> convertFrameWithRejection(
         const Frame& frame,
         const GraphicsFrameRequest& request,
         HeliotisRangeRejection& rangeRejection,
-        HeliotisImageRejection& imageRejection) const;
+        HeliotisImageRejection& imageRejection,
+        HeliotisFrameAnomalies* anomalies = nullptr) const;
 
     /** Converts using the source and cancellation fence bound to one acquisition. */
     [[nodiscard]] std::optional<GraphicsFrame> convertForRun(
         const Frame& frame, const GraphicsFrameRequest& request,
         GraphicsFrameContextSource& source, const std::atomic<bool>& cancelled,
         GraphicsFrameError& storageError, HeliotisRangeRejection& rangeRejection,
-        HeliotisImageRejection& imageRejection) const;
+        HeliotisImageRejection& imageRejection,
+        HeliotisFrameAnomalies* anomalies = nullptr) const;
 
     /** Installs the source that admits one complete frame transaction. */
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source);
@@ -146,7 +113,8 @@ private:
         HeliotisImageRejection* imageRejection = nullptr,
         GraphicsFrameContextSource* runSource = nullptr,
         const std::atomic<bool>* cancelled = nullptr,
-        GraphicsFrameError* storageError = nullptr) const;
+        GraphicsFrameError* storageError = nullptr,
+        HeliotisFrameAnomalies* anomalies = nullptr) const;
 
     mutable std::mutex _storageMutex;
     std::shared_ptr<GraphicsFrameContextSource> _contextSource;

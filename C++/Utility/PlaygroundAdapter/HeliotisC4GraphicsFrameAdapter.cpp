@@ -5,12 +5,15 @@
 #include "graphics/data/GraphicsRangeFrameWriter.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -18,6 +21,8 @@ namespace {
 // frame forms one cohort. The id scheme matches the GenTL adapters:
 // "<kind>.<source>:<region>.<part index>".
 constexpr const char* kResourceGroup = "0:0";
+
+constexpr std::size_t kIntMax = static_cast<std::size_t>((std::numeric_limits<int>::max)());
 
 [[nodiscard]] std::string resourceId(const char* kind, const std::size_t partIndex)
 {
@@ -35,36 +40,117 @@ constexpr const char* kResourceGroup = "0:0";
     return static_cast<std::size_t>(std::distance(frame.parts.cbegin(), it));
 }
 
-[[nodiscard]] const heliotis::FramePart* findPart(
-    const heliotis::Frame& frame,
-    const heliotis::FramePartKind kind) noexcept
-{
-    const auto index = findPartIndex(frame, kind);
-    return index ? &frame.parts[*index] : nullptr;
-}
-
-[[nodiscard]] bool hasCompatibleDimensions(
-    const heliotis::FramePart& part,
-    const int width,
-    const int height) noexcept
-{
-    return part.width == static_cast<std::uint32_t>(width)
-        && part.height == static_cast<std::uint32_t>(height);
-}
-
 template <typename T>
 [[nodiscard]] float convertedSample(const T value, const double scale) noexcept
 {
     return static_cast<float>(static_cast<double>(value) * scale);
 }
 
-/** True when any converted sample is not finite, so the channel needs a validity mask. */
-[[nodiscard]] bool hasNonFiniteSamples(const heliotis::FramePart& part)
+/** Bytes of one sample element of the part's payload alternative. */
+[[nodiscard]] std::size_t elementSize(const heliotis::FramePart& part) noexcept
 {
-    return std::visit([&part](const auto& values) {
-        for (const auto value : values)
+    return std::visit([](const auto& values) {
+        return sizeof(typename std::decay_t<decltype(values)>::value_type);
+    }, part.samples);
+}
+
+/**
+ * How one part's payload is fitted onto a GraphicsEngine grid.
+ *
+ * The declared shape is kept whenever it can be represented: a short payload is
+ * zero-filled to it and extra samples are ignored. Without a representable
+ * declared shape the delivered samples form one row. `available` counts the
+ * samples that exist and are copied; the rest of `expected` is zero-filled.
+ */
+struct Fit
+{
+    int width = 0;
+    int height = 0;
+    std::size_t expected = 0;
+    std::size_t available = 0;
+    bool oneRow = false;
+};
+
+/** @return The fitted grid, or no value when the part carries no bytes at all. */
+[[nodiscard]] std::optional<Fit> fitPart(const heliotis::FramePart& part) noexcept
+{
+    const std::size_t count = part.sampleCount();
+    if (count == 0U) return std::nullopt;
+    Fit fit;
+    const bool declared = part.width != 0U && part.height != 0U
+        && part.width <= kIntMax && part.height <= kIntMax
+        && static_cast<std::uint64_t>(part.width) * part.height <= kIntMax;
+    if (declared) {
+        fit.width = static_cast<int>(part.width);
+        fit.height = static_cast<int>(part.height);
+        fit.expected = static_cast<std::size_t>(part.width) * part.height;
+    } else {
+        fit.oneRow = true;
+        fit.width = static_cast<int>((std::min)(count, kIntMax));
+        fit.height = 1;
+        fit.expected = static_cast<std::size_t>(fit.width);
+    }
+    fit.available = (std::min)(count, fit.expected);
+    return fit;
+}
+
+using RangeReason = heliotis::HeliotisRangeRejection::Reason;
+
+/** Per-frame anomaly recorder: fixed capacity, one record per part and reason. */
+struct AnomalyContext
+{
+    heliotis::HeliotisFrameAnomalies* list = nullptr;
+    std::size_t partCount = 0;
+    std::uint64_t sequence = 0;
+    std::array<std::uint64_t, heliotis::HeliotisFrameAnomalies::reasonCount> noted{};
+
+    void note(const RangeReason reason, const std::size_t partIndex, const int width, const int height,
+              const std::uint64_t readableBytes, const std::uint64_t requiredBytes) noexcept
+    {
+        if (!list) return;
+        const auto slot = static_cast<std::size_t>(reason);
+        if (slot >= noted.size()) return;
+        if (partIndex < 64U) {
+            const std::uint64_t bit = std::uint64_t{1} << partIndex;
+            if ((noted[slot] & bit) != 0U) return;
+            noted[slot] |= bit;
+        }
+        heliotis::HeliotisRangeRejection evidence;
+        evidence.reason = reason;
+        evidence.partCount = static_cast<std::uint32_t>(partCount);
+        evidence.affectedPart = static_cast<std::uint32_t>(partIndex);
+        evidence.width = width > 0 ? static_cast<std::uint32_t>(width) : 0U;
+        evidence.height = height > 0 ? static_cast<std::uint32_t>(height) : 0U;
+        evidence.frameSequence = sequence;
+        evidence.readableBytes = readableBytes;
+        evidence.requiredBytes = requiredBytes;
+        list->add(evidence);
+    }
+
+    /** Counts a short payload, extra samples or an unusable declared shape of one part. */
+    void noteFit(const heliotis::FramePart& part, const std::size_t partIndex, const Fit& fit) noexcept
+    {
+        const std::uint64_t size = elementSize(part);
+        const std::uint64_t readable = part.sampleBytes();
+        const std::uint64_t required = static_cast<std::uint64_t>(fit.expected) * size;
+        if (fit.oneRow) {
+            note(RangeReason::InvalidDimensions, partIndex, fit.width, fit.height, readable, required);
+        } else if (part.sampleCount() < fit.expected) {
+            note(RangeReason::TruncatedData, partIndex, fit.width, fit.height, readable, required);
+        } else if (part.sampleCount() > fit.expected) {
+            note(RangeReason::InvalidLayout, partIndex, fit.width, fit.height, readable, required);
+        }
+    }
+};
+
+/** True when any converted available sample is not finite, so the channel needs a validity mask. */
+[[nodiscard]] bool hasNonFiniteSamples(const heliotis::FramePart& part, const std::size_t limit)
+{
+    return std::visit([&](const auto& values) {
+        const std::size_t count = (std::min)(values.size(), limit);
+        for (std::size_t index = 0; index < count; ++index)
         {
-            if (!std::isfinite(convertedSample(value, part.sampleScale)))
+            if (!std::isfinite(convertedSample(values[index], part.sampleScale)))
             {
                 return true;
             }
@@ -73,12 +159,14 @@ template <typename T>
     }, part.samples);
 }
 
+/** Writes the converted available samples and zero-fills the rest of the declared shape. */
 void writeConvertedSamples(const heliotis::FramePart& part,
+                           const Fit& fit,
                            float* destination,
                            std::uint8_t* mask)
 {
     std::visit([&](const auto& values) {
-        for (std::size_t index = 0; index < values.size(); ++index)
+        for (std::size_t index = 0; index < fit.available; ++index)
         {
             const float value = convertedSample(values[index], part.sampleScale);
             destination[index] = value;
@@ -88,47 +176,30 @@ void writeConvertedSamples(const heliotis::FramePart& part,
             }
         }
     }, part.samples);
+    for (std::size_t index = fit.available; index < fit.expected; ++index)
+    {
+        destination[index] = 0.0F;
+        if (mask != nullptr) mask[index] = 1U;
+    }
 }
 
-[[nodiscard]] std::size_t sampleCount(const heliotis::FramePart& part) noexcept
+/** Copies the available raw 16-bit samples in host order and zero-fills the rest. */
+void writeRawSamples(const heliotis::FramePart& part, const Fit& fit, std::uint16_t* destination)
 {
-    return std::visit([](const auto& values) { return values.size(); }, part.samples);
+    if (destination == nullptr) return;
+    const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples);
+    if (values != nullptr && fit.available != 0U) {
+        std::memcpy(destination, values->data(), fit.available * sizeof(std::uint16_t));
+    }
+    if (fit.available < fit.expected) {
+        std::memset(destination + fit.available, 0, (fit.expected - fit.available) * sizeof(std::uint16_t));
+    }
 }
 
-[[nodiscard]] bool hasRepresentableSamples(const heliotis::FramePart& part) noexcept
+[[nodiscard]] bool holdsRawSamples(const heliotis::FramePart& part) noexcept
 {
-    return part.isValid()
-        && sampleCount(part) != 0
-        && sampleCount(part) <= static_cast<std::size_t>((std::numeric_limits<int>::max)());
+    return std::holds_alternative<std::vector<std::uint16_t>>(part.samples);
 }
-
-[[nodiscard]] bool hasRepresentableDimensions(const heliotis::FramePart& part) noexcept
-{
-    return part.width != 0
-        && part.height != 0
-        && part.width <= static_cast<std::uint32_t>((std::numeric_limits<int>::max)())
-        && part.height <= static_cast<std::uint32_t>((std::numeric_limits<int>::max)());
-}
-
-/** Bytes carried by a part's own sample vector, independent of its declared shape. */
-[[nodiscard]] std::uint64_t sampleBytes(const heliotis::FramePart& part) noexcept
-{
-    const std::uint64_t sampleSize = std::holds_alternative<std::vector<std::uint16_t>>(part.samples)
-        ? sizeof(std::uint16_t) : sizeof(double);
-    return static_cast<std::uint64_t>(sampleCount(part)) * sampleSize;
-}
-
-[[nodiscard]] std::uint64_t gridBytes(const heliotis::FramePart& part, const int width, const int height) noexcept
-{
-    if (width <= 0 || height <= 0) return 0U;
-    const auto samples = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
-    const std::uint64_t sampleSize = std::holds_alternative<std::vector<std::uint16_t>>(part.samples)
-        ? sizeof(std::uint16_t) : sizeof(double);
-    return samples <= (std::numeric_limits<std::uint64_t>::max)() / sampleSize
-        ? samples * sampleSize : 0U;
-}
-
-using RangeReason = heliotis::HeliotisRangeRejection::Reason;
 
 /** Records only the first failed rule; later failures on the same frame are ignored. */
 [[nodiscard]] std::nullopt_t rejectRange(
@@ -298,67 +369,172 @@ using ImageReason = heliotis::HeliotisImageRejection::Reason;
     }
 }
 
+/** One image part, planned: the destination layout and the bytes that really exist. */
+struct ImageJob
+{
+    std::size_t partIndex = 0;
+    GraphicsImageWriterSource source;
+    GraphicsImageWriteLayout layout;
+    /** Source bytes that exist behind `source.data`; the rest of the layout is zero-filled. */
+    std::size_t availableBytes = 0;
+};
+
 /**
- * Describes how one integer intensity part becomes a Mono8 or Mono16 image, without storage.
+ * Plans one part as a Mono8 or Mono16 image, without storage.
  *
- * @param part Deep-owned C4 part with integer samples.
+ * @param part Deep-owned C4 part.
+ * @param partIndex Ordinal in the frame, used for anomaly evidence.
  * @param sequence Producer frame counter stored as image metadata.
- * @return The writer source, or no value for floating, empty, oversized or refused parts.
- * @note Samples keep their unscaled sensor codes. Mono16 rows use the
- *       little-endian host order of the copied C4 samples. A source the image
- *       writer would refuse for a layout reason is recorded in @p rejection
- *       here; only a storage refusal is possible later.
+ * @param anomalies Receives fitted deviations; may be a recorder without a list.
+ * @return The job, or no value for a part with no bytes or a size the image layout cannot hold.
+ * @note Integer samples keep their unscaled sensor codes; Mono16 rows use the little-endian host
+ *       order of the copied C4 samples and 8-bit parts saturate into Mono8. Floating and raw-byte
+ *       payloads have no sample format that fits, so their bytes publish as raw Mono8 with the
+ *       row length in bytes. A short payload keeps the declared shape; its missing tail is zero.
  */
-[[nodiscard]] std::optional<GraphicsImageWriterSource> planIntensityImage(
+[[nodiscard]] std::optional<ImageJob> planPartImage(
     const heliotis::FramePart& part,
+    const std::size_t partIndex,
     const std::uint64_t sequence,
+    AnomalyContext& anomalies,
     heliotis::HeliotisImageRejection* rejection)
 {
-    if (!hasRepresentableSamples(part) || !hasRepresentableDimensions(part)) return std::nullopt;
-    const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples);
-    if (!values) return std::nullopt;
-
-    const std::uint8_t bits = part.bitsPerSample == 0
-        ? std::uint8_t{16}
-        : std::min<std::uint8_t>(part.bitsPerSample, std::uint8_t{16});
-    const bool eightBit = bits <= 8;
-    const std::size_t pixelCount = static_cast<std::size_t>(part.width) * part.height;
-    if (values->size() > pixelCount) return std::nullopt;
-    if (part.width > static_cast<std::uint32_t>((std::numeric_limits<int>::max)()) / 2U)
-    {
+    const auto fit = fitPart(part);
+    if (!fit) {
+        anomalies.note(RangeReason::MissingData, partIndex, static_cast<int>((std::min)(std::size_t{part.width}, kIntMax)),
+                       static_cast<int>((std::min)(std::size_t{part.height}, kIntMax)), 0U, 0U);
         return std::nullopt;
     }
+    anomalies.noteFit(part, partIndex, *fit);
 
-    // The writer copies or narrows the sample bytes once into the planned storage.
-    GraphicsImageWriterSource source;
-    source.data = reinterpret_cast<const std::uint8_t*>(values->data());
-    source.size = values->size() * sizeof(std::uint16_t);
-    source.width = static_cast<int>(part.width);
-    source.height = static_cast<int>(part.height);
-    source.stride = static_cast<int>(part.width) * 2;
-    source.pixelFormat = GraphicsImagePixelFormat::Mono16;
-    source.operation = eightBit
-        ? GraphicsImageWriterOperation::NarrowMono16To8
-        : GraphicsImageWriterOperation::Copy;
-    source.bitsPerPixel = GraphicsImageValidation::packedBitsPerPixel(
-        eightBit ? GraphicsImagePixelFormat::Mono8 : GraphicsImagePixelFormat::Mono16);
-    source.sourceFormat = monoPfnc(eightBit ? std::uint8_t{8} : bits);
-    source.declaredMonoSourceBits = eightBit || bits >= 16 ? std::uint8_t{0} : bits;
-    source.bitAlignment = source.declaredMonoSourceBits != 0
-        ? GraphicsImageBitAlignment::LeastSignificant
-        : GraphicsImageBitAlignment::Packed;
+    ImageJob job;
+    job.partIndex = partIndex;
+    GraphicsImageWriterSource& source = job.source;
     source.frameSequence = sequence;
+    const auto* values = std::get_if<std::vector<std::uint16_t>>(&part.samples);
+    if (values != nullptr) {
+        const std::uint8_t bits = part.bitsPerSample == 0
+            ? std::uint8_t{16}
+            : std::min<std::uint8_t>(part.bitsPerSample, std::uint8_t{16});
+        const bool eightBit = bits <= 8;
+        if (static_cast<std::size_t>(fit->width) > kIntMax / 2U) {
+            anomalies.note(RangeReason::SizeLimitExceeded, partIndex, fit->width, fit->height,
+                           part.sampleBytes(), static_cast<std::uint64_t>(fit->expected) * 2U);
+            return std::nullopt;
+        }
+        // The writer layout is planned for the full declared shape; only the existing bytes are read.
+        source.data = reinterpret_cast<const std::uint8_t*>(values->data());
+        source.size = fit->expected * sizeof(std::uint16_t);
+        source.width = fit->width;
+        source.height = fit->height;
+        source.stride = fit->width * 2;
+        source.pixelFormat = GraphicsImagePixelFormat::Mono16;
+        source.operation = eightBit
+            ? GraphicsImageWriterOperation::NarrowMono16To8
+            : GraphicsImageWriterOperation::Copy;
+        source.bitsPerPixel = GraphicsImageValidation::packedBitsPerPixel(
+            eightBit ? GraphicsImagePixelFormat::Mono8 : GraphicsImagePixelFormat::Mono16);
+        source.sourceFormat = monoPfnc(eightBit ? std::uint8_t{8} : bits);
+        source.declaredMonoSourceBits = eightBit || bits >= 16 ? std::uint8_t{0} : bits;
+        source.bitAlignment = source.declaredMonoSourceBits != 0
+            ? GraphicsImageBitAlignment::LeastSignificant
+            : GraphicsImageBitAlignment::Packed;
+        job.availableBytes = fit->available * sizeof(std::uint16_t);
+    } else {
+        const std::size_t size = elementSize(part);
+        if (static_cast<std::size_t>(fit->width) > kIntMax / size) {
+            anomalies.note(RangeReason::SizeLimitExceeded, partIndex, fit->width, fit->height,
+                           part.sampleBytes(), static_cast<std::uint64_t>(fit->expected) * size);
+            return std::nullopt;
+        }
+        const int rowBytes = fit->width * static_cast<int>(size);
+        source.data = std::visit([](const auto& payload) {
+            return reinterpret_cast<const std::uint8_t*>(payload.data());
+        }, part.samples);
+        source.size = fit->expected * size;
+        source.width = rowBytes;
+        source.height = fit->height;
+        source.stride = rowBytes;
+        source.pixelFormat = GraphicsImagePixelFormat::Mono8;
+        source.operation = GraphicsImageWriterOperation::Copy;
+        source.bitsPerPixel = GraphicsImageValidation::packedBitsPerPixel(GraphicsImagePixelFormat::Mono8);
+        source.sourceFormat = monoPfnc(8);
+        source.bitAlignment = GraphicsImageBitAlignment::Packed;
+        job.availableBytes = fit->available * size;
+        if (size != sizeof(std::uint8_t)) {
+            // Floating samples have no integer image format: the bytes publish as raw Mono8.
+            anomalies.note(RangeReason::UnsupportedFormat, partIndex, fit->width, fit->height,
+                           part.sampleBytes(), static_cast<std::uint64_t>(fit->expected) * size);
+        }
+    }
 
     GraphicsImageFailure failure = GraphicsImageFailure::None;
-    if (!planGraphicsImageWrite(source, &failure)) {
+    const auto plan = planGraphicsImageWrite(source, &failure);
+    if (!plan) {
         const ImageReason reason = imageRejectionReason(failure);
-        if (reason != ImageReason::None) return rejectImage(rejection, reason, source);
+        if (reason != ImageReason::None) static_cast<void>(rejectImage(rejection, reason, source));
         return std::nullopt;
     }
-    return source;
+    job.layout = plan.value();
+    return job;
 }
 
-/** Validated range: every non-sample field plus the step that writes the samples. */
+/**
+ * Copies the existing bytes of a planned image into storage and zero-fills the rest.
+ *
+ * Never reads past `job.availableBytes`; this replaces the strict image writer, which refuses a
+ * source that is shorter than the declared layout.
+ */
+[[nodiscard]] GraphicsImage writeFittedImage(
+    GraphicsFrameBuilder& builder, const ImageJob& job, GraphicsImageFailure* failure)
+{
+    const GraphicsImageWriteLayout& layout = job.layout;
+    const GraphicsImageWriterSource& source = job.source;
+    auto reserved = builder.reserve<std::uint8_t>(layout.bytes, layout.alignment);
+    if (!reserved) {
+        if (failure) *failure = GraphicsImageFailure::StorageRefused;
+        return {};
+    }
+    GraphicsWriteRegion<std::uint8_t> region = std::move(reserved).value();
+    std::uint8_t* const destination = region.data();
+    if (source.operation == GraphicsImageWriterOperation::NarrowMono16To8) {
+        const std::size_t width = static_cast<std::size_t>(source.width);
+        const std::size_t height = static_cast<std::size_t>(source.height);
+        const std::size_t stride = static_cast<std::size_t>(layout.strideBytes);
+        const std::size_t availableSamples = job.availableBytes / sizeof(std::uint16_t);
+        for (std::size_t row = 0; row < height; ++row) {
+            std::uint8_t* outputRow = destination + row * stride;
+            const std::size_t first = row * width;
+            const std::size_t samples = first < availableSamples
+                ? (std::min)(width, availableSamples - first) : 0U;
+            for (std::size_t index = 0; index < samples; ++index) {
+                std::uint16_t value = 0U;
+                std::memcpy(&value, source.data + (first + index) * sizeof(value), sizeof(value));
+                outputRow[index] = static_cast<std::uint8_t>(std::min<std::uint16_t>(value, 255U));
+            }
+            if (samples < stride) std::memset(outputRow + samples, 0, stride - samples);
+        }
+    } else {
+        const std::size_t copied = (std::min)(job.availableBytes, layout.bytes);
+        if (copied != 0U) std::memcpy(destination, source.data, copied);
+        if (copied < layout.bytes) std::memset(destination + copied, 0, layout.bytes - copied);
+    }
+    GraphicsImage image;
+    image.pixels = builder.seal(std::move(region));
+    image.width = source.width;
+    image.height = source.height;
+    image.stride = layout.strideBytes;
+    image.bitsPerPixel = source.bitsPerPixel;
+    image.declaredMonoSourceBits = source.declaredMonoSourceBits;
+    image.sourceFormat = source.sourceFormat;
+    image.pixelFormat = layout.format;
+    image.bitAlignment = source.bitAlignment;
+    image.frameSequence = source.frameSequence;
+    if (failure) *failure = GraphicsImageFailure::None;
+    return image;
+}
+
+/** Planned range: every non-sample field plus the step that writes the samples. */
 struct PlannedRange
 {
     GraphicsRangeFrameLayout layout;
@@ -374,19 +550,52 @@ struct PlannedRange
     const heliotis::FramePart* rangePart = nullptr;
     const heliotis::FramePart* intensityPart = nullptr;
     const heliotis::FramePart* confidencePart = nullptr;
+    Fit rangeFit;
+    Fit intensityFit;
+    Fit confidenceFit;
 };
+
+/**
+ * Attaches an auxiliary part as a range channel when its declared shape matches the grid.
+ *
+ * A part with a different shape cannot be a channel of this grid; it is counted and left to
+ * publish as its own image. A payload that is short or longer than the grid is fitted to it.
+ */
+[[nodiscard]] const heliotis::FramePart* attachChannel(
+    const heliotis::Frame& frame,
+    const heliotis::FramePartKind kind,
+    const Fit& grid,
+    AnomalyContext& anomalies,
+    Fit& channelFit)
+{
+    const auto index = findPartIndex(frame, kind);
+    if (!index) return nullptr;
+    const heliotis::FramePart& part = frame.parts[*index];
+    const auto fit = fitPart(part);
+    if (!fit) return nullptr;
+    if (part.width != static_cast<std::uint32_t>(grid.width)
+        || part.height != static_cast<std::uint32_t>(grid.height)) {
+        anomalies.note(RangeReason::InvalidLayout, *index, grid.width, grid.height, part.sampleBytes(),
+                       static_cast<std::uint64_t>(grid.expected) * elementSize(part));
+        return nullptr;
+    }
+    anomalies.noteFit(part, *index, *fit);
+    channelFit = *fit;
+    return &part;
+}
 
 /**
  * Plans the organized range for the typed Range part or a raw preview.
  *
  * @param frame Source frame whose parts stay owned by the caller.
  * @param request Requested components and auxiliary channels.
- * @return The validated range plan, or no value when no part holds representable samples.
+ * @return The range plan, or no value when no part carries any bytes or the grid is too large.
  */
 [[nodiscard]] std::optional<PlannedRange> planRange(
     const heliotis::Frame& frame,
     const GraphicsFrameRequest& request,
-    heliotis::HeliotisRangeRejection* rejection)
+    heliotis::HeliotisRangeRejection* rejection,
+    AnomalyContext& anomalies)
 {
     using heliotis::FramePart;
     using heliotis::FramePartKind;
@@ -395,34 +604,17 @@ struct PlannedRange
     const std::optional<std::size_t> typedRangeIndex = findPartIndex(frame, FramePartKind::Range);
     std::optional<std::size_t> rangeIndex;
     bool rawPartPreview = true;
-    if (typedRangeIndex && hasRepresentableSamples(frame.parts[*typedRangeIndex]))
+    if (typedRangeIndex && frame.parts[*typedRangeIndex].sampleCount() != 0U)
     {
         rangeIndex = typedRangeIndex;
         rawPartPreview = frame.scan3dGeometry.has_value()
             && !hasUsableScan3dGeometry(*frame.scan3dGeometry);
     }
-    else if (typedRangeIndex && rejection)
-    {
-        const FramePart& part = frame.parts[*typedRangeIndex];
-        if (hasRepresentableDimensions(part))
-        {
-            const auto width = static_cast<int>(part.width);
-            const auto height = static_cast<int>(part.height);
-            const auto readableBytes = sampleBytes(part);
-            const auto requiredBytes = gridBytes(part, width, height);
-            if (readableBytes != 0U && requiredBytes != 0U && readableBytes != requiredBytes)
-            {
-                static_cast<void>(rejectRange(rejection, RangeReason::InvalidLayout,
-                    static_cast<std::uint32_t>(*typedRangeIndex), frame.parts.size(),
-                    width, height, frame.sequence, readableBytes, requiredBytes));
-            }
-        }
-    }
     if (!rangeIndex)
     {
         for (std::size_t index = 0; index < frame.parts.size(); ++index)
         {
-            if (hasRepresentableSamples(frame.parts[index]))
+            if (frame.parts[index].sampleCount() != 0U)
             {
                 rangeIndex = index;
                 break;
@@ -431,6 +623,7 @@ struct PlannedRange
     }
     if (!rangeIndex)
     {
+        // Every part is empty: there is no data to fit.
         return rejectRange(rejection, RangeReason::MissingRange,
                            heliotis::HeliotisRangeRejection::noPart, frame.parts.size(),
                            0, 0, frame.sequence, 0U, 0U);
@@ -440,63 +633,40 @@ struct PlannedRange
     const auto partIndex = static_cast<std::uint32_t>(*rangeIndex);
     const std::size_t partCount = frame.parts.size();
 
-    const bool oneRowPreview = !hasRepresentableDimensions(rangePart);
-    rawPartPreview = rawPartPreview || oneRowPreview;
-    const std::size_t expected = sampleCount(rangePart);
-    const int width = oneRowPreview ? static_cast<int>(expected) : static_cast<int>(rangePart.width);
-    const int height = oneRowPreview ? 1 : static_cast<int>(rangePart.height);
-    const auto* rangeRawSamples = std::get_if<std::vector<std::uint16_t>>(&rangePart.samples);
-    const FramePart* intensityPart = request.includeRangeAuxiliaryChannels
-        ? findPart(frame, FramePartKind::Intensity) : nullptr;
-    if (intensityPart != nullptr)
+    const Fit rangeFit = *fitPart(rangePart);
+    anomalies.noteFit(rangePart, *rangeIndex, rangeFit);
+    rawPartPreview = rawPartPreview || rangeFit.oneRow;
+    const int width = rangeFit.width;
+    const int height = rangeFit.height;
+    const std::size_t expected = rangeFit.expected;
+    PlannedRange planned;
+    planned.rangeFit = rangeFit;
+    if (request.includeRangeAuxiliaryChannels)
     {
-        if (!hasCompatibleDimensions(*intensityPart, width, height))
-        {
-            intensityPart = nullptr;
-        }
-        else if (sampleCount(*intensityPart) != expected)
-        {
-            return rejectRange(rejection, RangeReason::InvalidLayout,
-                               static_cast<std::uint32_t>(intensityPart - frame.parts.data()),
-                               partCount, width, height, frame.sequence,
-                               sampleBytes(*intensityPart), gridBytes(*intensityPart, width, height));
-        }
+        planned.intensityPart = attachChannel(frame, FramePartKind::Intensity, rangeFit, anomalies,
+                                              planned.intensityFit);
+        planned.confidencePart = attachChannel(frame, FramePartKind::Confidence, rangeFit, anomalies,
+                                               planned.confidenceFit);
     }
-    const FramePart* confidencePart = request.includeRangeAuxiliaryChannels
-        ? findPart(frame, FramePartKind::Confidence) : nullptr;
-    if (confidencePart != nullptr)
-    {
-        if (!hasCompatibleDimensions(*confidencePart, width, height))
-        {
-            confidencePart = nullptr;
-        }
-        else if (sampleCount(*confidencePart) != expected)
-        {
-            return rejectRange(rejection, RangeReason::InvalidLayout,
-                               static_cast<std::uint32_t>(confidencePart - frame.parts.data()),
-                               partCount, width, height, frame.sequence,
-                               sampleBytes(*confidencePart), gridBytes(*confidencePart, width, height));
-        }
-    }
+    const FramePart* intensityPart = planned.intensityPart;
+    const FramePart* confidencePart = planned.confidencePart;
 
     GraphicsRangeFrameLayout layout;
     layout.width = width;
     layout.height = height;
-    layout.channels.validMask = hasNonFiniteSamples(rangePart);
-    layout.channels.rangeRaw = rangeRawSamples != nullptr && rangeRawSamples->size() == expected;
+    layout.channels.validMask = hasNonFiniteSamples(rangePart, rangeFit.available);
+    layout.channels.rangeRaw = holdsRawSamples(rangePart);
     layout.channels.intensity = intensityPart != nullptr;
-    layout.channels.intensityValidMask = intensityPart != nullptr && hasNonFiniteSamples(*intensityPart);
-    layout.channels.intensityRaw = intensityPart != nullptr
-        && std::get_if<std::vector<std::uint16_t>>(&intensityPart->samples) != nullptr
-        && std::get<std::vector<std::uint16_t>>(intensityPart->samples).size() == expected;
+    layout.channels.intensityValidMask = intensityPart != nullptr
+        && hasNonFiniteSamples(*intensityPart, planned.intensityFit.available);
+    layout.channels.intensityRaw = intensityPart != nullptr && holdsRawSamples(*intensityPart);
     layout.channels.confidence = confidencePart != nullptr;
-    layout.channels.confidenceValidMask = confidencePart != nullptr && hasNonFiniteSamples(*confidencePart);
-    layout.channels.confidenceRaw = confidencePart != nullptr
-        && std::get_if<std::vector<std::uint16_t>>(&confidencePart->samples) != nullptr
-        && std::get<std::vector<std::uint16_t>>(confidencePart->samples).size() == expected;
+    layout.channels.confidenceValidMask = confidencePart != nullptr
+        && hasNonFiniteSamples(*confidencePart, planned.confidenceFit.available);
+    layout.channels.confidenceRaw = confidencePart != nullptr && holdsRawSamples(*confidencePart);
 
-    const std::uint64_t readableBytes = sampleBytes(rangePart);
-    const std::uint64_t requiredBytes = gridBytes(rangePart, width, height);
+    const std::uint64_t readableBytes = rangePart.sampleBytes();
+    const std::uint64_t requiredBytes = static_cast<std::uint64_t>(expected) * elementSize(rangePart);
     const auto rangeWritePlan = planGraphicsRangeWrite(layout);
     if (!rangeWritePlan) {
         return rejectRange(rejection, rangeWritePlan.error() == GraphicsFrameError::Capacity
@@ -504,7 +674,6 @@ struct PlannedRange
             partIndex, partCount, width, height, frame.sequence, readableBytes, requiredBytes);
     }
 
-    PlannedRange planned;
     planned.layout = layout;
     planned.partIndex = *rangeIndex;
     planned.partCount = partCount;
@@ -515,8 +684,6 @@ struct PlannedRange
     planned.requiredBytes = requiredBytes;
     planned.firstPart = frame.parts.data();
     planned.rangePart = &rangePart;
-    planned.intensityPart = intensityPart;
-    planned.confidencePart = confidencePart;
 
     RangeFrame& range = planned.fields;
     range.width = width;
@@ -554,7 +721,7 @@ struct PlannedRange
             range.xyCoordinateMode = RangeFrameXYCoordinateMode::PixelGrid;
         }
     }
-    else if (!oneRowPreview)
+    else if (!rangeFit.oneRow)
     {
         // An organized grid without rectified XY is still a height map.
         // UniformPhysical with non-finite X/Y hides Surface3D.
@@ -602,28 +769,19 @@ struct PlannedRange
                                  planned.requiredBytes);
     }
     const auto& channels = planned.layout.channels;
-    const auto* failed = static_cast<const heliotis::FramePart*>(nullptr);
-    writeConvertedSamples(*planned.rangePart, writer.zData(), writer.validMaskData());
-    if (channels.rangeRaw && !writer.writeRangeRaw(
-        std::get<std::vector<std::uint16_t>>(planned.rangePart->samples).data(), GraphicsSampleByteOrder::LittleEndian))
-        failed = planned.rangePart;
-    if (!failed && planned.intensityPart) {
-        writeConvertedSamples(*planned.intensityPart, writer.intensityData(), writer.intensityValidMaskData());
-        if (channels.intensityRaw && !writer.writeIntensityRaw(
-            std::get<std::vector<std::uint16_t>>(planned.intensityPart->samples).data(), GraphicsSampleByteOrder::LittleEndian))
-            failed = planned.intensityPart;
+    writeConvertedSamples(*planned.rangePart, planned.rangeFit, writer.zData(), writer.validMaskData());
+    if (channels.rangeRaw) writeRawSamples(*planned.rangePart, planned.rangeFit, writer.rangeRawData());
+    if (planned.intensityPart) {
+        writeConvertedSamples(*planned.intensityPart, planned.intensityFit,
+                              writer.intensityData(), writer.intensityValidMaskData());
+        if (channels.intensityRaw)
+            writeRawSamples(*planned.intensityPart, planned.intensityFit, writer.intensityRawData());
     }
-    if (!failed && planned.confidencePart) {
-        writeConvertedSamples(*planned.confidencePart, writer.confidenceData(), writer.confidenceValidMaskData());
-        if (channels.confidenceRaw && !writer.writeConfidenceRaw(
-            std::get<std::vector<std::uint16_t>>(planned.confidencePart->samples).data(), GraphicsSampleByteOrder::LittleEndian))
-            failed = planned.confidencePart;
-    }
-    if (failed) {
-        return rejectRange(rejection, RangeReason::InvalidLayout,
-                           static_cast<std::uint32_t>(failed - planned.firstPart), planned.partCount,
-                           planned.width, planned.height, planned.sequence,
-                           sampleBytes(*failed), gridBytes(*failed, planned.width, planned.height));
+    if (planned.confidencePart) {
+        writeConvertedSamples(*planned.confidencePart, planned.confidenceFit,
+                              writer.confidenceData(), writer.confidenceValidMaskData());
+        if (channels.confidenceRaw)
+            writeRawSamples(*planned.confidencePart, planned.confidenceFit, writer.confidenceRawData());
     }
     auto samples = writer.takeFrame();
     RangeFrame range = std::move(planned.fields);
@@ -648,6 +806,18 @@ struct PlannedRange
     return range;
 }
 
+[[nodiscard]] std::string imageName(const heliotis::FramePart& part)
+{
+    if (!part.name.empty()) return part.name;
+    switch (part.kind) {
+    case heliotis::FramePartKind::Intensity: return "Intensity";
+    case heliotis::FramePartKind::Confidence: return "Confidence";
+    case heliotis::FramePartKind::Range: return "Range";
+    case heliotis::FramePartKind::Unknown: break;
+    }
+    return "Raw Part";
+}
+
 } // namespace
 
 namespace heliotis {
@@ -662,24 +832,28 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertFrameWithRej
     const Frame& frame,
     const GraphicsFrameRequest& request,
     HeliotisRangeRejection& rangeRejection,
-    HeliotisImageRejection& imageRejection) const
+    HeliotisImageRejection& imageRejection,
+    HeliotisFrameAnomalies* anomalies) const
 {
     rangeRejection = {};
     imageRejection = {};
-    return convertGraphicsFrame(frame, request, &rangeRejection, &imageRejection);
+    if (anomalies) *anomalies = {};
+    return convertGraphicsFrame(frame, request, &rangeRejection, &imageRejection,
+                                nullptr, nullptr, nullptr, anomalies);
 }
 
 std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertForRun(
     const Frame& frame, const GraphicsFrameRequest& request,
     GraphicsFrameContextSource& source, const std::atomic<bool>& cancelled,
     GraphicsFrameError& storageError, HeliotisRangeRejection& rangeRejection,
-    HeliotisImageRejection& imageRejection) const
+    HeliotisImageRejection& imageRejection, HeliotisFrameAnomalies* anomalies) const
 {
     rangeRejection = {};
     imageRejection = {};
+    if (anomalies) *anomalies = {};
     storageError = GraphicsFrameError::None;
     return convertGraphicsFrame(frame, request, &rangeRejection, &imageRejection,
-                                &source, &cancelled, &storageError);
+                                &source, &cancelled, &storageError, anomalies);
 }
 
 std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFrame(
@@ -688,7 +862,8 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     HeliotisRangeRejection* rangeRejection,
     HeliotisImageRejection* imageRejection,
     GraphicsFrameContextSource* runSource, const std::atomic<bool>* cancelled,
-    GraphicsFrameError* storageError) const
+    GraphicsFrameError* storageError,
+    HeliotisFrameAnomalies* anomalies) const
 {
     std::shared_ptr<GraphicsFrameContextSource> source;
     if (!runSource) {
@@ -711,48 +886,72 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         return std::nullopt;
     }
 
+    // Deviations seen while copying the SDK buffer travel with the frame; this conversion adds its own.
+    AnomalyContext anomalyContext;
+    anomalyContext.list = anomalies;
+    anomalyContext.partCount = frame.parts.size();
+    anomalyContext.sequence = frame.sequence;
+    if (anomalies) {
+        anomalies->merge(frame.anomalies);
+        for (std::size_t index = 0; index < anomalies->count; ++index)
+            anomalies->entries[index].frameSequence = frame.sequence;
+    }
+
+    std::size_t sampleBytes = 0;
     std::optional<PlannedRange> rangePlan;
     if (rangeRequested)
     {
-        rangePlan = planRange(frame, request, rangeRejection);
+        rangePlan = planRange(frame, request, rangeRejection, anomalyContext);
+        if (rangePlan) {
+            const auto plan = planGraphicsRangeWrite(rangePlan->layout);
+            if (!plan || !appendAligned(sampleBytes, plan.value().totalBytes, plan.value().alignment)) {
+                static_cast<void>(rejectRange(rangeRejection, RangeReason::SizeLimitExceeded,
+                    static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
+                    rangePlan->width, rangePlan->height, rangePlan->sequence,
+                    rangePlan->readableBytes, rangePlan->requiredBytes));
+                rangePlan.reset();
+                sampleBytes = 0;
+            }
+        }
     }
 
-    std::size_t imageCount = 0;
-    std::size_t sampleBytes = 0;
-    std::optional<GraphicsImageWriterSource> firstImage;
-    // A part whose size cannot be planned or added to the frame total is skipped and recorded;
+    // A part that cannot be planned or added to the frame total is skipped and recorded;
     // the other parts still publish.
-    std::vector<bool> imageSkipped(frame.parts.size(), false);
+    std::vector<ImageJob> imageJobs;
     if (imageRequested) {
+        imageJobs.reserve(frame.parts.size());
         for (std::size_t partIndex = 0; partIndex < frame.parts.size(); ++partIndex) {
             const auto& part = frame.parts[partIndex];
-            if (part.kind != FramePartKind::Intensity) continue;
-            auto image = planIntensityImage(part, frame.sequence, imageRejection);
-            if (!image) continue;
-            GraphicsImageFailure planFailure = GraphicsImageFailure::None;
-            const auto plan = planGraphicsImageWrite(*image, &planFailure);
-            if (!plan || !appendAligned(sampleBytes, plan.value().bytes, plan.value().alignment)) {
-                auto reason = plan ? ImageReason::ExtentOverflow : imageRejectionReason(planFailure);
-                if (reason == ImageReason::None) reason = ImageReason::ExtentOverflow;
-                static_cast<void>(rejectImage(imageRejection, reason, *image));
-                imageSkipped[partIndex] = true;
+            bool imagePart = false;
+            switch (part.kind) {
+            case FramePartKind::Intensity:
+                // A floating intensity part attached to the range grid is that range's channel.
+                imagePart = !(rangePlan && rangePlan->intensityPart == &part
+                              && !holdsRawSamples(part));
+                break;
+            case FramePartKind::Confidence:
+                // A confidence part is an image only when it could not become a range channel.
+                imagePart = rangeRequested && request.includeRangeAuxiliaryChannels
+                    && !(rangePlan && rangePlan->confidencePart == &part);
+                break;
+            case FramePartKind::Range:
+                imagePart = rangeRequested && !(rangePlan && rangePlan->rangePart == &part);
+                break;
+            case FramePartKind::Unknown:
+                imagePart = !(rangePlan && rangePlan->rangePart == &part);
+                break;
+            }
+            if (!imagePart) continue;
+            auto job = planPartImage(part, partIndex, frame.sequence, anomalyContext, imageRejection);
+            if (!job) continue;
+            if (!appendAligned(sampleBytes, job->layout.bytes, job->layout.alignment)) {
+                static_cast<void>(rejectImage(imageRejection, ImageReason::ExtentOverflow, job->source));
                 continue;
             }
-            if (!firstImage) firstImage = *image;
-            ++imageCount;
+            imageJobs.push_back(*job);
         }
     }
-    if (rangePlan) {
-        const auto plan = planGraphicsRangeWrite(rangePlan->layout);
-        if (!plan || !appendAligned(sampleBytes, plan.value().totalBytes, plan.value().alignment)) {
-            static_cast<void>(rejectRange(rangeRejection, RangeReason::SizeLimitExceeded,
-                static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
-                rangePlan->width, rangePlan->height, rangePlan->sequence,
-                rangePlan->readableBytes, rangePlan->requiredBytes));
-            rangePlan.reset();
-        }
-    }
-    if (!rangePlan && imageCount == 0) return std::nullopt;
+    if (!rangePlan && imageJobs.empty()) return std::nullopt;
     if (cancelled && cancelled->load(std::memory_order_acquire)) return std::nullopt;
     auto context = runSource->beginFrame(sampleBytes);
     if (!context) {
@@ -767,8 +966,8 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
                 rangePlan->width, rangePlan->height, rangePlan->sequence,
                 rangePlan->readableBytes, rangePlan->requiredBytes));
         }
-        if (firstImage) static_cast<void>(rejectImage(imageRejection,
-            ImageReason::StorageRefused, *firstImage));
+        if (!imageJobs.empty()) static_cast<void>(rejectImage(imageRejection,
+            ImageReason::StorageRefused, imageJobs.front().source));
         return std::nullopt;
     }
     if (cancelled && cancelled->load(std::memory_order_acquire)) return std::nullopt;
@@ -779,39 +978,34 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     result.metadata.frameId = frame.frameId;
     result.metadata.frameIndex = frame.sequence;
     std::size_t imageOrdinal = 0;
-    if (imageRequested) for (std::size_t partIndex = 0; partIndex < frame.parts.size(); ++partIndex)
+    for (const ImageJob& job : imageJobs)
     {
-        const auto& part = frame.parts[partIndex];
-        if (part.kind != FramePartKind::Intensity || imageSkipped[partIndex]) continue;
-        auto imageSource = planIntensityImage(part, frame.sequence, nullptr);
-        if (!imageSource) continue;
+        const auto& part = frame.parts[job.partIndex];
         GraphicsImageFailure failure = GraphicsImageFailure::None;
-        auto image = writeGraphicsImageWithFailure(frameBuilder, *imageSource, &failure);
+        auto image = writeFittedImage(frameBuilder, job, &failure);
         if (!image.isValid()) {
-            const ImageReason reason = imageRejectionReason(failure);
-            if (reason != ImageReason::None) static_cast<void>(rejectImage(imageRejection, reason, *imageSource));
-            return std::nullopt;
+            // One image that cannot be written never removes the other parts.
+            ImageReason reason = imageRejectionReason(failure);
+            if (reason == ImageReason::None) reason = ImageReason::StorageRefused;
+            static_cast<void>(rejectImage(imageRejection, reason, job.source));
+            continue;
         }
-        std::string name = part.name.empty() ? std::string("Intensity") : part.name;
+        std::string name = imageName(part);
         std::size_t duplicates = 0;
-        for (std::size_t candidateIndex = 0; candidateIndex < frame.parts.size(); ++candidateIndex) {
-            const auto& candidate = frame.parts[candidateIndex];
-            if (candidate.kind != FramePartKind::Intensity || imageSkipped[candidateIndex]) continue;
-            const bool sameName = candidate.name.empty() ? name == "Intensity" : candidate.name == name;
-            if (sameName && planIntensityImage(candidate, frame.sequence, nullptr)) ++duplicates;
+        for (const ImageJob& other : imageJobs) {
+            if (imageName(frame.parts[other.partIndex]) == name) ++duplicates;
         }
         if (duplicates > 1) name += " " + std::to_string(imageOrdinal + 1);
         ++imageOrdinal;
-        result.addImage(resourceId("image", partIndex), std::move(image), name, kResourceGroup);
+        result.addImage(resourceId("image", job.partIndex), std::move(image), name, kResourceGroup);
     }
     if (rangePlan)
     {
         auto range = writeRange(*rangePlan, frameBuilder, rangeRejection);
-        if (!range)
+        if (range)
         {
-            return std::nullopt;
+            result.addRange(resourceId("range", rangePlan->partIndex), std::move(*range), "Range", kResourceGroup);
         }
-        result.addRange(resourceId("range", rangePlan->partIndex), std::move(*range), "Range", kResourceGroup);
     }
 
     if (cancelled && cancelled->load(std::memory_order_acquire)) return std::nullopt;
@@ -829,18 +1023,26 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
                 rangePlan->width, rangePlan->height, rangePlan->sequence,
                 rangePlan->readableBytes, rangePlan->requiredBytes));
         }
-        if (firstImage)
+        if (!imageJobs.empty())
         {
             const ImageReason reason = published.error() == GraphicsFrameError::InvalidInput
                 ? ImageReason::InvalidDimensions
                 : ImageReason::StorageRefused;
-            static_cast<void>(rejectImage(imageRejection, reason, *firstImage));
+            static_cast<void>(rejectImage(imageRejection, reason, imageJobs.front().source));
         }
         return std::nullopt;
     }
+    const bool rangeRetained = !published.value().ranges().empty();
+    const bool imageRetained = !published.value().images().empty();
     if (rangeRejection) {
-        rangeRejection->rangeRetained = !published.value().ranges().empty();
-        rangeRejection->imageRetained = !published.value().images().empty();
+        rangeRejection->rangeRetained = rangeRetained;
+        rangeRejection->imageRetained = imageRetained;
+    }
+    if (anomalies) {
+        for (std::size_t index = 0; index < anomalies->count; ++index) {
+            anomalies->entries[index].rangeRetained = rangeRetained;
+            anomalies->entries[index].imageRetained = imageRetained;
+        }
     }
     return std::move(published).value();
 }

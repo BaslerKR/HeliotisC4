@@ -27,11 +27,16 @@ class HeliotisGraphicsFrameStream final
 public:
     /** Receives one acquisition-worker notification before any frame conversion. */
     using FrameReceiptCallback = std::function<void()>;
-    /** Receives the first failed range rule of a frame whose range was requested. */
+    /**
+     * Receives the first failed range rule of a frame whose range was requested, then one record
+     * for each deviation that was fitted and published instead of rejected.
+     */
     using RejectedRange = std::function<void(const HeliotisRangeRejection&)>;
     /** Receives the first failed integer image writer rule of a requested image. */
     using RejectedImage = std::function<void(const HeliotisImageRejection&)>;
     using StorageFailure = std::function<void()>;
+    /** Receives the storage error of every frame the host source did not admit. */
+    using StorageOutcome = std::function<void(GraphicsFrameError)>;
 
     HeliotisGraphicsFrameStream(HeliotisC4Device* device, GraphicsFrameCallback callback);
     /** Notifies receipt even when conversion fails; neither callback may destroy the stream. */
@@ -51,6 +56,8 @@ public:
     /** Forwards the storage intensity images are written into; callable while acquiring. */
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source);
     void setStorageFailureHandler(StorageFailure handler);
+    /** Reports why a frame was dropped (class refused, capacity, cold wait, no credit) to its consumer. */
+    void setStorageOutcomeHandler(StorageOutcome handler);
     [[nodiscard]] bool canStart(std::string* errorMessage = nullptr) const;
     [[nodiscard]] std::uint64_t droppedFrames() const noexcept;
 

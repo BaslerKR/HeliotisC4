@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 /** Managed test backing that tracks live references and enforces exact sample limits. */
@@ -255,6 +256,58 @@ int main()
         // Waiting without a frame leaves diagnostics unchanged; starting a new run resets them.
         if (!stream.start(heliotis::AcquisitionMode::Continuous)) return 9;
         if (stream.runtimeDiagnostics().delivered != 0 || stream.runtimeDiagnostics().failed != 0) return 10;
+    }
+    {
+        // Fitted deviations are published and reported, one record per anomaly; a frame with more
+        // anomalies than the fixed record holds still reports every count.
+        using Reason = heliotis::HeliotisRangeRejection::Reason;
+        heliotis::HeliotisC4Device anomalyDevice(nullptr);
+        std::vector<heliotis::HeliotisRangeRejection> reported;
+        std::vector<GraphicsFrameError> outcomes;
+        int anomalyDeliveries = 0;
+        heliotis::HeliotisGraphicsFrameStream stream(&anomalyDevice,
+            [&](GraphicsFrame&&, unsigned int) { ++anomalyDeliveries; }, {},
+            [&](const heliotis::HeliotisRangeRejection& evidence) { reported.push_back(evidence); }, {});
+        stream.setStorageOutcomeHandler([&](const GraphicsFrameError error) { outcomes.push_back(error); });
+        auto source = std::make_shared<TrackedContextSource>();
+        stream.setFrameContextSource(source);
+        if (!stream.start(heliotis::AcquisitionMode::Continuous)) return 20;
+
+        heliotis::Frame shortFrame;
+        shortFrame.sequence = 5;
+        shortFrame.parts = {{heliotis::FramePartKind::Range, "Range", "Mono16", 2, 2, 16,
+                             std::vector<std::uint16_t>{1U, 2U, 3U}}};
+        shortFrame.anomalies.note(Reason::InvalidLayout, heliotis::HeliotisRangeRejection::noPart,
+                                  1U, 0U, 0U, 1U, 2U);
+        deviceCallback(heliotis::Frame(shortFrame));
+        if (anomalyDeliveries != 1 || reported.size() != 2U || !outcomes.empty()) return 21;
+        if (reported[0].reason != Reason::InvalidLayout || reported[0].frameSequence != 5U
+            || reported[0].readableBytes != 1U || reported[0].requiredBytes != 2U) return 22;
+        if (reported[1].reason != Reason::TruncatedData || reported[1].affectedPart != 0U
+            || reported[1].readableBytes != 6U || reported[1].requiredBytes != 8U
+            || reported[1].frameSequence != 5U || !reported[1].rangeRetained) return 23;
+        if (stream.runtimeDiagnostics().delivered != 1 || stream.runtimeDiagnostics().failed != 0) return 24;
+
+        reported.clear();
+        heliotis::Frame crowded;
+        crowded.sequence = 6;
+        for (int part = 0; part < 12; ++part) {
+            crowded.parts.push_back({heliotis::FramePartKind::Unknown, {}, "Mono16", 2, 2, 16,
+                                     std::vector<std::uint16_t>{1U, 2U, 3U}});
+        }
+        deviceCallback(heliotis::Frame(crowded));
+        std::size_t truncated = 0;
+        for (const auto& evidence : reported) truncated += evidence.reason == Reason::TruncatedData ? 1U : 0U;
+        if (anomalyDeliveries != 2 || reported.size() != 12U || truncated != 12U) return 25;
+
+        // Every dropped frame names its storage reason; the run keeps acquiring.
+        source->nextError = GraphicsFrameError::ClassNotPrepared;
+        deviceCallback(heliotis::Frame(shortFrame));
+        if (outcomes.size() != 1U || outcomes.front() != GraphicsFrameError::ClassNotPrepared
+            || anomalyDeliveries != 2) return 26;
+        source->nextError = GraphicsFrameError::NoReadyCredit;
+        deviceCallback(heliotis::Frame(shortFrame));
+        if (outcomes.size() != 2U || outcomes.back() != GraphicsFrameError::NoReadyCredit) return 27;
     }
     // A callback retained by a dispatcher must be harmless after stream destruction.
     deviceCallback(heliotis::Frame{});

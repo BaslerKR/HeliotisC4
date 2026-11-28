@@ -58,6 +58,7 @@ public:
         _source = std::move(source);
     }
     void setStorageFailureHandler(StorageFailure handler) { _storageFailure = std::move(handler); }
+    void setStorageOutcomeHandler(StorageOutcome handler) { _storageOutcome = std::move(handler); }
     bool canStart(std::string* error) const {
         std::lock_guard<std::mutex> lock(_runMutex);
         if (!_source) {
@@ -65,6 +66,19 @@ public:
             return false;
         }
         return true;
+    }
+    /** Reports each fitted deviation, then one record per overflowed count; no allocation. */
+    void reportAnomalies(const HeliotisFrameAnomalies& anomalies, const std::uint64_t sequence)
+    {
+        for (std::size_t index = 0; index < anomalies.count; ++index) _rejectedRange(anomalies.entries[index]);
+        if (anomalies.overflow == 0U) return;
+        for (std::size_t reason = 0; reason < anomalies.overflowByReason.size(); ++reason) {
+            HeliotisRangeRejection evidence;
+            evidence.reason = static_cast<HeliotisRangeRejection::Reason>(reason);
+            evidence.frameSequence = sequence;
+            for (std::size_t counted = 0; counted < anomalies.overflowByReason[reason]; ++counted)
+                _rejectedRange(evidence);
+        }
     }
     void cancelRun() noexcept {
         std::shared_ptr<AcquisitionRun> run;
@@ -89,6 +103,7 @@ private:
     std::shared_ptr<GraphicsFrameContextSource> _source;
     std::shared_ptr<AcquisitionRun> _run;
     StorageFailure _storageFailure;
+    StorageOutcome _storageOutcome;
     GraphicsFrameCallbackGate _callbackGate;
 };
 
@@ -169,11 +184,14 @@ bool HeliotisGraphicsFrameStream::Impl::start(
                 HeliotisRangeRejection rangeRejection;
                 HeliotisImageRejection imageRejection;
                 GraphicsFrameError error = GraphicsFrameError::None;
+                HeliotisFrameAnomalies anomalies;
                 auto frame = _adapter.convertForRun(sourceFrame, heliotisGraphicsFrameRequest(),
-                    *run->source, run->cancelled, error, rangeRejection, imageRejection);
+                    *run->source, run->cancelled, error, rangeRejection, imageRejection, &anomalies);
                 std::lock_guard<std::recursive_mutex> delivery(run->deliveryMutex);
                 if (run->cancelled.load(std::memory_order_acquire)) return;
                 if (error == GraphicsFrameError::Disconnected) return;
+                // Every dropped frame names its storage reason so a Single acquisition can report it.
+                if (error != GraphicsFrameError::None && _storageOutcome) _storageOutcome(error);
                 if (error == GraphicsFrameError::NoReadyCredit) {
                     dropped.fetch_add(1, std::memory_order_relaxed);
                     return;
@@ -186,6 +204,7 @@ bool HeliotisGraphicsFrameStream::Impl::start(
                 }
                 if (_rejectedRange && rangeRejection.reason != HeliotisRangeRejection::Reason::None)
                     _rejectedRange(rangeRejection);
+                if (_rejectedRange) reportAnomalies(anomalies, sourceFrame.sequence);
                 if (_rejectedImage && imageRejection.reason != HeliotisImageRejection::Reason::None)
                     _rejectedImage(imageRejection);
                 if (frame) {
@@ -251,6 +270,11 @@ void HeliotisGraphicsFrameStream::setFrameContextSource(std::shared_ptr<Graphics
 void HeliotisGraphicsFrameStream::setStorageFailureHandler(StorageFailure handler)
 {
     _impl->setStorageFailureHandler(std::move(handler));
+}
+
+void HeliotisGraphicsFrameStream::setStorageOutcomeHandler(StorageOutcome handler)
+{
+    _impl->setStorageOutcomeHandler(std::move(handler));
 }
 
 bool HeliotisGraphicsFrameStream::canStart(std::string* errorMessage) const

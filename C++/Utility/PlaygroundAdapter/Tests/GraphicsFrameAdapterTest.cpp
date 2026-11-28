@@ -311,9 +311,15 @@ int main()
     GraphicsFrameRequest shortPartRequest;
     shortPartRequest.includeRangeAuxiliaryChannels = false;
     const auto shortPart = adapter.convertFrame(frame, shortPartRequest);
-    if (!shortPart || shortPart->ranges().size() != 1U || !shortPart->images().empty())
+    // Changed expectation (owner rule): a short part is fitted and published with its missing tail
+    // zero-filled instead of being left out.
+    const std::array<std::uint8_t, 4> shortMono8Bytes{10U, 255U, 30U, 0U};
+    if (!shortPart || shortPart->ranges().size() != 1U || shortPart->images().size() != 1U
+        || shortPart->images().front().payload.width != 2 || shortPart->images().front().payload.height != 2
+        || std::memcmp(shortPart->images().front().payload.data(), shortMono8Bytes.data(),
+               shortMono8Bytes.size()) != 0)
     {
-        std::cerr << "A part whose sample count does not match its dimensions must stay image-free.\n";
+        std::cerr << "A part whose sample count does not match its dimensions must publish zero-filled.\n";
         return 1;
     }
     {
@@ -321,14 +327,24 @@ int main()
         adapter.setFrameContextSource(tracked);
         GraphicsFrameRequest onlyImage;
         onlyImage.components = GraphicsFrameComponent::Image;
-        if (adapter.convertFrame(frame, onlyImage) || tracked->calls != 0U) {
-            std::cerr << "Truncated image must be rejected before admission.\n";
+        // Changed expectation: a truncated image is admitted and published, not rejected.
+        const auto truncated = adapter.convertFrame(frame, onlyImage);
+        if (!truncated || tracked->calls != 1U || truncated->images().size() != 1U
+            || std::memcmp(truncated->images().front().payload.data(), shortMono8Bytes.data(),
+                   shortMono8Bytes.size()) != 0) {
+            std::cerr << "A truncated image must be admitted and published zero-filled.\n";
             return 1;
         }
         auto malformed = frame;
         malformed.parts.at(1).width = 0;
-        if (adapter.convertFrame(malformed, onlyImage) || tracked->calls != 0U) {
-            std::cerr << "Malformed image must be rejected before admission.\n";
+        // Changed expectation: without a declared shape the delivered samples form one row.
+        const auto oneRow = adapter.convertFrame(malformed, onlyImage);
+        const std::array<std::uint8_t, 3> oneRowBytes{10U, 255U, 30U};
+        if (!oneRow || tracked->calls != 2U || oneRow->images().size() != 1U
+            || oneRow->images().front().payload.width != 3 || oneRow->images().front().payload.height != 1
+            || std::memcmp(oneRow->images().front().payload.data(), oneRowBytes.data(),
+                   oneRowBytes.size()) != 0) {
+            std::cerr << "A part without a declared shape must publish as one row.\n";
             return 1;
         }
         adapter.setFrameContextSource(localSource);
@@ -799,22 +815,33 @@ int main()
             return 1;
         }
 
+        // Changed expectation (owner rule): a short typed range is fitted at its declared size with
+        // the missing sample zero-filled and published as the range; the deviation is counted.
         auto shortRange = input;
         std::get<std::vector<double>>(shortRange.parts.front().samples).pop_back();
+        heliotis::HeliotisFrameAnomalies anomalies;
         const auto shortResult = adapter.convertFrameWithRejection(
-            shortRange, {}, rangeRejection, imageRejection);
+            shortRange, {}, rangeRejection, imageRejection, &anomalies);
+        const RangeFrame* shortRangeFrame = rangeOf(shortResult);
         if (!check(shortResult && shortResult->hasImage() && shortResult->hasRangeFrame()
-                       && shortResult->ranges().front().descriptor.id == "range.0:0.1"
-                       && rangeRejection.rangeRetained && rangeRejection.imageRetained,
-                   "A malformed typed range must leave the raw preview and intensity image available.")
-            || !check(rangeRejection.reason == RangeReason::InvalidLayout
-                       && rangeRejection.affectedPart == 0U
-                       && rangeRejection.readableBytes == 24U && rangeRejection.requiredBytes == 32U,
-                   "Range evidence must compare byte counts for the same part and sample type."))
+                       && shortResult->ranges().front().descriptor.id == "range.0:0.0"
+                       && rangeRejection.rangeRetained && rangeRejection.imageRetained
+                       && shortRangeFrame && shortRangeFrame->zValues.size() == 4U
+                       && std::fabs(shortRangeFrame->zValues.at(2) - 3.5F) < 0.0001F
+                       && shortRangeFrame->zValues.at(3) == 0.0F,
+                   "A short typed range must publish at its declared size with a zero-filled tail.")
+            || !check(rangeRejection.reason == RangeReason::None && imageRejection.reason == ImageReason::None,
+                   "A fitted range is not a rejection.")
+            || !check(anomalies.count == 1U && anomalies.overflow == 0U
+                       && anomalies.entries[0].reason == RangeReason::TruncatedData
+                       && anomalies.entries[0].affectedPart == 0U
+                       && anomalies.entries[0].readableBytes == 24U && anomalies.entries[0].requiredBytes == 32U
+                       && anomalies.entries[0].rangeRetained && anomalies.entries[0].imageRetained,
+                   "Anomaly evidence must compare byte counts for the same part and sample type."))
             return 1;
 
-        // A malformed optional auxiliary channel rejects the requested range,
-        // but the separately converted intensity image is still retained.
+        // Changed expectation: a short optional auxiliary channel no longer rejects the range; the
+        // range, the channel (zero-filled) and the intensity image all publish.
         auto auxiliaryFailure = input;
         auxiliaryFailure.parts.push_back({
             heliotis::FramePartKind::Confidence,
@@ -828,16 +855,22 @@ int main()
         rangeRejection = {};
         imageRejection = {};
         const auto retained = adapter.convertFrameWithRejection(
-            auxiliaryFailure, {}, rangeRejection, imageRejection);
-        if (!check(rangeRejection.reason == RangeReason::InvalidLayout,
-                   "A shape mismatch in a requested auxiliary channel must report the failed rule.")
-            || !check(rangeRejection.affectedPart == 2U
-                          && rangeRejection.readableBytes == 6U && rangeRejection.requiredBytes == 8U
-                          && rangeRejection.partCount == 3U && rangeRejection.width == 2U
-                          && rangeRejection.height == 2U && rangeRejection.frameSequence == 11U,
-                      "Range evidence must carry the fixed part ordinal and frame sequence.")
-            || !check(retained && retained->ranges().empty() && retained->images().size() == 1U,
-                      "A rejected range must not hide a valid intensity image.")
+            auxiliaryFailure, {}, rangeRejection, imageRejection, &anomalies);
+        const RangeFrame* retainedRange = rangeOf(retained);
+        if (!check(rangeRejection.reason == RangeReason::None,
+                   "A short requested auxiliary channel must not report a rejection.")
+            || !check(anomalies.count == 1U && anomalies.entries[0].reason == RangeReason::TruncatedData
+                          && anomalies.entries[0].affectedPart == 2U
+                          && anomalies.entries[0].readableBytes == 6U && anomalies.entries[0].requiredBytes == 8U
+                          && anomalies.entries[0].partCount == 3U && anomalies.entries[0].width == 2U
+                          && anomalies.entries[0].height == 2U && anomalies.entries[0].frameSequence == 11U,
+                      "Anomaly evidence must carry the fixed part ordinal and frame sequence.")
+            || !check(retained && retained->ranges().size() == 1U && retained->images().size() == 1U
+                          && retainedRange && retainedRange->confidence.size() == 4U
+                          && retainedRange->confidenceRaw.size() == 4U
+                          && retainedRange->confidenceRaw.at(2) == 3U && retainedRange->confidenceRaw.at(3) == 0U
+                          && retainedRange->confidence.at(3) == 0.0F,
+                      "A short auxiliary channel must publish with every other part and a zero-filled tail.")
             || !check(rangeRejection.rangeRetained == retained->hasRangeFrame()
                           && rangeRejection.imageRetained == retained->hasImage(),
                       "Retention flags must match the assembled result.")
@@ -847,22 +880,24 @@ int main()
             return 1;
         }
 
-        // A refused frame plan drops the whole frame after one provider call: the range keeps the
-        // evidence of its own plan or reports the refusal with the planned block bytes, and the
-        // image reports StorageRefused. Nothing is retried component by component.
+        // A refused frame plan drops the whole frame after one provider call: the range reports the
+        // refusal with the planned block bytes, the image reports StorageRefused, and the fitted
+        // deviation stays counted. Nothing is retried component by component.
         auto refusing = std::make_shared<TrackedContextSource>();
         refusing->refuse = true;
         adapter.setFrameContextSource(refusing);
         rangeRejection = {};
         imageRejection = {};
         const auto refusedPreview = adapter.convertFrameWithRejection(
-            shortRange, {}, rangeRejection, imageRejection);
+            shortRange, {}, rangeRejection, imageRejection, &anomalies);
         if (!check(!refusedPreview && refusing->calls == 1U && refusing->singleCalls == 0U
-                       && rangeRejection.reason == RangeReason::InvalidLayout
-                       && rangeRejection.affectedPart == 0U && rangeRejection.requestedStorageBytes == 0U
+                       && rangeRejection.reason == RangeReason::StorageRefused
+                       && rangeRejection.affectedPart == 0U && rangeRejection.requestedStorageBytes > 0U
                        && imageRejection.reason == ImageReason::StorageRefused
-                       && !rangeRejection.imageRetained && !rangeRejection.rangeRetained,
-                   "A refused preview plan must keep the original range rejection evidence."))
+                       && !rangeRejection.imageRetained && !rangeRejection.rangeRetained
+                       && anomalies.count == 1U && anomalies.entries[0].reason == RangeReason::TruncatedData
+                       && !anomalies.entries[0].rangeRetained,
+                   "A refused preview plan must report the storage refusal and keep the anomaly count."))
             return 1;
 
         refusing->calls = 0U;
@@ -967,6 +1002,194 @@ int main()
                    "An unrequested missing range must stay silent."))
         {
             return 1;
+        }
+    }
+
+    // Owner rule: device data is fitted into the GraphicsEngine format and published; every
+    // deviation is counted in a fixed-capacity record and no part removes another.
+    {
+        const auto check = [](const bool condition, const char* message) {
+            if (!condition) std::cerr << message << '\n';
+            return condition;
+        };
+        using RangeReason = heliotis::HeliotisRangeRejection::Reason;
+        using ImageReason = heliotis::HeliotisImageRejection::Reason;
+        heliotis::HeliotisRangeRejection rangeRejection;
+        heliotis::HeliotisImageRejection imageRejection;
+        heliotis::HeliotisFrameAnomalies anomalies;
+        GraphicsFrameRequest imageOnly;
+        imageOnly.components = GraphicsFrameComponent::Image;
+        const auto convert = [&](const heliotis::Frame& input, const GraphicsFrameRequest& request) {
+            return adapter.convertFrameWithRejection(input, request, rangeRejection, imageRejection, &anomalies);
+        };
+
+        heliotis::Frame base;
+        base.sequence = 21;
+        base.parts = {
+            {heliotis::FramePartKind::Range, "Range", "Mono16", 2, 2, 16,
+             std::vector<std::uint16_t>{2U, 4U, 6U, 8U}},
+            {heliotis::FramePartKind::Intensity, "Intensity", "Mono16", 2, 2, 16,
+             std::vector<std::uint16_t>{10U, 20U, 30U, 40U}}};
+
+        // Short 16-bit image (Copy path): the existing bytes are copied and the tail is zero.
+        {
+            auto input = base;
+            std::get<std::vector<std::uint16_t>>(input.parts.at(1).samples).resize(3);
+            const auto shortImage = convert(input, imageOnly);
+            const std::array<std::uint8_t, 8> expected{10U, 0U, 20U, 0U, 30U, 0U, 0U, 0U};
+            if (!check(shortImage && shortImage->images().size() == 1U
+                           && shortImage->images().front().payload.pixelFormat == GraphicsImagePixelFormat::Mono16
+                           && shortImage->images().front().payload.stride == 4
+                           && std::memcmp(shortImage->images().front().payload.data(), expected.data(),
+                                  expected.size()) == 0,
+                       "A short Mono16 image must publish its bytes with a zero-filled tail.")
+                || !check(anomalies.count == 1U && anomalies.entries[0].reason == RangeReason::TruncatedData
+                              && anomalies.entries[0].affectedPart == 1U
+                              && anomalies.entries[0].readableBytes == 6U
+                              && anomalies.entries[0].requiredBytes == 8U,
+                          "A short image part must be counted as TruncatedData."))
+                return 1;
+        }
+
+        // Extra samples: the declared shape is kept and the excess is ignored.
+        {
+            auto input = base;
+            std::get<std::vector<std::uint16_t>>(input.parts.at(0).samples) =
+                std::vector<std::uint16_t>{2U, 4U, 6U, 8U, 99U, 98U};
+            const auto excess = convert(input, {});
+            const RangeFrame* range = rangeOf(excess);
+            if (!check(range && range->width == 2 && range->height == 2 && range->zValues.size() == 4U
+                           && range->rangeRaw.size() == 4U && range->rangeRaw.at(3) == 8U
+                           && rangeRejection.reason == RangeReason::None,
+                       "A range with extra samples must publish at its declared shape.")
+                || !check(anomalies.count == 1U && anomalies.entries[0].reason == RangeReason::InvalidLayout
+                              && anomalies.entries[0].readableBytes == 12U
+                              && anomalies.entries[0].requiredBytes == 8U,
+                          "Extra samples must be counted as InvalidLayout."))
+                return 1;
+        }
+
+        // A short 16-bit range zero-fills both the converted and the raw channel.
+        {
+            auto input = base;
+            std::get<std::vector<std::uint16_t>>(input.parts.at(0).samples).resize(2);
+            input.parts.at(0).sampleScale = 0.5;
+            const auto shortRange = convert(input, {});
+            const RangeFrame* range = rangeOf(shortRange);
+            if (!check(range && range->zValues.size() == 4U && range->rangeRaw.size() == 4U
+                           && std::fabs(range->zValues.at(1) - 2.0F) < 0.0001F
+                           && range->zValues.at(2) == 0.0F && range->zValues.at(3) == 0.0F
+                           && range->rangeRaw.at(1) == 4U && range->rangeRaw.at(2) == 0U
+                           && range->rangeRaw.at(3) == 0U && shortRange->images().size() == 1U,
+                       "A short integer range must zero-fill its converted and raw channels."))
+                return 1;
+        }
+
+        // Floating samples have no integer image format: the bytes publish as raw Mono8.
+        {
+            auto input = base;
+            input.parts.at(1).samples = std::vector<double>{1.5, 2.5, 3.5, 4.5};
+            const auto raw = convert(input, imageOnly);
+            std::array<std::uint8_t, 32> expected{};
+            const std::array<double, 4> source{1.5, 2.5, 3.5, 4.5};
+            std::memcpy(expected.data(), source.data(), expected.size());
+            if (!check(raw && raw->images().size() == 1U
+                           && raw->images().front().payload.pixelFormat == GraphicsImagePixelFormat::Mono8
+                           && raw->images().front().payload.width == 16
+                           && raw->images().front().payload.height == 2
+                           && std::memcmp(raw->images().front().payload.data(), expected.data(),
+                                  expected.size()) == 0,
+                       "A floating part with nowhere else to go must publish as raw Mono8 bytes.")
+                || !check(anomalies.count == 1U && anomalies.entries[0].reason == RangeReason::UnsupportedFormat
+                              && anomalies.entries[0].readableBytes == 32U,
+                          "A format that was fitted as raw bytes must be counted as UnsupportedFormat."))
+                return 1;
+        }
+
+        // A raw-byte payload (bytes that were not whole samples) publishes as one Mono8 row.
+        {
+            heliotis::Frame input;
+            input.sequence = 22;
+            input.parts = {{heliotis::FramePartKind::Unknown, "Blob", "Mystery", 5, 1, 8,
+                            std::vector<std::uint8_t>{1U, 2U, 3U, 4U, 5U}}};
+            const auto blob = convert(input, {});
+            const RangeFrame* range = rangeOf(blob);
+            if (!check(blob && range && range->width == 5 && range->height == 1
+                           && std::fabs(range->zValues.at(4) - 5.0F) < 0.0001F
+                           && anomalies.count == 0U,
+                       "A raw-byte part must publish as a raw preview without a rejection."))
+                return 1;
+            const auto blobImage = convert(input, imageOnly);
+            const std::array<std::uint8_t, 5> bytes{1U, 2U, 3U, 4U, 5U};
+            if (!check(blobImage && blobImage->images().size() == 1U
+                           && blobImage->images().front().payload.pixelFormat == GraphicsImagePixelFormat::Mono8
+                           && blobImage->images().front().payload.width == 5
+                           && std::memcmp(blobImage->images().front().payload.data(), bytes.data(),
+                                  bytes.size()) == 0,
+                       "A raw-byte part must publish as a Mono8 image."))
+                return 1;
+        }
+
+        // One bad part never removes another: a confidence part with a different shape is counted
+        // and published as its own image while the range and intensity image still publish.
+        {
+            auto input = base;
+            input.parts.push_back({heliotis::FramePartKind::Confidence, "Confidence", "Mono16", 3, 1, 16,
+                                   std::vector<std::uint16_t>{7U, 8U, 9U}});
+            const auto mixed = convert(input, {});
+            if (!check(mixed && mixed->ranges().size() == 1U && mixed->images().size() == 2U
+                           && mixed->images().back().descriptor.displayName == "Confidence"
+                           && mixed->images().back().payload.width == 3
+                           && rangeRejection.reason == RangeReason::None
+                           && imageRejection.reason == ImageReason::None,
+                       "A part with a mismatching shape must publish beside the range and the intensity image.")
+                || !check(anomalies.count == 1U && anomalies.entries[0].reason == RangeReason::InvalidLayout
+                              && anomalies.entries[0].affectedPart == 2U && anomalies.entries[0].partCount == 3U,
+                          "A shape mismatch against the range grid must be counted."))
+                return 1;
+        }
+
+        // An empty part is absent and counted; the part beside it still publishes.
+        {
+            auto input = base;
+            input.parts.at(1).samples = std::vector<std::uint16_t>{};
+            const auto absent = convert(input, {});
+            if (!check(absent && absent->ranges().size() == 1U && absent->images().empty()
+                           && anomalies.count == 1U && anomalies.entries[0].reason == RangeReason::MissingData
+                           && anomalies.entries[0].affectedPart == 1U,
+                       "An empty part must be counted as MissingData without removing the range."))
+                return 1;
+        }
+
+        // Anomalies keep a fixed capacity: the entries are bounded and the overflow keeps its count.
+        {
+            heliotis::Frame crowded;
+            crowded.sequence = 23;
+            for (int part = 0; part < 12; ++part) {
+                crowded.parts.push_back({heliotis::FramePartKind::Unknown, {}, "Mono16", 2, 2, 16,
+                                         std::vector<std::uint16_t>{1U, 2U, 3U}});
+            }
+            crowded.anomalies.note(RangeReason::InvalidLayout, heliotis::HeliotisRangeRejection::noPart,
+                                   12U, 0U, 0U, 12U, 14U);
+            const auto many = convert(crowded, {});
+            if (!check(many && many->ranges().size() == 1U && many->images().size() == 11U
+                           && anomalies.count == heliotis::HeliotisFrameAnomalies::capacity
+                           && anomalies.total() == 13U && anomalies.overflow == 5U
+                           && anomalies.overflowByReason[static_cast<std::size_t>(RangeReason::TruncatedData)] == 5U
+                           && anomalies.entries[0].reason == RangeReason::InvalidLayout
+                           && anomalies.entries[0].frameSequence == 23U,
+                       "A frame with more anomalies than the record holds must keep every count."))
+                return 1;
+        }
+
+        // Without an anomaly record the same frame still publishes.
+        {
+            auto input = base;
+            std::get<std::vector<std::uint16_t>>(input.parts.at(1).samples).resize(1);
+            const auto silent = adapter.convertFrameWithRejection(input, {}, rangeRejection, imageRejection);
+            if (!check(silent && silent->images().size() == 1U && imageRejection.reason == ImageReason::None,
+                       "A fitted frame must publish without an anomaly record."))
+                return 1;
         }
     }
 
