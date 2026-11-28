@@ -1,5 +1,6 @@
 #include "HeliotisC4System.h"
 #include "Internal/HeliotisAcquisitionPolicy.h"
+#include "Internal/HeliotisPartFit.h"
 #include "Internal/C4UtilitySdkRuntime.h"
 
 #include <algorithm>
@@ -53,19 +54,25 @@ enum class SampleStorage {
     Float64,
 };
 
+/**
+ * Reads one part through the SDK's byte-capacity C API.
+ *
+ * @param expectedBytes Receive capacity to offer first; the SDK-required size is used on retry.
+ * @param storage Receives the bytes as whole `Sample` elements; a trailing partial sample is kept.
+ * @param reportedBeyondBuffer Set to the SDK-reported byte count when it exceeds the buffer
+ *        offered; only the offered bytes are trusted, so the read never extends past the buffer.
+ * @return Bytes delivered, or no value when the SDK delivered nothing or failed.
+ */
 template <typename Sample, typename Reader>
-std::optional<std::uint32_t> copyBufferPartSamples(
-    const std::uint32_t expectedSamples,
+std::optional<std::uint32_t> copyBufferPartBytes(
+    const std::uint32_t expectedBytes,
     const char* operation,
     Reader&& reader,
-    std::vector<Sample>* samples,
+    std::vector<Sample>* storage,
+    std::uint32_t* reportedBeyondBuffer,
     std::string* errorMessage)
 {
-    if (expectedSamples > (std::numeric_limits<std::uint32_t>::max)() / sizeof(Sample)) {
-        if (errorMessage) *errorMessage = std::string(operation) + " exceeds C4Utility's 32-bit byte-capacity limit.";
-        return std::nullopt;
-    }
-    std::uint32_t capacity = expectedSamples * static_cast<std::uint32_t>(sizeof(Sample));
+    std::uint32_t capacity = expectedBytes;
     for (int attempt = 0; attempt != 2; ++attempt) {
         const auto allocatedSamples = (static_cast<std::uint64_t>(capacity) + sizeof(Sample) - 1)
             / sizeof(Sample);
@@ -73,30 +80,21 @@ std::optional<std::uint32_t> copyBufferPartSamples(
             if (errorMessage) *errorMessage = std::string(operation) + " returned an unsupported byte capacity.";
             return std::nullopt;
         }
-        samples->resize(static_cast<std::size_t>(allocatedSamples));
-        const C4HDL_ERROR result = reader(samples->data(), &capacity);
+        storage->resize(static_cast<std::size_t>(allocatedSamples));
+        const C4HDL_ERROR result = reader(storage->data(), &capacity);
         if (result == C4HDL_ERR_SUCCESS) {
-            if (capacity == 0 || capacity > static_cast<std::uint64_t>(allocatedSamples * sizeof(Sample))) {
-                if (errorMessage) {
-                    *errorMessage = std::string(operation) + " returned " + std::to_string(capacity)
-                        + " byte(s), exceeding the allocated receive capacity.";
-                }
+            if (capacity == 0) {
+                if (errorMessage) *errorMessage = std::string(operation) + " returned zero bytes.";
                 return std::nullopt;
             }
-            if (capacity % sizeof(Sample) != 0) {
-                if (errorMessage) {
-                    *errorMessage = std::string(operation) + " returned a non-integral sample byte count ("
-                        + std::to_string(capacity) + ").";
-                }
-                return std::nullopt;
+            const std::uint64_t offeredBytes = allocatedSamples * sizeof(Sample);
+            if (capacity > offeredBytes) {
+                if (reportedBeyondBuffer) *reportedBeyondBuffer = capacity;
+                capacity = static_cast<std::uint32_t>(offeredBytes);
             }
-            const auto actualSamples = static_cast<std::uint32_t>(capacity / sizeof(Sample));
-            if (actualSamples == 0) {
-                if (errorMessage) *errorMessage = std::string(operation) + " returned zero samples.";
-                return std::nullopt;
-            }
-            samples->resize(actualSamples);
-            return actualSamples;
+            storage->resize(static_cast<std::size_t>((static_cast<std::uint64_t>(capacity) + sizeof(Sample) - 1)
+                / sizeof(Sample)));
+            return capacity;
         }
         if (result != C4HDL_ERR_SMALL_BUFFER || capacity == 0) {
             if (errorMessage) *errorMessage = operationError(operation, result);
@@ -111,9 +109,9 @@ std::optional<std::uint32_t> copyBufferPartSamples(
     return std::nullopt;
 }
 
-/** Queries a part's sample count through the C API size probe. */
+/** Queries the bytes a part holds through the C API size probe. */
 template <typename Sample, typename Reader>
-std::optional<std::uint32_t> queryBufferPartSampleCount(
+std::optional<std::uint32_t> queryBufferPartBytes(
     const char* operation,
     Reader&& reader,
     std::string* diagnosticMessage)
@@ -128,21 +126,7 @@ std::optional<std::uint32_t> queryBufferPartSampleCount(
         if (diagnosticMessage) *diagnosticMessage = std::string(operation) + " returned zero bytes.";
         return std::nullopt;
     }
-    if (requiredBytes % sizeof(Sample) != 0) {
-        if (diagnosticMessage) {
-            *diagnosticMessage = std::string(operation) + " reported "
-                + std::to_string(requiredBytes) + " byte(s), not an integral sample count.";
-        }
-        return std::nullopt;
-    }
-    const std::uint64_t sampleCount = requiredBytes / sizeof(Sample);
-    if (sampleCount == 0 || sampleCount > (std::numeric_limits<std::uint32_t>::max)()) {
-        if (diagnosticMessage && diagnosticMessage->empty()) {
-            *diagnosticMessage = std::string(operation) + " returned an unsupported sample byte count.";
-        }
-        return std::nullopt;
-    }
-    return static_cast<std::uint32_t>(sampleCount);
+    return requiredBytes;
 }
 
 /** Reads one part's complete dimension vector. */
@@ -2662,6 +2646,7 @@ bool HeliotisC4Device::copyFrame(
     Frame* frame,
     std::string* errorMessage) const
 {
+    using Reason = HeliotisRangeRejection::Reason;
     if (!buffer || !frame) {
         if (errorMessage) *errorMessage = "C4Utility returned an invalid acquisition buffer.";
         return false;
@@ -2673,9 +2658,17 @@ bool HeliotisC4Device::copyFrame(
         return false;
     }
 
+    // Device data is never rejected for a validation reason: a deviation is fitted, published
+    // and counted in the fixed-capacity per-frame record, so recording it never allocates.
+    Frame copied;
+    const auto partCountValue = static_cast<std::uint32_t>(
+        (std::min<std::int64_t>)(partCount, (std::numeric_limits<std::uint32_t>::max)()));
     std::int64_t chunkPartCount = 0;
     const C4HDL_ERROR chunkPartCountResult = C4Buf_readInteger(buffer, "ChunkPartCount", &chunkPartCount);
     if (chunkPartCountResult == C4HDL_ERR_SUCCESS && chunkPartCount != partCount) {
+        copied.anomalies.note(Reason::InvalidLayout, HeliotisRangeRejection::noPart, partCountValue, 0U, 0U,
+            static_cast<std::uint64_t>(partCount),
+            chunkPartCount > 0 ? static_cast<std::uint64_t>(chunkPartCount) : 0U);
         if (detailedDiagnostics) {
             logWarning("C4Utility multipart count mismatch: ChunkPartCount="
                 + std::to_string(chunkPartCount) + ", C4Buf_getNumParts="
@@ -2709,7 +2702,6 @@ bool HeliotisC4Device::copyFrame(
             + ". Range capture remains valid, but physical grid reconstruction is unavailable.");
     }
 
-    Frame copied;
     std::int64_t chunkFrameId = 0;
     if (C4Buf_readInteger(buffer, "ChunkFrameID", &chunkFrameId) == C4HDL_ERR_SUCCESS && chunkFrameId >= 0) {
         copied.frameId = std::to_string(chunkFrameId);
@@ -2719,13 +2711,23 @@ bool HeliotisC4Device::copyFrame(
         copied.timestampNs = static_cast<std::uint64_t>(chunkTimestamp);
     }
     copied.parts.reserve(static_cast<std::size_t>(partCount));
+    std::string lastPartError;
     for (std::int64_t partIndex = 0; partIndex < partCount; ++partIndex) {
+        const auto ordinal = static_cast<std::uint32_t>(partIndex);
+        // A part with no data at all is absent and counted; every other part still publishes.
+        const auto absent = [&](const std::string& detail) {
+            copied.anomalies.note(Reason::MissingData, ordinal, partCountValue, 0U, 0U, 0U, 0U);
+            lastPartError = detail;
+        };
         const C4HDL_ERROR partSelectorResult = C4Buf_writeInteger(buffer, "ChunkPartSelector", partIndex);
         if (partSelectorResult != C4HDL_ERR_SUCCESS) {
-            if (errorMessage) {
-                *errorMessage = operationError("C4Buf_writeInteger(ChunkPartSelector)", partSelectorResult);
+            const std::string detail = operationError("C4Buf_writeInteger(ChunkPartSelector)", partSelectorResult);
+            if (detailedDiagnostics) {
+                logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
+                    + "] because it could not be selected: " + detail);
             }
-            return false;
+            absent(detail);
+            continue;
         }
         std::string metadataError;
         const std::string partName = readSdkString(
@@ -2791,90 +2793,94 @@ bool HeliotisC4Device::copyFrame(
         std::string dimensionDiagnostic;
         const bool dimensionsRead = readBufferPartDimensions(
             buffer, partIndex, &dimensions, &dimensionDiagnostic);
-        std::uint64_t expectedSamples = 1;
+        std::uint64_t declaredSamples = 1;
         bool usableDimensions = dimensionsRead && !dimensions.empty();
         if (usableDimensions) {
             for (const std::int64_t dimension : dimensions) {
                 if (dimension <= 0
                     || dimension > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())
-                    || expectedSamples > (std::numeric_limits<std::uint32_t>::max)() / static_cast<std::uint64_t>(dimension)) {
+                    || declaredSamples > (std::numeric_limits<std::uint32_t>::max)() / static_cast<std::uint64_t>(dimension)) {
                     usableDimensions = false;
                     break;
                 }
-                expectedSamples *= static_cast<std::uint64_t>(dimension);
+                declaredSamples *= static_cast<std::uint64_t>(dimension);
             }
-            usableDimensions = usableDimensions && expectedSamples > 0;
+            usableDimensions = usableDimensions && declaredSamples > 0;
         }
-        std::optional<std::uint32_t> probedSampleCount;
+
+        // A format the SDK does not name is mapped to the nearest storage: the typed getter that
+        // reports data, Uint16 when both do. Bytes that are not a whole number of samples publish
+        // as raw Mono8 below. Nothing is dropped because the format is unknown.
+        bool formatFitted = false;
+        std::optional<std::uint32_t> probedBytes;
         if (!sampleStorageKnown) {
+            formatFitted = true;
             std::string uint16Diagnostic;
             std::string floatDiagnostic;
-            const auto uint16SampleCount = queryBufferPartSampleCount<std::uint16_t>(
+            const auto uint16Bytes = queryBufferPartBytes<std::uint16_t>(
                 "C4Buf_getDataPartUint16",
                 [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
                     return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
                 },
                 &uint16Diagnostic);
-            const auto floatSampleCount = queryBufferPartSampleCount<double>(
+            const auto floatBytes = queryBufferPartBytes<double>(
                 "C4Buf_getDataPartFloat",
                 [buffer, partIndex](double* data, std::uint32_t* capacity) {
                     return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
                 },
                 &floatDiagnostic);
-            if (uint16SampleCount.has_value() == floatSampleCount.has_value()) {
-                const std::string reason = uint16SampleCount.has_value()
-                    ? "both typed data getters accepted the probe"
-                    : "neither typed data getter supplied a usable size";
+            if (!uint16Bytes && !floatBytes) {
+                const std::string detail = "neither typed data getter supplied a size."
+                    + (uint16Diagnostic.empty() ? std::string() : " Uint16: " + uint16Diagnostic)
+                    + (floatDiagnostic.empty() ? std::string() : " Float: " + floatDiagnostic);
                 if (detailedDiagnostics) {
                     logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
-                        + "] because sample storage is ambiguous or unavailable: " + reason + "."
-                        + (uint16Diagnostic.empty() ? std::string() : " Uint16: " + uint16Diagnostic)
-                        + (floatDiagnostic.empty() ? std::string() : " Float: " + floatDiagnostic));
+                        + "] because it holds no readable data: " + detail);
                 }
+                absent(detail);
                 continue;
             }
             sampleStorageKnown = true;
-            sampleStorage = uint16SampleCount.has_value()
-                ? SampleStorage::Uint16
-                : SampleStorage::Float64;
-            probedSampleCount = uint16SampleCount.has_value()
-                ? uint16SampleCount
-                : floatSampleCount;
+            sampleStorage = uint16Bytes ? SampleStorage::Uint16 : SampleStorage::Float64;
+            probedBytes = uint16Bytes ? uint16Bytes : floatBytes;
         }
-        if (!usableDimensions) {
-            std::string sampleCountDiagnostic;
-            const auto sampleCount = probedSampleCount.has_value()
-                ? probedSampleCount
-                : (sampleStorage == SampleStorage::Float64
-                ? queryBufferPartSampleCount<double>(
-                    "C4Buf_getDataPartFloat",
-                    [buffer, partIndex](double* data, std::uint32_t* capacity) {
-                        return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
-                    },
-                    &sampleCountDiagnostic)
-                : queryBufferPartSampleCount<std::uint16_t>(
-                    "C4Buf_getDataPartUint16",
-                    [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
-                        return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
-                    },
-                    &sampleCountDiagnostic));
-            if (!sampleCount) {
+        const std::size_t sampleSize = sampleStorage == SampleStorage::Float64
+            ? sizeof(double) : sizeof(std::uint16_t);
+
+        // Offer the declared size first; the SDK reports the size it really holds, so a short
+        // or longer payload is read as delivered. Without a usable declared shape, or when the
+        // declaration exceeds the SDK's 32-bit capacity, offer the size the SDK reports.
+        const std::uint64_t declaredBytes = usableDimensions ? declaredSamples * sampleSize : 0U;
+        std::uint64_t offerBytes = declaredBytes;
+        if (!usableDimensions || offerBytes > (std::numeric_limits<std::uint32_t>::max)()) {
+            std::string sizeDiagnostic;
+            std::optional<std::uint32_t> reported = probedBytes;
+            if (!reported) {
+                reported = sampleStorage == SampleStorage::Float64
+                    ? queryBufferPartBytes<double>(
+                        "C4Buf_getDataPartFloat",
+                        [buffer, partIndex](double* data, std::uint32_t* capacity) {
+                            return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
+                        },
+                        &sizeDiagnostic)
+                    : queryBufferPartBytes<std::uint16_t>(
+                        "C4Buf_getDataPartUint16",
+                        [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
+                            return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
+                        },
+                        &sizeDiagnostic);
+            }
+            if (!reported) {
                 if (detailedDiagnostics) {
                     logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
-                        + "] because dimensions and data size are unusable."
+                        + "] because it holds no readable data."
                         + (dimensionDiagnostic.empty() ? std::string() : " Dimensions: " + dimensionDiagnostic)
-                        + (sampleCountDiagnostic.empty() ? std::string() : " Data: " + sampleCountDiagnostic));
+                        + (sizeDiagnostic.empty() ? std::string() : " Data: " + sizeDiagnostic));
                 }
+                absent(sizeDiagnostic.empty() ? dimensionDiagnostic : sizeDiagnostic);
                 continue;
             }
-            expectedSamples = *sampleCount;
-            dimensions = {static_cast<std::int64_t>(expectedSamples)};
-            if (detailedDiagnostics) {
-                logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
-                    + "] has unusable dimensions; using " + std::to_string(expectedSamples)
-                    + " copied samples as a one-row raw preview."
-                    + (dimensionDiagnostic.empty() ? std::string() : " Detail: " + dimensionDiagnostic));
-            }
+            offerBytes = *reported;
         } else if (!dimensionDiagnostic.empty() && detailedDiagnostics) {
             logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
                 + "] dimension metadata was accepted with warning: " + dimensionDiagnostic);
@@ -2898,75 +2904,114 @@ bool HeliotisC4Device::copyFrame(
                 fixedPointScale = 1.0;
             }
         }
-        std::uint32_t sampleCount = static_cast<std::uint32_t>(expectedSamples);
-        std::uint32_t copiedSampleCount = 0;
-        FramePart part;
-        if (sampleStorage == SampleStorage::Float64) {
-            std::vector<double> samples;
-            const auto copied = copyBufferPartSamples<double>(
-                    sampleCount,
-                    "C4Buf_getDataPartFloat",
-                    [buffer, partIndex](double* data, std::uint32_t* capacity) {
-                        return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
-                    },
-                    &samples,
-                    &pixelFormatDiagnostic);
-            if (!copied) {
-                if (detailedDiagnostics) {
-                    logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
-                        + "] because float samples could not be copied: " + pixelFormatDiagnostic);
-                }
-                continue;
+
+        std::vector<std::uint16_t> words;
+        std::vector<double> doubles;
+        std::uint32_t reportedBeyondBuffer = 0;
+        std::string copyDiagnostic;
+        const auto deliveredBytes = sampleStorage == SampleStorage::Float64
+            ? copyBufferPartBytes<double>(
+                static_cast<std::uint32_t>(offerBytes),
+                "C4Buf_getDataPartFloat",
+                [buffer, partIndex](double* data, std::uint32_t* capacity) {
+                    return C4Buf_getDataPartFloat(buffer, partIndex, data, capacity);
+                },
+                &doubles, &reportedBeyondBuffer, &copyDiagnostic)
+            : copyBufferPartBytes<std::uint16_t>(
+                static_cast<std::uint32_t>(offerBytes),
+                "C4Buf_getDataPartUint16",
+                [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
+                    return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
+                },
+                &words, &reportedBeyondBuffer, &copyDiagnostic);
+        if (!deliveredBytes) {
+            if (detailedDiagnostics) {
+                logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
+                    + "] because its samples could not be copied: " + copyDiagnostic);
             }
-            copiedSampleCount = *copied;
-            part.samples = std::move(samples);
-        } else {
-            std::vector<std::uint16_t> samples;
-            const auto copied = copyBufferPartSamples<std::uint16_t>(
-                    sampleCount,
-                    "C4Buf_getDataPartUint16",
-                    [buffer, partIndex](std::uint16_t* data, std::uint32_t* capacity) {
-                        return C4Buf_getDataPartUint16(buffer, partIndex, data, capacity);
-                    },
-                    &samples,
-                    &pixelFormatDiagnostic);
-            if (!copied) {
-                if (detailedDiagnostics) {
-                    logWarning("Skipping C4Utility buffer part [index=" + std::to_string(partIndex)
-                        + "] because Uint16 samples could not be copied: " + pixelFormatDiagnostic);
-                }
-                continue;
-            }
-            copiedSampleCount = *copied;
-            part.samples = std::move(samples);
+            absent(copyDiagnostic);
+            continue;
         }
-        const bool geometryMatchesCopy = copiedSampleCount == expectedSamples;
-        if (!geometryMatchesCopy && detailedDiagnostics) {
-            logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
-                + "] returned " + std::to_string(copiedSampleCount)
-                + " samples instead of the metadata count " + std::to_string(expectedSamples)
-                + "; presenting the copied data as a one-row raw preview.");
+
+        const std::uint64_t requiredBytes = usableDimensions ? declaredBytes : *deliveredBytes;
+        const auto whole = partfit::wholeSamples(*deliveredBytes, sampleSize);
+        FramePart part;
+        partfit::Shape shape;
+        if (whole.remainderBytes != 0U) {
+            // Not a whole number of samples: no sample format fits, so publish the bytes as raw Mono8.
+            part.samples = partfit::rawBytes(
+                sampleStorage == SampleStorage::Float64
+                    ? static_cast<const void*>(doubles.data()) : static_cast<const void*>(words.data()),
+                *deliveredBytes);
+            shape = partfit::fitShape(false, 0U, 0U, *deliveredBytes);
+            partKind = FramePartKind::Unknown;
+            fixedPointScale = 1.0;
+            copied.anomalies.note(Reason::UnsupportedFormat, ordinal, partCountValue,
+                shape.width, shape.height, *deliveredBytes, requiredBytes);
+            if (detailedDiagnostics) {
+                logWarning("C4Utility buffer part [index=" + std::to_string(partIndex) + "] returned "
+                    + std::to_string(*deliveredBytes) + " byte(s), not a whole number of "
+                    + std::to_string(sampleSize) + "-byte samples; publishing them as raw Mono8 bytes.");
+            }
+        } else {
+            if (sampleStorage == SampleStorage::Float64) {
+                doubles.resize(static_cast<std::size_t>(whole.samples));
+                part.samples = std::move(doubles);
+            } else {
+                words.resize(static_cast<std::size_t>(whole.samples));
+                part.samples = std::move(words);
+            }
+            shape = partfit::fitShape(usableDimensions,
+                usableDimensions ? static_cast<std::uint64_t>(dimensions[0]) : 0U,
+                declaredSamples, whole.samples);
+            const Reason shapeReason = partfit::anomalyReason(shape.outcome);
+            if (shapeReason != Reason::None) {
+                copied.anomalies.note(shapeReason, ordinal, partCountValue, shape.width, shape.height,
+                    *deliveredBytes, requiredBytes);
+                if (detailedDiagnostics) {
+                    logWarning("C4Utility buffer part [index=" + std::to_string(partIndex)
+                        + "] delivered " + std::to_string(whole.samples) + " sample(s) for the declared "
+                        + (usableDimensions ? std::to_string(declaredSamples) : std::string("(unusable)"))
+                        + "; publishing it at "
+                        + std::to_string(shape.width) + "x" + std::to_string(shape.height)
+                        + (shape.outcome == partfit::ShapeOutcome::Truncated
+                            ? " with the missing samples zero-filled."
+                            : shape.outcome == partfit::ShapeOutcome::Excess
+                                ? " and ignoring the excess."
+                                : " as a one-row raw preview.")
+                        + (dimensionDiagnostic.empty() ? std::string() : " Detail: " + dimensionDiagnostic));
+                }
+            } else if (formatFitted) {
+                copied.anomalies.note(Reason::UnsupportedFormat, ordinal, partCountValue,
+                    shape.width, shape.height, *deliveredBytes, requiredBytes);
+            }
+        }
+        if (reportedBeyondBuffer != 0U) {
+            // The SDK claimed more bytes than the buffer offered; only the offered bytes are read.
+            copied.anomalies.note(Reason::TruncatedData, ordinal, partCountValue, shape.width, shape.height,
+                *deliveredBytes, reportedBeyondBuffer);
+            if (detailedDiagnostics) {
+                logWarning("C4Utility buffer part [index=" + std::to_string(partIndex) + "] reported "
+                    + std::to_string(reportedBeyondBuffer) + " byte(s), more than the "
+                    + std::to_string(*deliveredBytes) + " offered; only the offered bytes are used.");
+            }
         }
         part.kind = partKind;
         part.name = partName;
         part.pixelFormat = pixelFormatName;
-        part.width = geometryMatchesCopy
-            ? static_cast<std::uint32_t>(dimensions[0])
-            : copiedSampleCount;
-        part.height = geometryMatchesCopy
-            ? static_cast<std::uint32_t>(expectedSamples / static_cast<std::uint64_t>(dimensions[0]))
-            : 1U;
-        part.bitsPerSample = sourceBitsPerSample(pixelFormatName);
+        part.width = shape.width;
+        part.height = shape.height;
+        part.bitsPerSample = whole.remainderBytes != 0U ? std::uint8_t{8} : sourceBitsPerSample(pixelFormatName);
         part.sampleScale = fixedPointScale;
         copied.parts.push_back(std::move(part));
     }
 
     if (copied.parts.empty()) {
-        if (errorMessage) *errorMessage = "C4Utility returned no safely copyable data parts.";
-        return false;
-    }
-    if (!copied.isValid()) {
-        if (errorMessage) *errorMessage = "C4Utility produced an invalid frame payload after part filtering.";
+        // Every part held no data at all; there is nothing to publish.
+        if (errorMessage) {
+            *errorMessage = "C4Utility returned no data in any part."
+                + (lastPartError.empty() ? std::string() : " Last part error: " + lastPartError);
+        }
         return false;
     }
     if (hasScan3dGeometry) {

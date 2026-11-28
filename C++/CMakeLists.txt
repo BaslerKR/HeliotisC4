@@ -2,6 +2,8 @@ add_library(heliotis_c4_core STATIC
     HeliotisC4.cpp
     Internal/HeliotisAcquisitionPolicy.cpp
     Internal/HeliotisAcquisitionPolicy.h
+    Internal/HeliotisPartFit.h
+    HeliotisFrameAnomalies.h
     Internal/C4UtilitySdkRuntime.cpp
     Internal/C4UtilitySdkRuntime.h
 )
@@ -195,6 +197,15 @@ if(HELIOTISC4_BUILD_TESTS)
         COMMAND heliotis_c4_frame_contract_test
     )
 
+    add_executable(heliotis_c4_part_fit_test
+        Tests/PartFitTest.cpp
+    )
+    target_link_libraries(heliotis_c4_part_fit_test PRIVATE HeliotisC4::Core)
+    add_test(
+        NAME heliotis_c4_part_fit
+        COMMAND heliotis_c4_part_fit_test
+    )
+
     add_executable(heliotis_c4_acquisition_policy_test
         Tests/HeliotisAcquisitionPolicyTest.cpp
     )
@@ -278,7 +289,7 @@ if(HELIOTISC4_BUILD_TESTS)
 endif()
 
 # Keep contract assertions active in Release validation.
-foreach(module_test IN ITEMS heliotis_c4_sdk_layout_test heliotis_c4_runtime_open_test heliotis_c4_frame_contract_test heliotis_c4_acquisition_policy_test heliotis_c4_graphics_adapter_test heliotis_c4_graphics_stream_test heliotis_c4_source_control_test heliotis_c4_plugin_session_test)
+foreach(module_test IN ITEMS heliotis_c4_sdk_layout_test heliotis_c4_runtime_open_test heliotis_c4_frame_contract_test heliotis_c4_part_fit_test heliotis_c4_acquisition_policy_test heliotis_c4_graphics_adapter_test heliotis_c4_graphics_stream_test heliotis_c4_source_control_test heliotis_c4_plugin_session_test)
     if(TARGET ${module_test})
         target_compile_options(${module_test} PRIVATE
             $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>

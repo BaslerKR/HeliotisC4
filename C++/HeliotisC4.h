@@ -1,10 +1,14 @@
 #pragma once
 
+#include "HeliotisFrameAnomalies.h"
+
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -59,6 +63,15 @@ enum class FramePartKind {
     Confidence
 };
 
+/**
+ * One copied buffer part.
+ *
+ * `width` and `height` are the declared shape. `samples` holds exactly what the
+ * SDK delivered, so a short or longer payload is kept as delivered and the
+ * consumer fits it to the declared shape (zero-filling a short tail). The
+ * `std::uint8_t` alternative carries bytes whose length is not a whole number of
+ * samples, or whose format is unknown; the consumer publishes them as raw Mono8.
+ */
 struct FramePart {
     FramePartKind kind = FramePartKind::Unknown;
     std::string name;
@@ -66,9 +79,25 @@ struct FramePart {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint8_t bitsPerSample = 0;
-    std::variant<std::vector<std::uint16_t>, std::vector<double>> samples;
+    std::variant<std::vector<std::uint16_t>, std::vector<double>, std::vector<std::uint8_t>> samples;
     double sampleScale = 1.0;
 
+    /** Samples (or raw bytes) the part carries, independent of its declared shape. */
+    [[nodiscard]] std::size_t sampleCount() const noexcept
+    {
+        return std::visit([](const auto& values) { return values.size(); }, samples);
+    }
+
+    /** Bytes the part carries, independent of its declared shape. */
+    [[nodiscard]] std::uint64_t sampleBytes() const noexcept
+    {
+        return std::visit([](const auto& values) {
+            using Value = typename std::decay_t<decltype(values)>::value_type;
+            return static_cast<std::uint64_t>(values.size()) * sizeof(Value);
+        }, samples);
+    }
+
+    /** True when the payload is exactly the declared shape; a shape mismatch is still deliverable. */
     [[nodiscard]] bool isValid() const noexcept
     {
         if (width == 0 || height == 0 || !std::isfinite(sampleScale))
@@ -84,9 +113,7 @@ struct FramePart {
         }
 
         const std::size_t expectedSampleCount = unsignedWidth * unsignedHeight;
-        return std::visit([expectedSampleCount](const auto& values) {
-            return values.size() == expectedSampleCount;
-        }, samples);
+        return sampleCount() == expectedSampleCount;
     }
 };
 
@@ -110,7 +137,10 @@ struct Frame {
     std::vector<FramePart> parts;
     std::optional<Scan3dGeometry> scan3dGeometry;
     std::optional<std::uint64_t> timestampNs;
+    /** Deviations seen while copying the SDK buffer; the frame was fitted, not rejected. */
+    HeliotisFrameAnomalies anomalies;
 
+    /** True when every part is exactly its declared shape; an incomplete frame is still deliverable. */
     [[nodiscard]] bool isValid() const noexcept
     {
         if (parts.empty())
