@@ -718,6 +718,35 @@ int main(int argc, char** argv)
         fake::acquiring = false;
         fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
     }
+    {
+        // A Live frame dropped by the host source reports its own reason once per run: a capacity
+        // drop is a capacity failure, not a refusal.
+        struct Case { GraphicsFrameError error; const char* text; const char* other; };
+        const Case cases[] = {
+            {GraphicsFrameError::Capacity, "exceeds the host capacity", "class refused"},
+            {GraphicsFrameError::ClassRefused, "class refused by host", "exceeds the host capacity"},
+        };
+        heliotis::Frame liveFrame;
+        liveFrame.parts = {{heliotis::FramePartKind::Range, "Range", "Mono16", 1, 1, 16,
+                            std::vector<std::uint16_t>{42U}}};
+        for (const Case& drop : cases) {
+            heliotis::HeliotisC4Device device(nullptr);
+            HeliotisC4SourceController controller(&device, nullptr);
+            std::vector<QString> errors;
+            QObject::connect(&controller, &HeliotisC4SourceController::acquisitionError, &controller,
+                [&errors](const QString& message) { errors.push_back(message); });
+            controller.setFrameContextSource(std::make_shared<RefusingContextSource>(drop.error));
+            controller.start();
+            for (int frame = 0; frame < 3; ++frame) fake::frame(heliotis::Frame(liveFrame));
+            require(waitFor([&] { return !errors.empty(); }),
+                    "A Live frame dropped by the host source must surface a failure.");
+            require(errors.size() == 1U && errors.front().contains(QString::fromLatin1(drop.text))
+                        && !errors.front().contains(QString::fromLatin1(drop.other)),
+                    "A Live drop must name its own storage reason once per run.");
+            fake::acquiring = false;
+            fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
+        }
+    }
     if (failures == 0) std::cout << "Heliotis device lifecycle and parameter contracts passed.\n";
     return failures == 0 ? 0 : 1;
 }

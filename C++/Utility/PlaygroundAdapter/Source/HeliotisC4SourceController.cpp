@@ -214,9 +214,10 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
         _storageErrorInRun.compare_exchange_strong(expected, static_cast<std::uint8_t>(error),
                                                    std::memory_order_acq_rel);
     });
-    _graphicsStream->setStorageFailureHandler([this]() {
-        QMetaObject::invokeMethod(this, [this]() {
-            emit acquisitionError(QStringLiteral("Frame storage admission failed: class refused by host or not granted within the admission timeout."));
+    _graphicsStream->setStorageFailureHandler([this](const GraphicsFrameError error) {
+        // The Live message names the same reason a Single reports; the stream raises it once per run.
+        QMetaObject::invokeMethod(this, [this, error]() {
+            emit acquisitionError(QString::fromStdString(singleStorageFailure(error)));
         }, Qt::QueuedConnection);
     });
 }

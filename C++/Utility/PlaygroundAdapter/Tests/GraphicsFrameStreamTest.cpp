@@ -199,7 +199,11 @@ int main()
                 if (throwOnReceipt) throw std::runtime_error("receipt failure");
             });
         auto source = std::make_shared<TrackedContextSource>();
-        stream.setStorageFailureHandler([&]() { ++storageFailures; });
+        std::vector<GraphicsFrameError> failureReasons;
+        stream.setStorageFailureHandler([&](const GraphicsFrameError error) {
+            ++storageFailures;
+            failureReasons.push_back(error);
+        });
         stream.setFrameContextSource(source);
         if (!stream.start(heliotis::HeliotisC4Device::AcquisitionMode::Continuous)) return 1;
 
@@ -240,7 +244,10 @@ int main()
         deviceCallback(heliotis::Frame(frame));
         if (!stream.canStart() || deliveries != 3) return 13;
         if (stream.runtimeDiagnostics().failed != failedBeforeRefusal + 2) return 17;
-        if (storageFailures != 1) return 18;
+        // The handler receives the error of the frame that raised it, so a capacity drop is not
+        // reported as a refusal.
+        if (storageFailures != 1 || failureReasons.size() != 1U
+            || failureReasons.front() != GraphicsFrameError::ClassRefused) return 18;
         source->nextError = GraphicsFrameError::None;
         deviceCallback(heliotis::Frame(frame));
         if (deliveries != 4 || stream.runtimeDiagnostics().delivered != 3) return 19;

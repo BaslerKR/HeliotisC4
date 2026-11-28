@@ -200,7 +200,7 @@ bool HeliotisGraphicsFrameStream::Impl::start(
                     // Only this frame is dropped and counted; the run keeps acquiring and the
                     // next frame asks the source again. The message is surfaced once per run.
                     if (!run->refusalSurfaced.exchange(true, std::memory_order_acq_rel) && _storageFailure)
-                        _storageFailure();
+                        _storageFailure(error);
                 }
                 if (_rejectedRange && rangeRejection.reason != HeliotisRangeRejection::Reason::None)
                     _rejectedRange(rangeRejection);

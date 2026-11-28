@@ -34,7 +34,8 @@ public:
     using RejectedRange = std::function<void(const HeliotisRangeRejection&)>;
     /** Receives the first failed integer image writer rule of a requested image. */
     using RejectedImage = std::function<void(const HeliotisImageRejection&)>;
-    using StorageFailure = std::function<void()>;
+    /** Receives the storage error that dropped a frame, once per run (class refused or capacity). */
+    using StorageFailure = std::function<void(GraphicsFrameError)>;
     /** Receives the storage error of every frame the host source did not admit. */
     using StorageOutcome = std::function<void(GraphicsFrameError)>;
 
@@ -56,7 +57,7 @@ public:
     /** Forwards the storage intensity images are written into; callable while acquiring. */
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source);
     void setStorageFailureHandler(StorageFailure handler);
-    /** Reports why a frame was dropped (class refused, capacity, cold wait, no credit) to its consumer. */
+    /** Reports why each frame was dropped (class refused, capacity, class not prepared, no credit) to its consumer. */
     void setStorageOutcomeHandler(StorageOutcome handler);
     [[nodiscard]] bool canStart(std::string* errorMessage = nullptr) const;
     [[nodiscard]] std::uint64_t droppedFrames() const noexcept;
