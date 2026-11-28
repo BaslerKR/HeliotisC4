@@ -300,6 +300,12 @@ int main(int argc, char** argv)
         require(tool("single", "stale").error == Lifecycle::Conflict,
                 "A stale connection id must conflict.");
 
+        require(tool("single", connection.toStdString()).error == Lifecycle::Unavailable,
+                "Connected Single without a context source must be refused.");
+        require(tool("live-start", connection.toStdString()).error == Lifecycle::Unavailable,
+                "Connected Live without a context source must be refused.");
+        controller.setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
+
         // Parameter inventory, typed values, bounds and stable revisions.
         std::optional<DeviceParameterInventory> inventory;
         require(parameters->requestParameters([&](DeviceParameterInventory value) { inventory = std::move(value); })
@@ -587,6 +593,7 @@ int main(int argc, char** argv)
     {
         heliotis::HeliotisC4Device device(nullptr);
         HeliotisC4SourceController controller(&device);
+        controller.setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
         AbstractSourceController& callable = controller;
         controller.start();
         require(callable.sourceRuntimeDiagnostics(0)->grabbing, "An armed source reports grabbing without a widget.");
@@ -610,7 +617,9 @@ int main(int argc, char** argv)
         const auto stopped = callable.sourceRuntimeDiagnostics(0);
         require(!stopped->grabbing && stopped->delivered == 1 && stopped->failed == 2,
                 "Stopped counters remain observable.");
+        auto oldRun = fake::frame;
         controller.start();
+        oldRun(heliotis::Frame(frame));
         require(callable.sourceRuntimeDiagnostics(0)->delivered == 0 && callable.sourceRuntimeDiagnostics(0)->failed == 0,
                 "A new run resets diagnostics.");
         require(!callable.sourceRuntimeDiagnostics(9), "Unknown source indices are unsupported.");
@@ -623,6 +632,7 @@ int main(int argc, char** argv)
         heliotis::HeliotisC4Device device(nullptr);
         observedRanges.clear();
         HeliotisC4SourceController controller(&device, nullptr, rememberRange, nullptr);
+        controller.setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
         controller.start();
         heliotis::Frame rejected;
         rejected.sequence = 1;
