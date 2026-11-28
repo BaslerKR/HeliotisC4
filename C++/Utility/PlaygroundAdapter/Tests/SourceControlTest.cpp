@@ -504,9 +504,9 @@ int main(int argc, char** argv)
         {
             struct Case { GraphicsFrameError error; const char* text; };
             const Case cases[] = {
-                {GraphicsFrameError::ClassRefused, "class refused by host"},
+                {GraphicsFrameError::ClassRefused, "not granted within the admission timeout"},
                 {GraphicsFrameError::Capacity, "exceeds the host capacity"},
-                {GraphicsFrameError::ClassNotPrepared, "cold wait timed out"},
+                {GraphicsFrameError::ClassNotPrepared, "no prepared storage class"},
             };
             heliotis::Frame refusedFrame;
             refusedFrame.parts = {{heliotis::FramePartKind::Range, "Range", "Mono16", 1, 1, 16,

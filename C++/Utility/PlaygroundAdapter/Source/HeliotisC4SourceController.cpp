@@ -216,7 +216,7 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
     });
     _graphicsStream->setStorageFailureHandler([this]() {
         QMetaObject::invokeMethod(this, [this]() {
-            emit acquisitionError(QStringLiteral("Frame storage admission failed: class refused by host."));
+            emit acquisitionError(QStringLiteral("Frame storage admission failed: class refused by host or not granted within the admission timeout."));
         }, Qt::QueuedConnection);
     });
 }
@@ -425,11 +425,11 @@ std::string HeliotisC4SourceController::singleStorageFailure(const GraphicsFrame
     case GraphicsFrameError::None:
         return "Single acquisition stopped without a converted frame.";
     case GraphicsFrameError::ClassRefused:
-        return "Frame storage admission failed: class refused by host.";
+        return "Frame storage admission failed: class refused by host or not granted within the admission timeout.";
     case GraphicsFrameError::Capacity:
         return "Frame storage admission failed: the frame exceeds the host capacity.";
     case GraphicsFrameError::ClassNotPrepared:
-        return "Frame storage admission failed: no prepared storage class fits the frame (cold wait timed out).";
+        return "Frame storage admission failed: no prepared storage class fits the frame.";
     case GraphicsFrameError::NoReadyCredit:
         return "Frame storage admission failed: no ready storage credit was available.";
     case GraphicsFrameError::Disconnected:
