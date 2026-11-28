@@ -248,6 +248,14 @@ int main(int argc, char** argv)
         require(title == QStringLiteral("Heliotis C4 - H8-0001"),
             "Connect must publish the session title without a widget.");
 
+        require(controller->requestSingle(connection.toStdString(), [](DeviceConnectionResult) {}).error
+                    == DeviceConnectionError::Unavailable,
+            "Connected Single requires an injected frame context source.");
+        require(controller->requestLiveStart(connection.toStdString(), [](DeviceConnectionResult) {}).error
+                    == DeviceConnectionError::Unavailable,
+            "Connected Live requires an injected frame context source.");
+        controller->setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
+
         // The declared init action uses the same session path as the widget.
         auto* moduleTools = qobject_cast<IToolProvider*>(controller);
         auto* execution = qobject_cast<IToolExecution*>(controller);
@@ -283,6 +291,7 @@ int main(int argc, char** argv)
                     }).error == DeviceConnectionError::None
                 && waitFor([&] { return liveArmed && fake::acquiring; }),
             "Live must arm before the Init refusal check.");
+        auto oldLiveCallback = fake::frame;
         require(invokeInit("headless-armed", true).succeeded() == false,
             "Init must be refused while acquisition is armed.");
         bool liveStopped = false;
@@ -345,6 +354,8 @@ int main(int argc, char** argv)
         // Owner Q7: Single issues the device's software trigger itself.
         require(waitFor([&] { return fake::triggers.load() > triggersBeforeSingle; }),
             "Single must issue exactly the device software trigger it needs.");
+        oldLiveCallback(validFrame());
+        require(delivered == 0, "A late callback from the stopped Live run must be ignored.");
         fake::frame(validFrame());
         require(waitFor([&] { return delivered == 1; }), "Single must deliver its converted frame.");
         fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
