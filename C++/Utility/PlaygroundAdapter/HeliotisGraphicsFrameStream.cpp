@@ -49,20 +49,19 @@ public:
         std::shared_ptr<GraphicsFrameContextSource> source;
         std::atomic<bool> cancelled{false};
         std::recursive_mutex deliveryMutex;
+        std::atomic<bool> refusalSurfaced{false};
     };
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
     {
         cancelRun();
         std::lock_guard<std::mutex> lock(_runMutex);
-        if (_source != source) _stickyRefusal.store(false, std::memory_order_release);
         _source = std::move(source);
     }
     void setStorageFailureHandler(StorageFailure handler) { _storageFailure = std::move(handler); }
     bool canStart(std::string* error) const {
         std::lock_guard<std::mutex> lock(_runMutex);
-        if (!_source || _stickyRefusal.load(std::memory_order_acquire)) {
-            if (error) *error = !_source ? "Frame context source is not configured."
-                                       : "Frame storage admission failed: class refused by host.";
+        if (!_source) {
+            if (error) *error = "Frame context source is not configured.";
             return false;
         }
         return true;
@@ -89,7 +88,6 @@ private:
     mutable std::mutex _runMutex;
     std::shared_ptr<GraphicsFrameContextSource> _source;
     std::shared_ptr<AcquisitionRun> _run;
-    std::atomic<bool> _stickyRefusal{false};
     StorageFailure _storageFailure;
     GraphicsFrameCallbackGate _callbackGate;
 };
@@ -144,9 +142,8 @@ bool HeliotisGraphicsFrameStream::Impl::start(
     auto run = std::make_shared<AcquisitionRun>();
     {
         std::lock_guard<std::mutex> lock(_runMutex);
-        if (!_source || _stickyRefusal.load(std::memory_order_acquire)) {
-            if (errorMessage) *errorMessage = !_source ? "Frame context source is not configured."
-                : "Frame storage admission failed: class refused by host.";
+        if (!_source) {
+            if (errorMessage) *errorMessage = "Frame context source is not configured.";
             return false;
         }
         if (_run) _run->cancelled.store(true, std::memory_order_release);
@@ -181,8 +178,10 @@ bool HeliotisGraphicsFrameStream::Impl::start(
                     dropped.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
-                if (error == GraphicsFrameError::ClassRefused) {
-                    if (!_stickyRefusal.exchange(true, std::memory_order_acq_rel) && _storageFailure)
+                if (error == GraphicsFrameError::ClassRefused || error == GraphicsFrameError::Capacity) {
+                    // Only this frame is dropped and counted; the run keeps acquiring and the
+                    // next frame asks the source again. The message is surfaced once per run.
+                    if (!run->refusalSurfaced.exchange(true, std::memory_order_acq_rel) && _storageFailure)
                         _storageFailure();
                 }
                 if (_rejectedRange && rangeRejection.reason != HeliotisRangeRejection::Reason::None)

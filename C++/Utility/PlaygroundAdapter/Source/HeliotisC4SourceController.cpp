@@ -209,6 +209,7 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
             }
         }, std::move(rejectedRange), std::move(rejectedImage));
     _graphicsStream->setStorageFailureHandler([this]() {
+        _storageRefusedInRun.store(true, std::memory_order_release);
         QMetaObject::invokeMethod(this, [this]() {
             emit acquisitionError(QStringLiteral("Frame storage admission failed: class refused by host."));
         }, Qt::QueuedConnection);
@@ -789,6 +790,7 @@ DeviceConnectionResult HeliotisC4SourceController::admitLifecycle(const Lifecycl
     _toolCall = call;
     emit controlChanged();
     const std::uint64_t framesBefore = _deliveredFrames.load();
+    _storageRefusedInRun.store(false, std::memory_order_release);
     const QPointer<HeliotisC4SourceController> guard(this);
     // Single owns its software trigger: the device needs one after arming, and
     // the API call must complete only after the delivered frame (owner Q7).
@@ -857,9 +859,9 @@ void HeliotisC4SourceController::finishTool(const std::shared_ptr<ToolCall>& cal
                   operation == Lifecycle::Discover ? DeviceConnectionEffect::None : DeviceConnectionEffect::Unknown,
                   connectionState()};
     } else if (operation == Lifecycle::Single && _deliveredFrames.load() == framesBefore) {
-        std::string storageError;
-        if (!_graphicsStream || _graphicsStream->canStart(&storageError))
-            storageError = "Single acquisition stopped without a converted frame.";
+        std::string storageError = _storageRefusedInRun.load(std::memory_order_acquire)
+            ? "Frame storage admission failed: class refused by host."
+            : "Single acquisition stopped without a converted frame.";
         result = {DeviceConnectionError::BackendFailure, std::move(storageError),
                   DeviceConnectionEffect::Applied, connectionState()};
     }

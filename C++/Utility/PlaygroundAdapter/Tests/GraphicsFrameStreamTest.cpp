@@ -181,6 +181,7 @@ int main()
     heliotis::HeliotisC4Device device(nullptr);
     int receipts = 0;
     int deliveries = 0;
+    int storageFailures = 0;
     bool throwOnReceipt = false;
     bool throwOnDelivery = false;
     bool receiptPrecedesDelivery = true;
@@ -197,6 +198,7 @@ int main()
                 if (throwOnReceipt) throw std::runtime_error("receipt failure");
             });
         auto source = std::make_shared<TrackedContextSource>();
+        stream.setStorageFailureHandler([&]() { ++storageFailures; });
         stream.setFrameContextSource(source);
         if (!stream.start(heliotis::HeliotisC4Device::AcquisitionMode::Continuous)) return 1;
 
@@ -228,17 +230,27 @@ int main()
         source->nextError = GraphicsFrameError::Disconnected;
         deviceCallback(heliotis::Frame(frame));
         if (!stream.canStart() || stream.droppedFrames() != 1 || deliveries != 3) return 12;
+        // A refused class or capacity drops and counts only that frame; the run is not refused
+        // and the message is surfaced once per run.
+        const auto failedBeforeRefusal = stream.runtimeDiagnostics().failed;
         source->nextError = GraphicsFrameError::ClassRefused;
         deviceCallback(heliotis::Frame(frame));
-        if (stream.canStart() || deliveries != 3) return 13;
+        source->nextError = GraphicsFrameError::Capacity;
+        deviceCallback(heliotis::Frame(frame));
+        if (!stream.canStart() || deliveries != 3) return 13;
+        if (stream.runtimeDiagnostics().failed != failedBeforeRefusal + 2) return 17;
+        if (storageFailures != 1) return 18;
+        source->nextError = GraphicsFrameError::None;
+        deviceCallback(heliotis::Frame(frame));
+        if (deliveries != 4 || stream.runtimeDiagnostics().delivered != 3) return 19;
         auto nextSource = std::make_shared<TrackedContextSource>();
         stream.setFrameContextSource(nextSource);
         if (!stream.start(heliotis::AcquisitionMode::Continuous)) return 14;
         oldCallback(heliotis::Frame(frame));
-        if (deliveries != 3) return 15;
+        if (deliveries != 4) return 15;
         nextSource->onAllocate = [&]() { stream.requestStop(); };
         deviceCallback(heliotis::Frame(frame));
-        if (deliveries != 3 || nextSource->liveAllocations != 0 || nextSource->reserveCalls == 0) return 16;
+        if (deliveries != 4 || nextSource->liveAllocations != 0 || nextSource->reserveCalls == 0) return 16;
         nextSource->onAllocate = {};
         // Waiting without a frame leaves diagnostics unchanged; starting a new run resets them.
         if (!stream.start(heliotis::AcquisitionMode::Continuous)) return 9;
@@ -246,6 +258,6 @@ int main()
     }
     // A callback retained by a dispatcher must be harmless after stream destruction.
     deviceCallback(heliotis::Frame{});
-    if (deliveries != 3) return 6;
+    if (deliveries != 4) return 6;
     std::cout << "Frame receipt, conversion failure, callback exceptions, and shutdown passed.\n";
 }

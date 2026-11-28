@@ -720,26 +720,39 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     std::size_t imageCount = 0;
     std::size_t sampleBytes = 0;
     std::optional<GraphicsImageWriterSource> firstImage;
+    // A part whose size cannot be planned or added to the frame total is skipped and recorded;
+    // the other parts still publish.
+    std::vector<bool> imageSkipped(frame.parts.size(), false);
     if (imageRequested) {
-        for (const auto& part : frame.parts) {
+        for (std::size_t partIndex = 0; partIndex < frame.parts.size(); ++partIndex) {
+            const auto& part = frame.parts[partIndex];
             if (part.kind != FramePartKind::Intensity) continue;
             auto image = planIntensityImage(part, frame.sequence, imageRejection);
             if (!image) continue;
-            const auto plan = planGraphicsImageWrite(*image);
+            GraphicsImageFailure planFailure = GraphicsImageFailure::None;
+            const auto plan = planGraphicsImageWrite(*image, &planFailure);
             if (!plan || !appendAligned(sampleBytes, plan.value().bytes, plan.value().alignment)) {
-                if (storageError) *storageError = GraphicsFrameError::Capacity;
-                return std::nullopt;
+                auto reason = plan ? ImageReason::ExtentOverflow : imageRejectionReason(planFailure);
+                if (reason == ImageReason::None) reason = ImageReason::ExtentOverflow;
+                static_cast<void>(rejectImage(imageRejection, reason, *image));
+                imageSkipped[partIndex] = true;
+                continue;
             }
             if (!firstImage) firstImage = *image;
             ++imageCount;
         }
     }
-    if (!rangePlan && imageCount == 0) return std::nullopt;
     if (rangePlan) {
         const auto plan = planGraphicsRangeWrite(rangePlan->layout);
-        if (!plan || !appendAligned(sampleBytes, plan.value().totalBytes, plan.value().alignment))
-            return std::nullopt;
+        if (!plan || !appendAligned(sampleBytes, plan.value().totalBytes, plan.value().alignment)) {
+            static_cast<void>(rejectRange(rangeRejection, RangeReason::SizeLimitExceeded,
+                static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
+                rangePlan->width, rangePlan->height, rangePlan->sequence,
+                rangePlan->readableBytes, rangePlan->requiredBytes));
+            rangePlan.reset();
+        }
     }
+    if (!rangePlan && imageCount == 0) return std::nullopt;
     if (cancelled && cancelled->load(std::memory_order_acquire)) return std::nullopt;
     auto context = runSource->beginFrame(sampleBytes);
     if (!context) {
@@ -769,7 +782,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     if (imageRequested) for (std::size_t partIndex = 0; partIndex < frame.parts.size(); ++partIndex)
     {
         const auto& part = frame.parts[partIndex];
-        if (part.kind != FramePartKind::Intensity) continue;
+        if (part.kind != FramePartKind::Intensity || imageSkipped[partIndex]) continue;
         auto imageSource = planIntensityImage(part, frame.sequence, nullptr);
         if (!imageSource) continue;
         GraphicsImageFailure failure = GraphicsImageFailure::None;
@@ -781,8 +794,9 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         }
         std::string name = part.name.empty() ? std::string("Intensity") : part.name;
         std::size_t duplicates = 0;
-        for (const auto& candidate : frame.parts) {
-            if (candidate.kind != FramePartKind::Intensity) continue;
+        for (std::size_t candidateIndex = 0; candidateIndex < frame.parts.size(); ++candidateIndex) {
+            const auto& candidate = frame.parts[candidateIndex];
+            if (candidate.kind != FramePartKind::Intensity || imageSkipped[candidateIndex]) continue;
             const bool sameName = candidate.name.empty() ? name == "Intensity" : candidate.name == name;
             if (sameName && planIntensityImage(candidate, frame.sequence, nullptr)) ++duplicates;
         }

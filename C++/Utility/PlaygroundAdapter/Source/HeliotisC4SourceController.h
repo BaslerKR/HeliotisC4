@@ -251,6 +251,7 @@ private:
     std::atomic<std::uint64_t> _statusGeneration{0};
     std::atomic<std::uint64_t> _framesInCurrentAcquisition{0};
     std::atomic<std::uint64_t> _deliveredFrames{0};
+    std::atomic<bool> _storageRefusedInRun{false};
     heliotis::HeliotisC4Device::CallbackId _statusCallbackId = 0;
     std::unique_ptr<heliotis::HeliotisGraphicsFrameStream> _graphicsStream;
     /** Borrowed runtime-owner sinks; null when the Host does not expose the capability. */
