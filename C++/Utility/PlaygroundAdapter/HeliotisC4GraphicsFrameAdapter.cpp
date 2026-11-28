@@ -901,18 +901,9 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     std::optional<PlannedRange> rangePlan;
     if (rangeRequested)
     {
+        // Planned first so an image part can tell whether the range took it as a channel; its bytes
+        // join the frame total after the images, as the storage block order requires.
         rangePlan = planRange(frame, request, rangeRejection, anomalyContext);
-        if (rangePlan) {
-            const auto plan = planGraphicsRangeWrite(rangePlan->layout);
-            if (!plan || !appendAligned(sampleBytes, plan.value().totalBytes, plan.value().alignment)) {
-                static_cast<void>(rejectRange(rangeRejection, RangeReason::SizeLimitExceeded,
-                    static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
-                    rangePlan->width, rangePlan->height, rangePlan->sequence,
-                    rangePlan->readableBytes, rangePlan->requiredBytes));
-                rangePlan.reset();
-                sampleBytes = 0;
-            }
-        }
     }
 
     // A part that cannot be planned or added to the frame total is skipped and recorded;
@@ -935,7 +926,9 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
                     && !(rangePlan && rangePlan->confidencePart == &part);
                 break;
             case FramePartKind::Range:
-                imagePart = rangeRequested && !(rangePlan && rangePlan->rangePart == &part);
+                // An empty typed range is already reported by the range plan as MissingRange.
+                imagePart = rangeRequested && part.sampleCount() != 0U
+                    && !(rangePlan && rangePlan->rangePart == &part);
                 break;
             case FramePartKind::Unknown:
                 imagePart = !(rangePlan && rangePlan->rangePart == &part);
@@ -949,6 +942,16 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
                 continue;
             }
             imageJobs.push_back(*job);
+        }
+    }
+    if (rangePlan) {
+        const auto plan = planGraphicsRangeWrite(rangePlan->layout);
+        if (!plan || !appendAligned(sampleBytes, plan.value().totalBytes, plan.value().alignment)) {
+            static_cast<void>(rejectRange(rangeRejection, RangeReason::SizeLimitExceeded,
+                static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
+                rangePlan->width, rangePlan->height, rangePlan->sequence,
+                rangePlan->readableBytes, rangePlan->requiredBytes));
+            rangePlan.reset();
         }
     }
     if (!rangePlan && imageJobs.empty()) return std::nullopt;
