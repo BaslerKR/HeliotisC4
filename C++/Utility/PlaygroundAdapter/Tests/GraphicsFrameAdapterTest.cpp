@@ -1,6 +1,8 @@
 #include "HeliotisC4GraphicsFrameAdapter.h"
 
-#include "DeviceRuntime/Contract/FrameStorage.h"
+#include "engine/GraphicsFrameContext.h"
+#include <atomic>
+#include <functional>
 #include "graphics/data/GraphicsRangeFrameWriter.h"
 
 #include <algorithm>
@@ -30,68 +32,150 @@ namespace {
     return resource ? &resource->payload : nullptr;
 }
 
-/** Plans one lease the way the worker does for the adapter: blocks laid out back to back. */
-class RecordingProvider final : public IFrameStorageProvider
+/** Managed test backing that tracks live references and enforces exact sample limits. */
+class TrackedManagedAllocation final : public GraphicsAllocation
 {
 public:
-    std::size_t calls = 0U;
-    std::size_t singleCalls = 0U;
-    std::size_t size = 0U;
+    [[nodiscard]] static GraphicsAllocation* create(
+        const std::size_t capacityBytes,
+        const std::uint64_t domainId,
+        std::atomic<std::size_t>* const liveCount) noexcept
+    {
+        auto* rawBuffer = new (std::nothrow) std::byte[capacityBytes + 64U];
+        if (!rawBuffer) return nullptr;
+        const auto raw = reinterpret_cast<std::uintptr_t>(rawBuffer);
+        auto* aligned = reinterpret_cast<std::byte*>((raw + 63U) & ~std::uintptr_t(63U));
+        auto* alloc = new (std::nothrow) TrackedManagedAllocation(
+            rawBuffer, aligned, capacityBytes, domainId, liveCount);
+        if (!alloc) delete[] rawBuffer;
+        return alloc;
+    }
+
+    ~TrackedManagedAllocation() override
+    {
+        if (_liveCount) _liveCount->fetch_sub(1U, std::memory_order_relaxed);
+    }
+
+    void destroy() noexcept override
+    {
+        delete this;
+    }
+
+private:
+    TrackedManagedAllocation(
+        std::byte* rawBuffer,
+        std::byte* alignedBase,
+        std::size_t capacityBytes,
+        std::uint64_t domainId,
+        std::atomic<std::size_t>* liveCount) noexcept
+        : GraphicsAllocation(alignedBase, capacityBytes, GraphicsAllocationOrigin::Managed, 1U,
+                             GraphicsAllocationState::Writable, domainId)
+        , _buffer(rawBuffer)
+        , _liveCount(liveCount)
+    {
+        if (_liveCount) _liveCount->fetch_add(1U, std::memory_order_relaxed);
+    }
+
+    std::unique_ptr<std::byte[]> _buffer;
+    std::atomic<std::size_t>* _liveCount = nullptr;
+};
+
+class TrackedFrameAllocator final : public GraphicsFrameAllocator
+{
+public:
+    TrackedFrameAllocator(
+        GraphicsAllocationRef backing,
+        std::size_t sampleLimit,
+        std::uint64_t domainId,
+        std::atomic<std::size_t>* reserveCalls,
+        std::atomic<std::size_t>* usedBytes)
+        : _backing(std::move(backing))
+        , _sampleLimit(sampleLimit)
+        , _domainId(domainId)
+        , _reserveCalls(reserveCalls)
+        , _usedBytes(usedBytes)
+    {
+    }
+
+    GraphicsResult<GraphicsAllocationSlice> allocate(
+        const std::size_t bytes, const std::size_t alignment) noexcept override
+    {
+        if (_reserveCalls) _reserveCalls->fetch_add(1U, std::memory_order_relaxed);
+        if (alignment == 0U || (alignment & (alignment - 1U)) != 0U) {
+            return GraphicsFrameError::InvalidInput;
+        }
+        const auto baseAddr = reinterpret_cast<std::uintptr_t>(_backing->base());
+        const auto curAddr = baseAddr + static_cast<std::uintptr_t>(_cursor);
+        const std::size_t alignMask = alignment - 1U;
+        const std::size_t misalignment = static_cast<std::size_t>(curAddr & alignMask);
+        const std::size_t pad = (misalignment == 0U) ? 0U : (alignment - misalignment);
+        if (pad > _sampleLimit || _cursor + pad > _sampleLimit
+            || bytes > _sampleLimit - (_cursor + pad)) {
+            return GraphicsFrameError::Capacity;
+        }
+        const std::size_t offset = _cursor + pad;
+        _cursor = offset + bytes;
+        if (_usedBytes) _usedBytes->store(_cursor, std::memory_order_relaxed);
+        return GraphicsAllocationSlice{_backing, offset, bytes};
+    }
+
+    bool isManaged() const noexcept override { return true; }
+    std::uint64_t domainId() const noexcept override { return _domainId; }
+
+private:
+    GraphicsAllocationRef _backing;
+    std::size_t _sampleLimit = 0U;
+    std::uint64_t _domainId = 0U;
+    std::size_t _cursor = 0U;
+    std::atomic<std::size_t>* _reserveCalls = nullptr;
+    std::atomic<std::size_t>* _usedBytes = nullptr;
+};
+
+/** Test context source mirroring WorkerFrameContextSource + FrameScopeAllocator invariants. */
+class TrackedContextSource final : public GraphicsFrameContextSource
+{
+public:
+    static constexpr std::uint64_t kDomainId = 7001U;
+
+    std::atomic<std::size_t> calls{0};
+    std::atomic<std::size_t> reserveCalls{0};
+    std::atomic<std::size_t> requestedBytes{0};
+    std::atomic<std::size_t> usedBytes{0};
+    std::atomic<std::size_t> liveAllocations{0};
+    GraphicsFrameError nextError = GraphicsFrameError::None;
     bool refuse = false;
-    std::shared_ptr<std::uint8_t> block;
-    FrameStorageShape shape;
-    FrameStoragePlan plan;
-
-    std::shared_ptr<std::uint8_t> acquire(std::size_t) override
-    {
-        ++singleCalls;
-        return {};
+    std::size_t singleCalls = 0;
+    bool contains(const void* ptr) const {
+        const auto p = reinterpret_cast<std::uintptr_t>(ptr);
+        const auto base = reinterpret_cast<std::uintptr_t>(lastBackingBase);
+        return base && p >= base && p - base < requestedBytes.load();
     }
+    const std::uint8_t* imageAt(std::size_t) const { return reinterpret_cast<const std::uint8_t*>(lastBackingBase); }
+    std::size_t budgetDelta = 0; // Subtracted from allocated limit to test reserve overflow.
+    const std::byte* lastBackingBase = nullptr;
+    std::function<void()> onBeginFrame;
 
-    FrameStoragePlan acquireFrame(const FrameStorageShape& requested) override
+    GraphicsResult<GraphicsFrameContext> beginFrame(const std::size_t sampleBytes) noexcept override
     {
-        ++calls;
-        shape = requested;
-        FrameStoragePlan result;
-        std::size_t end = 0U;
-        for (const auto& image : requested.images)
-        {
-            end = (end + 63U) / 64U * 64U;
-            result.images.push_back({end, image.size});
-            end += image.size;
+        calls.fetch_add(1U, std::memory_order_relaxed);
+        requestedBytes.store(sampleBytes, std::memory_order_relaxed);
+        usedBytes.store(0U, std::memory_order_relaxed);
+        if (onBeginFrame) onBeginFrame();
+        if (refuse) return GraphicsFrameError::ClassRefused;
+        if (nextError != GraphicsFrameError::None) {
+            return nextError;
         }
-        for (const auto& range : requested.ranges)
-        {
-            end = (end + 63U) / 64U * 64U;
-            GraphicsFrameContext refusingContext(nullptr);
-            GraphicsFrameBuilder measureBuilder(refusingContext);
-            const GraphicsRangeFrameWriter measure(measureBuilder, range.layout);
-            result.ranges.push_back({end, measure.blockBytes()});
-            end += measure.blockBytes();
+        if (sampleBytes == 0U) {
+            return GraphicsFrameError::InvalidInput;
         }
-        result.totalBytes = end;
-        size = end;
-        if (refuse)
-        {
-            result.refusal = FrameStorageRefusal::NoStorage;
-            plan = result;
-            return result;
-        }
-        block = std::shared_ptr<std::uint8_t>(new std::uint8_t[end], std::default_delete<std::uint8_t[]>());
-        result.storage = block;
-        plan = result;
-        return result;
-    }
-
-    [[nodiscard]] bool contains(const void* pointer) const
-    {
-        const auto* bytes = static_cast<const std::uint8_t*>(pointer);
-        return block && bytes >= block.get() && bytes < block.get() + size;
-    }
-
-    [[nodiscard]] const std::uint8_t* imageAt(std::size_t index) const
-    {
-        return block.get() + plan.images.at(index).offset;
+        const std::size_t limit = sampleBytes > budgetDelta ? sampleBytes - budgetDelta : 0U;
+        auto* rawAlloc = TrackedManagedAllocation::create(limit, kDomainId, &liveAllocations);
+        if (!rawAlloc) return GraphicsFrameError::Allocation;
+        auto backing = GraphicsAllocationRef::adoptNew(rawAlloc);
+        lastBackingBase = backing->base();
+        auto allocator = std::make_shared<TrackedFrameAllocator>(
+            std::move(backing), limit, kDomainId, &reserveCalls, &usedBytes);
+        return GraphicsFrameContext(std::move(allocator));
     }
 };
 
@@ -135,6 +219,8 @@ int main()
     frame.parts.at(1).sampleScale = 0.5;
 
     heliotis::HeliotisC4GraphicsFrameAdapter adapter;
+    auto localSource = std::make_shared<GraphicsLocalFrameContextSource>();
+    adapter.setFrameContextSource(localSource);
     const auto scene = adapter.convertFrame(frame, {});
     const RangeFrame* rangePointer = rangeOf(scene);
     if (!rangePointer)
@@ -230,6 +316,23 @@ int main()
         std::cerr << "A part whose sample count does not match its dimensions must stay image-free.\n";
         return 1;
     }
+    {
+        auto tracked = std::make_shared<TrackedContextSource>();
+        adapter.setFrameContextSource(tracked);
+        GraphicsFrameRequest onlyImage;
+        onlyImage.components = GraphicsFrameComponent::Image;
+        if (adapter.convertFrame(frame, onlyImage) || tracked->calls != 0U) {
+            std::cerr << "Truncated image must be rejected before admission.\n";
+            return 1;
+        }
+        auto malformed = frame;
+        malformed.parts.at(1).width = 0;
+        if (adapter.convertFrame(malformed, onlyImage) || tracked->calls != 0U) {
+            std::cerr << "Malformed image must be rejected before admission.\n";
+            return 1;
+        }
+        adapter.setFrameContextSource(localSource);
+    }
     frame.parts.at(1).bitsPerSample = 16;
     frame.parts.at(1).samples = std::vector<std::uint16_t>{10U, 20U, 30U, 40U};
 
@@ -237,9 +340,18 @@ int main()
     // bytes; every range span shares the block the writer acquired.
     // Each converted payload takes exactly one acquire: one range block and one
     // intensity image block for this frame.
-    auto providedHolder = std::make_shared<RecordingProvider>();
+    auto providedHolder = std::make_shared<TrackedContextSource>();
     auto& providedStorage = *providedHolder;
-    adapter.setFrameStorageProvider(providedHolder);
+    adapter.setFrameContextSource(providedHolder);
+    GraphicsRangeFrameLayout expectedLayout;
+    expectedLayout.width = 2;
+    expectedLayout.height = 2;
+    expectedLayout.channels.intensity = true;
+    expectedLayout.channels.intensityRaw = true;
+    const auto expectedRangePlan = planGraphicsRangeWrite(expectedLayout);
+    std::size_t expectedBytes = 8;
+    if (!expectedRangePlan || !appendAligned(expectedBytes, expectedRangePlan.value().totalBytes,
+                                              expectedRangePlan.value().alignment)) return 1;
     const auto providedScene = adapter.convertFrame(frame, {});
     const RangeFrame* providedRange = rangeOf(providedScene);
     const std::array<float, 4> expectedZ{1.5F, 2.5F, 3.5F, 4.5F};
@@ -247,7 +359,6 @@ int main()
     const std::array<std::uint16_t, 4> expectedRaw{10U, 20U, 30U, 40U};
     if (!providedScene || !providedRange || providedScene->images().size() != 1U
         || providedStorage.calls != 1U || providedStorage.singleCalls != 0U
-        || providedStorage.shape.images.size() != 1U || providedStorage.shape.ranges.size() != 1U
         || !providedStorage.contains(providedRange->zValues.data())
         || !providedStorage.contains(providedRange->intensity.data())
         || providedRange->validMask.size() != 0U
@@ -257,54 +368,24 @@ int main()
                providedRange->intensity.cbegin())
         || !std::equal(expectedRaw.begin(), expectedRaw.end(), providedRange->intensityRaw.cbegin())
         || providedScene->images().front().payload.data() != providedStorage.imageAt(0)
-        || reinterpret_cast<const std::uint8_t*>(providedRange->zValues.data())
-               != providedStorage.block.get() + providedStorage.plan.ranges[0].offset
+        || providedStorage.requestedBytes.load() != expectedBytes
+        || providedStorage.requestedBytes.load() != providedStorage.usedBytes.load()
         || std::memcmp(providedStorage.imageAt(0), mono16Bytes.data(), mono16Bytes.size()) != 0)
     {
         std::cerr << "One provided lease must carry the range spans and the image bytes.\n";
         return 1;
     }
     {
-        // The shape carries exactly the fields of the frame that is then published.
-        const auto& rangeShape = providedStorage.shape.ranges.front();
-        const auto& imageShape = providedStorage.shape.images.front();
-        const auto& published = providedScene->ranges().front();
-        const auto& publishedImage = providedScene->images().front();
-        if (rangeShape.descriptor.id != published.descriptor.id
-            || rangeShape.descriptor.displayName != published.descriptor.displayName
-            || rangeShape.descriptor.groupId != published.descriptor.groupId
-            || rangeShape.layout.width != providedRange->width || rangeShape.layout.height != providedRange->height
-            || rangeShape.lengthUnit != providedRange->lengthUnit
-            || rangeShape.xyCoordinateMode != providedRange->xyCoordinateMode
-            || rangeShape.sensorType != providedRange->sensorType || rangeShape.frameId != providedRange->frameId
-            || rangeShape.rangeBits != providedRange->rangeBits
-            || rangeShape.intensityBits != providedRange->intensityBits
-            || rangeShape.rangeField.id != providedRange->rangeField.id
-            || rangeShape.intensityField.id != providedRange->intensityField.id
-            || imageShape.descriptor.id != publishedImage.descriptor.id
-            || imageShape.descriptor.displayName != publishedImage.descriptor.displayName
-            || imageShape.width != publishedImage.payload.width || imageShape.height != publishedImage.payload.height
-            || imageShape.stride != publishedImage.payload.stride || imageShape.size != publishedImage.payload.pixels.size()
-            || imageShape.pixelFormat != publishedImage.payload.pixelFormat
-            || imageShape.sourceFormat != publishedImage.payload.sourceFormat
-            || providedStorage.shape.metadata.frameId != providedScene->metadata().frameId
-            || providedStorage.shape.metadata.frameIndex != providedScene->metadata().frameIndex)
-        {
-            std::cerr << "The planned shape must equal the published frame.\n";
-            return 1;
-        }
-    }
-    {
-        auto refusing = std::make_shared<RecordingProvider>();
+        auto refusing = std::make_shared<TrackedContextSource>();
         refusing->refuse = true;
-        adapter.setFrameStorageProvider(refusing);
+        adapter.setFrameContextSource(refusing);
         if (adapter.convertFrame(frame, {}).has_value() || refusing->calls != 1U || refusing->singleCalls != 0U)
         {
             std::cerr << "A refused frame plan must drop the range and image with one provider call.\n";
             return 1;
         }
     }
-    adapter.setFrameStorageProvider({});
+    adapter.setFrameContextSource(localSource);
 
     {
         // A range with two intensity images shares one lease and one admission.
@@ -318,24 +399,21 @@ int main()
             16,
             std::vector<std::uint16_t>{50U, 60U, 70U, 80U}
         });
-        auto holder = std::make_shared<RecordingProvider>();
-        adapter.setFrameStorageProvider(holder);
+        auto holder = std::make_shared<TrackedContextSource>();
+        adapter.setFrameContextSource(holder);
         const auto converted = adapter.convertFrame(multi, {});
         if (!converted || converted->ranges().size() != 1U || converted->images().size() != 2U
             || holder->calls != 1U || holder->singleCalls != 0U
-            || holder->shape.images.size() != 2U || holder->shape.ranges.size() != 1U
-            || holder->plan.images.size() != 2U
-            || converted->images().front().payload.data() != holder->imageAt(0)
-            || converted->images().back().payload.data() != holder->imageAt(1)
+            || holder->requestedBytes.load() != holder->usedBytes.load()
+            || !holder->contains(converted->images().front().payload.data())
+            || !holder->contains(converted->images().back().payload.data())
             || converted->images().front().descriptor.displayName == converted->images().back().descriptor.displayName
-            || holder->shape.images[0].descriptor.displayName != converted->images()[0].descriptor.displayName
-            || holder->shape.images[1].descriptor.displayName != converted->images()[1].descriptor.displayName
             || !holder->contains(converted->ranges().front().payload.zValues.data()))
         {
             std::cerr << "A range with several intensity images must share one planned lease.\n";
             return 1;
         }
-        adapter.setFrameStorageProvider({});
+        adapter.setFrameContextSource(localSource);
     }
 
     GraphicsFrameRequest imageOnlyRequest;
@@ -510,9 +588,9 @@ int main()
         full.scan3dGeometry = heliotis::Scan3dGeometry{
             "RectifiedC", "um", 2.0, 3.0, 0.5, 100.0, 200.0, -10.0};
 
-        auto storageHolder = std::make_shared<RecordingProvider>();
+        auto storageHolder = std::make_shared<TrackedContextSource>();
         auto& storage = *storageHolder;
-        adapter.setFrameStorageProvider(storageHolder);
+        adapter.setFrameContextSource(storageHolder);
         const auto converted = adapter.convertFrame(full, {});
         const RangeFrame* range = rangeOf(converted);
         if (!converted || !range || converted->ranges().size() != 1U || !converted->images().empty()
@@ -577,7 +655,7 @@ int main()
             std::cerr << "Every converted range, intensity and confidence field must survive.\n";
             return 1;
         }
-        adapter.setFrameStorageProvider({});
+        adapter.setFrameContextSource(localSource);
     }
 
     // Integer range + intensity + confidence samples keep every raw channel and
@@ -619,9 +697,9 @@ int main()
         raw.parts.at(0).sampleScale = 0.5;
         raw.parts.at(1).sampleScale = 0.5;
 
-        auto storageHolder = std::make_shared<RecordingProvider>();
+        auto storageHolder = std::make_shared<TrackedContextSource>();
         auto& storage = *storageHolder;
-        adapter.setFrameStorageProvider(storageHolder);
+        adapter.setFrameContextSource(storageHolder);
         const auto converted = adapter.convertFrame(raw, {});
         const RangeFrame* range = rangeOf(converted);
         const std::array<std::uint16_t, 4> expectedRange{2U, 4U, 6U, 8U};
@@ -669,7 +747,7 @@ int main()
             std::cerr << "One lease must carry the range block and the intensity image block.\n";
             return 1;
         }
-        adapter.setFrameStorageProvider({});
+        adapter.setFrameContextSource(localSource);
     }
 
     // A requested range can fail while a valid intensity image from the same
@@ -772,9 +850,9 @@ int main()
         // A refused frame plan drops the whole frame after one provider call: the range keeps the
         // evidence of its own plan or reports the refusal with the planned block bytes, and the
         // image reports StorageRefused. Nothing is retried component by component.
-        auto refusing = std::make_shared<RecordingProvider>();
+        auto refusing = std::make_shared<TrackedContextSource>();
         refusing->refuse = true;
-        adapter.setFrameStorageProvider(refusing);
+        adapter.setFrameContextSource(refusing);
         rangeRejection = {};
         imageRejection = {};
         const auto refusedPreview = adapter.convertFrameWithRejection(
@@ -809,7 +887,7 @@ int main()
         {
             return 1;
         }
-        adapter.setFrameStorageProvider({});
+        adapter.setFrameContextSource(localSource);
 
         auto optional = input;
         optional.parts.pop_back();
