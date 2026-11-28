@@ -12,6 +12,7 @@
 #include <optional>
 
 class IFrameStorageProvider;
+class GraphicsFrameContextSource;
 
 namespace heliotis {
 
@@ -133,6 +134,7 @@ public:
      * frame; the adapter never retries component by component. A null provider restores ordinary
      * per-component allocation.
      */
+    void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source);
     void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider);
 
 private:
@@ -146,6 +148,7 @@ private:
 
     mutable std::mutex _storageMutex;
     std::shared_ptr<IFrameStorageProvider> _provider;
+    std::shared_ptr<GraphicsFrameContextSource> _contextSource;
 };
 
 } // namespace heliotis

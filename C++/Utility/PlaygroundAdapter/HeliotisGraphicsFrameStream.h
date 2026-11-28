@@ -14,6 +14,7 @@
 #include <string>
 
 class IFrameStorageProvider;
+class GraphicsFrameContextSource;
 
 namespace heliotis {
 
@@ -48,6 +49,7 @@ public:
     ~HeliotisGraphicsFrameStream();
 
     /** Forwards the storage intensity images are written into; callable while acquiring. */
+    void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source);
     void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider);
 
     HeliotisGraphicsFrameStream(const HeliotisGraphicsFrameStream&) = delete;

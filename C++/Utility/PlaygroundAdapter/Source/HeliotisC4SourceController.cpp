@@ -210,6 +210,11 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
         }, std::move(rejectedRange), std::move(rejectedImage));
 }
 
+void HeliotisC4SourceController::setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
+{
+    if (_graphicsStream) _graphicsStream->setFrameContextSource(std::move(source));
+}
+
 void HeliotisC4SourceController::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
 {
     if (!_graphicsStream) return;

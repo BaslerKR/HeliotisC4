@@ -677,6 +677,12 @@ struct PlannedRange
 
 namespace heliotis {
 
+void HeliotisC4GraphicsFrameAdapter::setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
+{
+    std::lock_guard<std::mutex> lock(_storageMutex);
+    _contextSource = std::move(source);
+}
+
 void HeliotisC4GraphicsFrameAdapter::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
 {
     std::lock_guard<std::mutex> lock(_storageMutex);

@@ -44,6 +44,11 @@ public:
     void requestStop() noexcept;
     void stop();
     bool acquiring() const { return _device && _device->isAcquiring(); }
+    void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
+    {
+        _adapter.setFrameContextSource(std::move(source));
+    }
+
     void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
     {
         _adapter.setFrameStorageProvider(std::move(provider));
@@ -189,6 +194,11 @@ HeliotisGraphicsFrameStream::HeliotisGraphicsFrameStream(
 }
 
 HeliotisGraphicsFrameStream::~HeliotisGraphicsFrameStream() = default;
+
+void HeliotisGraphicsFrameStream::setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
+{
+    if (_impl) _impl->setFrameContextSource(std::move(source));
+}
 
 void HeliotisGraphicsFrameStream::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
 {
