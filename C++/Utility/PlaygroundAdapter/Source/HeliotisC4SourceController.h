@@ -216,6 +216,8 @@ private:
     /** Completes the accepted lifecycle call on the controller thread. */
     void finishTool(const std::shared_ptr<ToolCall>& call, Lifecycle operation, const QString& error,
                     std::uint64_t framesBefore);
+    /** Failure text of a Single whose frame was dropped; it names the storage reason. */
+    [[nodiscard]] static std::string singleStorageFailure(GraphicsFrameError reason);
     /** Applies the shared GUI/API admission rules for parameter calls. */
     [[nodiscard]] DeviceParameterResult parameterAdmission(bool softwareTrigger);
     /** Runs one exact read, write or command on a module worker. */
@@ -251,7 +253,8 @@ private:
     std::atomic<std::uint64_t> _statusGeneration{0};
     std::atomic<std::uint64_t> _framesInCurrentAcquisition{0};
     std::atomic<std::uint64_t> _deliveredFrames{0};
-    std::atomic<bool> _storageRefusedInRun{false};
+    /** First `GraphicsFrameError` of the current run; None while every frame was admitted. */
+    std::atomic<std::uint8_t> _storageErrorInRun{0};
     heliotis::HeliotisC4Device::CallbackId _statusCallbackId = 0;
     std::unique_ptr<heliotis::HeliotisGraphicsFrameStream> _graphicsStream;
     /** Borrowed runtime-owner sinks; null when the Host does not expose the capability. */

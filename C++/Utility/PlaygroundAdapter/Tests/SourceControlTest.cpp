@@ -117,6 +117,17 @@ void rememberRange(const DeviceRangeRejectionObservation& observation) noexcept
     observedRanges.push_back(observation);
 }
 
+/** Host source that refuses every frame with one fixed storage error. */
+class RefusingContextSource final : public GraphicsFrameContextSource
+{
+public:
+    explicit RefusingContextSource(const GraphicsFrameError error) : _error(error) {}
+    GraphicsResult<GraphicsFrameContext> beginFrame(std::size_t) noexcept override { return _error; }
+
+private:
+    GraphicsFrameError _error;
+};
+
 int failures = 0;
 
 void require(const bool condition, const char* message)
@@ -487,6 +498,35 @@ int main(int argc, char** argv)
         backend.pending({});
         require(toolResult && toolResult->error != Lifecycle::None,
                 "Single must fail when no frame was converted.");
+
+        // A Single whose one frame the host source did not admit completes at once with the reason;
+        // it neither waits for a deadline nor for the user to end it.
+        {
+            struct Case { GraphicsFrameError error; const char* text; };
+            const Case cases[] = {
+                {GraphicsFrameError::ClassRefused, "class refused by host"},
+                {GraphicsFrameError::Capacity, "exceeds the host capacity"},
+                {GraphicsFrameError::ClassNotPrepared, "cold wait timed out"},
+            };
+            heliotis::Frame refusedFrame;
+            refusedFrame.parts = {{heliotis::FramePartKind::Range, "Range", "Mono16", 1, 1, 16,
+                                   std::vector<std::uint16_t>{42U}}};
+            for (const Case& refusal : cases) {
+                controller.setFrameContextSource(std::make_shared<RefusingContextSource>(refusal.error));
+                require(tool("single", connection.toStdString()).error == Lifecycle::None,
+                        "A Single must be admitted before its frame is refused.");
+                require(controller.grabOne() && fake::acquiring, "The Single run must arm the device.");
+                fake::frame(heliotis::Frame(refusedFrame));
+                // The device ends a Single after its one frame, whatever became of that frame.
+                fake::acquiring = false;
+                fake::status(heliotis::HeliotisC4Device::Status::Acquisition, false);
+                backend.pending({});
+                require(toolResult && toolResult->error == Lifecycle::BackendFailure
+                            && toolResult->message.find(refusal.text) != std::string::npos,
+                        "A Single dropped by the host source must complete with the refusal reason.");
+            }
+            controller.setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
+        }
 
         // Declared Init: typed confirm, shared session path, completion and error.
         std::optional<ApiResult<QJsonValue>> initResult;

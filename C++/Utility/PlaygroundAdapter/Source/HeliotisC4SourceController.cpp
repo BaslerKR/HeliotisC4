@@ -208,8 +208,13 @@ HeliotisC4SourceController::HeliotisC4SourceController(heliotis::HeliotisC4Devic
                 emit acquisitionFrameReceived();
             }
         }, std::move(rejectedRange), std::move(rejectedImage));
+    _graphicsStream->setStorageOutcomeHandler([this](const GraphicsFrameError error) {
+        // The first storage error of the run is the reason a Single reports when it drops its frame.
+        auto expected = static_cast<std::uint8_t>(GraphicsFrameError::None);
+        _storageErrorInRun.compare_exchange_strong(expected, static_cast<std::uint8_t>(error),
+                                                   std::memory_order_acq_rel);
+    });
     _graphicsStream->setStorageFailureHandler([this]() {
-        _storageRefusedInRun.store(true, std::memory_order_release);
         QMetaObject::invokeMethod(this, [this]() {
             emit acquisitionError(QStringLiteral("Frame storage admission failed: class refused by host."));
         }, Qt::QueuedConnection);
@@ -413,6 +418,26 @@ void HeliotisC4SourceController::handleFrame(GraphicsFrame&& payload, const unsi
 }
 
 // --- Device tools --------------------------------------------------------
+
+std::string HeliotisC4SourceController::singleStorageFailure(const GraphicsFrameError reason)
+{
+    switch (reason) {
+    case GraphicsFrameError::None:
+        return "Single acquisition stopped without a converted frame.";
+    case GraphicsFrameError::ClassRefused:
+        return "Frame storage admission failed: class refused by host.";
+    case GraphicsFrameError::Capacity:
+        return "Frame storage admission failed: the frame exceeds the host capacity.";
+    case GraphicsFrameError::ClassNotPrepared:
+        return "Frame storage admission failed: no prepared storage class fits the frame (cold wait timed out).";
+    case GraphicsFrameError::NoReadyCredit:
+        return "Frame storage admission failed: no ready storage credit was available.";
+    case GraphicsFrameError::Disconnected:
+        return "Frame storage admission failed: the host storage is disconnected.";
+    default:
+        return "Frame storage admission failed: storage error " + std::to_string(static_cast<int>(reason)) + ".";
+    }
+}
 
 /** One accepted tool request; delivery happens exactly once. */
 struct HeliotisC4SourceController::ToolCall {
@@ -790,7 +815,7 @@ DeviceConnectionResult HeliotisC4SourceController::admitLifecycle(const Lifecycl
     _toolCall = call;
     emit controlChanged();
     const std::uint64_t framesBefore = _deliveredFrames.load();
-    _storageRefusedInRun.store(false, std::memory_order_release);
+    _storageErrorInRun.store(static_cast<std::uint8_t>(GraphicsFrameError::None), std::memory_order_release);
     const QPointer<HeliotisC4SourceController> guard(this);
     // Single owns its software trigger: the device needs one after arming, and
     // the API call must complete only after the delivered frame (owner Q7).
@@ -859,10 +884,10 @@ void HeliotisC4SourceController::finishTool(const std::shared_ptr<ToolCall>& cal
                   operation == Lifecycle::Discover ? DeviceConnectionEffect::None : DeviceConnectionEffect::Unknown,
                   connectionState()};
     } else if (operation == Lifecycle::Single && _deliveredFrames.load() == framesBefore) {
-        std::string storageError = _storageRefusedInRun.load(std::memory_order_acquire)
-            ? "Frame storage admission failed: class refused by host."
-            : "Single acquisition stopped without a converted frame.";
-        result = {DeviceConnectionError::BackendFailure, std::move(storageError),
+        // The device ends a Single right after its one frame, so a dropped frame completes the call
+        // at once; the failure names the storage reason instead of waiting for a deadline.
+        const auto reason = static_cast<GraphicsFrameError>(_storageErrorInRun.load(std::memory_order_acquire));
+        result = {DeviceConnectionError::BackendFailure, singleStorageFailure(reason),
                   DeviceConnectionEffect::Applied, connectionState()};
     }
     emit controlChanged();
