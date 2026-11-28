@@ -49,10 +49,6 @@ public:
         _adapter.setFrameContextSource(std::move(source));
     }
 
-    void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
-    {
-        _adapter.setFrameStorageProvider(std::move(provider));
-    }
     std::atomic<std::uint64_t> delivered{0};
     std::atomic<std::uint64_t> failed{0};
 
@@ -198,11 +194,6 @@ HeliotisGraphicsFrameStream::~HeliotisGraphicsFrameStream() = default;
 void HeliotisGraphicsFrameStream::setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source)
 {
     if (_impl) _impl->setFrameContextSource(std::move(source));
-}
-
-void HeliotisGraphicsFrameStream::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
-{
-    if (_impl) _impl->setFrameStorageProvider(std::move(provider));
 }
 
 bool HeliotisGraphicsFrameStream::start(

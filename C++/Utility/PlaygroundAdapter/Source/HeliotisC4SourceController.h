@@ -4,7 +4,6 @@
 #include "DeviceRuntime/Contract/DeviceConnectionControl.h"
 #include "DeviceRuntime/Contract/DeviceImageDiagnostics.h"
 #include "DeviceRuntime/Contract/DeviceParameterControl.h"
-#include "DeviceRuntime/Contract/FrameStorage.h"
 #include "DeviceRuntime/Contract/FrameContextClient.h"
 #include "HeliotisC4System.h"
 #include "Tools/ToolProvider.h"
@@ -79,13 +78,12 @@ public:
 /** Adapts worker-owned Heliotis frames, status, tools and parameters into the host contracts. */
 class HeliotisC4SourceController final
     : public AbstractSourceController, public IDeviceConnectionControl, public IDeviceParameterControl,
-      public IFrameStorageClient, public IFrameContextClient, public IToolProvider, public IToolExecution {
+      public IFrameContextClient, public IToolProvider, public IToolExecution {
     Q_OBJECT
-    Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient IFrameContextClient IToolProvider IToolExecution)
+    Q_INTERFACES(IDeviceConnectionControl IDeviceParameterControl IFrameContextClient IToolProvider IToolExecution)
 
 public:
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source) override;
-    void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
     using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
     /**
      * @brief Creates the controller with the runtime owner's optional rejection sinks.

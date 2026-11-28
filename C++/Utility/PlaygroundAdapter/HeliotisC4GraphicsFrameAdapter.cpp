@@ -1,6 +1,7 @@
 #include "HeliotisC4GraphicsFrameAdapter.h"
 
-#include "DeviceRuntime/Contract/FrameStorage.h"
+#include "engine/GraphicsFrameContext.h"
+#include "engine/detail/GraphicsWriteLayout.h"
 #include "graphics/data/GraphicsRangeFrameWriter.h"
 
 #include <algorithm>
@@ -348,16 +349,8 @@ using ImageReason = heliotis::HeliotisImageRejection::Reason;
         : GraphicsImageBitAlignment::Packed;
     source.frameSequence = sequence;
 
-    // A storage that always refuses validates the layout without copying a byte: any failure other
-    // than its own refusal is a layout rule of the real writer.
     GraphicsImageFailure failure = GraphicsImageFailure::None;
-    GraphicsFrameContext refusingContext(nullptr);
-    GraphicsFrameBuilder probeBuilder(refusingContext);
-    const auto probe = writeGraphicsImageWithFailure(probeBuilder, source, &failure);
-    if (failure != GraphicsImageFailure::StorageRefused || probe.isValid()) {
-        // Only an otherwise usable integer intensity part that the real writer
-        // refused is observable. Floating, empty, oversized and malformed parts
-        // above are intentionally skipped without a warning.
+    if (!planGraphicsImageWrite(source, &failure)) {
         const ImageReason reason = imageRejectionReason(failure);
         if (reason != ImageReason::None) return rejectImage(rejection, reason, source);
         return std::nullopt;
@@ -503,17 +496,11 @@ struct PlannedRange
 
     const std::uint64_t readableBytes = sampleBytes(rangePart);
     const std::uint64_t requiredBytes = gridBytes(rangePart, width, height);
-    {
-        // A storage that always refuses validates the layout and reports the block size; any
-        // failure other than its own refusal is a real writer rule.
-        GraphicsFrameContext refusingContext(nullptr);
-        GraphicsFrameBuilder probeBuilder(refusingContext);
-        const GraphicsRangeFrameWriter probe(probeBuilder, layout);
-        if (probe.failure() != GraphicsRangeFrameWriterFailure::StorageRefused)
-        {
-            return rejectRangeWriter(rejection, probe, partIndex, partCount, width, height,
-                                     frame.sequence, readableBytes, requiredBytes);
-        }
+    const auto rangeWritePlan = planGraphicsRangeWrite(layout);
+    if (!rangeWritePlan) {
+        return rejectRange(rejection, rangeWritePlan.error() == GraphicsFrameError::Capacity
+            ? RangeReason::SizeLimitExceeded : RangeReason::InvalidDimensions,
+            partIndex, partCount, width, height, frame.sequence, readableBytes, requiredBytes);
     }
 
     PlannedRange planned;
@@ -683,12 +670,6 @@ void HeliotisC4GraphicsFrameAdapter::setFrameContextSource(std::shared_ptr<Graph
     _contextSource = std::move(source);
 }
 
-void HeliotisC4GraphicsFrameAdapter::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
-{
-    std::lock_guard<std::mutex> lock(_storageMutex);
-    _provider = std::move(provider);
-}
-
 std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertFrameWithRejection(
     const Frame& frame,
     const GraphicsFrameRequest& request,
@@ -706,11 +687,12 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
     HeliotisRangeRejection* rangeRejection,
     HeliotisImageRejection* imageRejection) const
 {
-    std::shared_ptr<IFrameStorageProvider> provider;
+    std::shared_ptr<GraphicsFrameContextSource> source;
     {
         std::lock_guard<std::mutex> lock(_storageMutex);
-        provider = _provider;
+        source = _contextSource;
     }
+    if (!source) return std::nullopt;
     const bool rangeRequested =
         hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::Range)
         || hasGraphicsFrameComponent(request.components, GraphicsFrameComponent::PointCloud)
@@ -754,85 +736,35 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         return std::nullopt;
     }
 
-    // Descriptors, display names (with duplicate suffixes) and metadata are final before planning,
-    // so the frame serializes exactly as the plan assumed.
-    GraphicsFrameContent staged;
-    if (rangePlan)
-    {
-        staged.addRange(resourceId("range", rangePlan->partIndex), RangeFrame{}, "Range", kResourceGroup);
-    }
-    for (const auto& image : imagePlans)
-    {
-        const FramePart& part = frame.parts[image.partIndex];
-        staged.addImage(resourceId("image", image.partIndex), GraphicsImage{},
-                        part.name.empty() ? std::string("Intensity") : part.name, kResourceGroup);
-    }
-    std::vector<std::string> names;
-    for (const auto& image : staged.images) names.push_back(image.descriptor.displayName);
-    for (std::size_t index = 0; index < staged.images.size(); ++index)
-    {
-        if (std::count(names.cbegin(), names.cend(), names[index]) > 1)
-        {
-            staged.images[index].descriptor.displayName += " " + std::to_string(index + 1);
-        }
-    }
-    staged.metadata.sourceName = "Heliotis C4";
-    staged.metadata.frameId = frame.frameId;
-    staged.metadata.frameIndex = frame.sequence;
-
-    FrameStoragePlan storagePlan;
-    if (provider)
-    {
-        FrameStorageShape shape;
-        shape.metadata = staged.metadata;
-        bool shaped = true;
-        for (std::size_t index = 0; index < imagePlans.size(); ++index)
-        {
-            auto imageShape = frameStorageImageShape(staged.images[index].descriptor,
-                staged.images[index].initialView, imagePlans[index].source);
-            if (!imageShape)
-            {
-                shaped = false;
-                break;
-            }
-            shape.images.push_back(std::move(*imageShape));
-        }
-        if (rangePlan)
-        {
-            shape.ranges.push_back(frameStorageRangeShape(staged.ranges.front().descriptor,
-                staged.ranges.front().initialView, rangePlan->layout, rangePlan->fields));
-        }
-        if (shaped) storagePlan = provider->acquireFrame(shape);
-        if (!storagePlan.succeeded())
-        {
-            // One refusal ends the frame attempt; the adapter never retries component by component.
-            if (rangePlan && rangeRejection)
-            {
-                if (rangeRejection->reason == RangeReason::None)
-                {
-                    rangeRejection->requestedStorageBytes =
-                        static_cast<std::uint64_t>(storagePlan.totalBytes);
-                }
-                static_cast<void>(rejectRange(rangeRejection, RangeReason::StorageRefused,
-                    static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
-                    rangePlan->width, rangePlan->height, rangePlan->sequence,
-                    rangePlan->readableBytes, rangePlan->requiredBytes));
-            }
-            if (!imagePlans.empty())
-            {
-                static_cast<void>(rejectImage(imageRejection, ImageReason::StorageRefused,
-                                              imagePlans.front().source));
-            }
+    std::size_t sampleBytes = 0;
+    for (const auto& image : imagePlans) {
+        const auto plan = planGraphicsImageWrite(image.source);
+        if (!plan || !appendAligned(sampleBytes, plan.value().bytes, plan.value().alignment))
             return std::nullopt;
-        }
     }
-
-    GraphicsFrameContext plannedContext =
-        provider ? frameStoragePlanContext(storagePlan) : GraphicsFrameContext::local();
-    GraphicsFrameBuilder frameBuilder(plannedContext);
-    frameBuilder.content() = std::move(staged);
+    if (rangePlan) {
+        const auto plan = planGraphicsRangeWrite(rangePlan->layout);
+        if (!plan || !appendAligned(sampleBytes, plan.value().totalBytes, plan.value().alignment))
+            return std::nullopt;
+    }
+    auto context = source->beginFrame(sampleBytes);
+    if (!context) {
+        if (rangePlan && rangeRejection) {
+            rangeRejection->requestedStorageBytes = sampleBytes;
+            static_cast<void>(rejectRange(rangeRejection, RangeReason::StorageRefused,
+                static_cast<std::uint32_t>(rangePlan->partIndex), rangePlan->partCount,
+                rangePlan->width, rangePlan->height, rangePlan->sequence,
+                rangePlan->readableBytes, rangePlan->requiredBytes));
+        }
+        if (!imagePlans.empty()) static_cast<void>(rejectImage(imageRejection,
+            ImageReason::StorageRefused, imagePlans.front().source));
+        return std::nullopt;
+    }
+    GraphicsFrameBuilder frameBuilder(std::move(context).value());
     auto& result = frameBuilder.content();
-
+    result.metadata.sourceName = "Heliotis C4";
+    result.metadata.frameId = frame.frameId;
+    result.metadata.frameIndex = frame.sequence;
     for (std::size_t index = 0; index < imagePlans.size(); ++index)
     {
         GraphicsImageFailure failure = GraphicsImageFailure::None;
@@ -846,7 +778,14 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
             }
             return std::nullopt;
         }
-        result.images[index].payload = std::move(image);
+        const auto& part = frame.parts[imagePlans[index].partIndex];
+        std::string name = part.name.empty() ? std::string("Intensity") : part.name;
+        const auto duplicates = std::count_if(imagePlans.begin(), imagePlans.end(), [&](const auto& candidate) {
+            const auto& other = frame.parts[candidate.partIndex];
+            return (other.name.empty() ? std::string("Intensity") : other.name) == name;
+        });
+        if (duplicates > 1) name += " " + std::to_string(index + 1);
+        result.addImage(resourceId("image", imagePlans[index].partIndex), std::move(image), name, kResourceGroup);
     }
     if (rangePlan)
     {
@@ -855,7 +794,7 @@ std::optional<GraphicsFrame> HeliotisC4GraphicsFrameAdapter::convertGraphicsFram
         {
             return std::nullopt;
         }
-        result.ranges.front().payload = std::move(*range);
+        result.addRange(resourceId("range", rangePlan->partIndex), std::move(*range), "Range", kResourceGroup);
     }
 
     auto published = std::move(frameBuilder).publish();

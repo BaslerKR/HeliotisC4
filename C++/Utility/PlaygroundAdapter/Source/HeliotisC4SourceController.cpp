@@ -215,12 +215,6 @@ void HeliotisC4SourceController::setFrameContextSource(std::shared_ptr<GraphicsF
     if (_graphicsStream) _graphicsStream->setFrameContextSource(std::move(source));
 }
 
-void HeliotisC4SourceController::setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider)
-{
-    if (!_graphicsStream) return;
-    _graphicsStream->setFrameStorageProvider(std::move(provider));
-}
-
 HeliotisC4SourceController::~HeliotisC4SourceController()
 {
     setControlBackend(nullptr);

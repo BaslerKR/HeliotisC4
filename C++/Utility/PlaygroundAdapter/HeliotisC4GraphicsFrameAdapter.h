@@ -11,7 +11,6 @@
 #include <mutex>
 #include <optional>
 
-class IFrameStorageProvider;
 class GraphicsFrameContextSource;
 
 namespace heliotis {
@@ -126,16 +125,8 @@ public:
         HeliotisRangeRejection& rangeRejection,
         HeliotisImageRejection& imageRejection) const;
 
-    /**
-     * @brief Sets the provider that leases one slot for every stored component of a frame.
-     *
-     * The range and every intensity image of a frame are planned and leased together through one
-     * request and written at the planned offsets of that single lease. A refused plan drops the
-     * frame; the adapter never retries component by component. A null provider restores ordinary
-     * per-component allocation.
-     */
+    /** Installs the source that admits one complete frame transaction. */
     void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source);
-    void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider);
 
 private:
     friend class GraphicsFrameAdapter<HeliotisC4GraphicsFrameAdapter, Frame>;
@@ -147,7 +138,6 @@ private:
         HeliotisImageRejection* imageRejection = nullptr) const;
 
     mutable std::mutex _storageMutex;
-    std::shared_ptr<IFrameStorageProvider> _provider;
     std::shared_ptr<GraphicsFrameContextSource> _contextSource;
 };
 

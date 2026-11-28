@@ -4,7 +4,7 @@
 # Repeat NAME=value to declare multiple environment paths for one variable.
 set(PLAYGROUND_PLUGIN_ID "heliotis-c4")
 set(PLAYGROUND_PLUGIN_VERSION "0.4.0")
-# Host-provided frame storage (IFrameStorageClient) and the image writer first ship in Core 0.7.0.
+# Host-provided frame storage (IFrameContextClient) and the image writer first ship in Core 0.7.0.
 set(PLAYGROUND_PLUGIN_MINIMUM_CORE_VERSION "0.7.0")
 set(PLAYGROUND_PLUGIN_DISPLAY_NAME "Heliotis C4")
 # Optional presentation metadata; consumers must export it to manifests/catalogs.
