@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Drop a frame refused by the frame context (ClassRefused or Capacity) without latching a refusal so the run continues and the next frame asks again, and skip only the image or range whose size overflows the frame total while recording it.
 - Admit each Heliotis frame through an injected whole-frame context, with acquisition fencing and explicit credit drop and refusal handling.
 
 - Drop the removed `GraphicsRangeFrameWriterFailure::MisalignedStorage` case and the unreachable `StorageMisaligned` range rejection in `HeliotisC4GraphicsFrameAdapter` and adopt `DevicePluginSessionCapability::GraphicsViewer`.
